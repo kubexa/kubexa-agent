@@ -1,0 +1,51 @@
+# Local dev: run `make run-dev-grpc`, then e.g.:
+#   kubexa-agent --config=config/example-local.yaml
+#   make run-local
+# Or copy to ./config/config.yaml / mount at /etc/kubexa/config.yaml and omit --config.
+
+clusterId: local-dev
+
+backend:
+  host: 127.0.0.1
+  port: 50051
+  tls: false
+  token: ""
+
+watch:
+  resyncInterval: 30s
+  # Namespaces listed under logs.targets are auto-added to informers if missing.
+  namespaces:
+    - namespace: default
+      labelSelector: ""
+
+logs:
+  enabled: true
+  bufferSize: 1000
+  targets:
+    - namespace: default
+      labelSelector: ""
+      containerNames: []
+
+# Outbound queue for pod events and logs: memory first; when capacity is reached and Redis is on, spillover goes to Redis.
+buffer:
+  memory:
+    # 0 = use logs.bufferSize as the in-memory cap per tier (pod / log).
+    capacity: 0
+    # Requeue limit after failed gRPC send before dead-letter (memory tier).
+    maxAttempts: 5
+  redis:
+    enabled: false
+    # When enabled, set host/port for your Redis (e.g. sidecar or managed Redis).
+    # host: redis.default.svc.cluster.local
+    # port: 6379
+    # password: prefer KUBEXA_REDIS_PASSWORD env over plain YAML in prod.
+    # db: 0
+
+grpc:
+  dialTimeout: 10s
+  # Use >= 5m against strict backends (GOAWAY "too_many_pings" if too low).
+  keepaliveTime: 5m
+  keepaliveTimeout: 20s
+  maxRetries: 10
+  retryBaseDelay: 1s
+  retryMaxDelay: 60s
