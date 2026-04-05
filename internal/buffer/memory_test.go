@@ -188,7 +188,11 @@ func TestMemoryBuffer_Nack_DeadLetterOnMaxAttempts(t *testing.T) {
 		DeadLetterSize: 5,
 	}
 	buf, _ := NewMemoryBuffer(cfg)
-	defer buf.Close()
+	t.Cleanup(func() {
+		if err := buf.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
 
 	item := newItem("dead-1", EventTypePod)
 	_ = buf.Push(ctx(), item)
