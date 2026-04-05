@@ -230,7 +230,11 @@ func (s *LogStreamer) readLogs(ctx context.Context, key streamKey) error {
 	if err != nil {
 		return err
 	}
-	defer stream.Close()
+	defer func() {
+		if cerr := stream.Close(); cerr != nil {
+			log.Warn().Err(cerr).Str("pod", key.pod).Str("container", key.container).Msg("log stream close")
+		}
+	}()
 
 	scanner := bufio.NewScanner(stream)
 	// increase buffer for large log lines (1MB)
