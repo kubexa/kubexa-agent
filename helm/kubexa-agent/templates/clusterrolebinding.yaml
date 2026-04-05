@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kubexa-agent.fullname" . }}
+  labels:
+    {{- include "kubexa-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kubexa-agent.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kubexa-agent.serviceAccountName" . }}
+    namespace: {{ include "kubexa-agent.namespace" . }}

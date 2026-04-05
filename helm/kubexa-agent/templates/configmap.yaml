@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: {{ include "kubexa-agent.namespace" . }}
+  name: {{ include "kubexa-agent.fullname" . }}-config
+  labels:
+    {{- include "kubexa-agent.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    clusterId: {{ required "agent.clusterId is required" .Values.agent.clusterId | quote }}
+
+    backend:
+      host: {{ required "agent.backend.host is required" .Values.agent.backend.host | quote }}
+      port: {{ .Values.agent.backend.port }}
+      tls: {{ .Values.agent.backend.tls }}
+
+    watch:
+      resyncInterval: {{ .Values.agent.watch.resyncInterval | quote }}
+      namespaces:
+        {{- range .Values.agent.watch.namespaces }}
+        - namespace: {{ .namespace | quote }}
+          labelSelector: {{ .labelSelector | default "" | quote }}
+        {{- end }}
+
+    logs:
+      enabled: {{ .Values.agent.logs.enabled }}
+      bufferSize: {{ .Values.agent.logs.bufferSize }}
+      targets:
+        {{- if .Values.agent.logs.targets }}
+        {{- range .Values.agent.logs.targets }}
+        - namespace: {{ .namespace | quote }}
+          labelSelector: {{ .labelSelector | default "" | quote }}
+          containerNames:
+            {{- if .containerNames }}
+            {{- range .containerNames }}
+            - {{ . | quote }}
+            {{- end }}
+            {{- else }}
+            []
+            {{- end }}
+        {{- end }}
+        {{- else }}
+        []
+        {{- end }}
+
+    buffer:
+      {{- $bufMem := .Values.agent.buffer.memory | default dict }}
+      memory:
+        capacity: {{ $bufMem.capacity | default 0 }}
+        maxAttempts: {{ $bufMem.maxAttempts | default 5 }}
+      redis:
+        enabled: {{ .Values.agent.buffer.redis.enabled }}
+        host: {{ .Values.agent.buffer.redis.host | quote }}
+        port: {{ .Values.agent.buffer.redis.port }}
+        db: {{ .Values.agent.buffer.redis.db }}
+
+    grpc:
+      dialTimeout: {{ .Values.agent.grpc.dialTimeout | quote }}
+      keepaliveTime: {{ .Values.agent.grpc.keepaliveTime | quote }}
+      keepaliveTimeout: {{ .Values.agent.grpc.keepaliveTimeout | quote }}
+      maxRetries: {{ .Values.agent.grpc.maxRetries }}
+      retryBaseDelay: {{ .Values.agent.grpc.retryBaseDelay | quote }}
+      retryMaxDelay: {{ .Values.agent.grpc.retryMaxDelay | quote }}

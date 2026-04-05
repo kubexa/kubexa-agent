@@ -1,0 +1,147 @@
+syntax = "proto3";
+
+package agent.v1;
+
+option go_package = "github.com/kubexa/kubexa-agent/gen/agent/v1;agentv1";
+
+// ─────────────────────────────────────────
+// Service
+// ─────────────────────────────────────────
+
+service AgentService {
+  // Agent → Backend: stream pod events
+  rpc StreamPodEvents(stream PodEvent) returns (Ack);
+
+  // Agent → Backend: stream log chunks
+  rpc StreamLogs(stream LogChunk) returns (Ack);
+
+  // Backend → Agent: runtime config push (ready for MVP+)
+  rpc WatchConfig(ConfigRequest) returns (stream AgentConfig);
+
+  // Backend → Agent (requests) / Agent → Backend (responses): list namespaces and pods on demand.
+  // The backend sends List*Request envelopes; the agent answers with the matching *_result using the same request_id.
+  rpc AgentControl(stream AgentControlMessage) returns (stream AgentControlMessage);
+}
+
+// ─────────────────────────────────────────
+// Control / query (backend asks, agent answers)
+// ─────────────────────────────────────────
+
+message AgentControlMessage {
+  string request_id = 1;
+
+  oneof msg {
+    ListNamespacesRequest list_namespaces_req = 2;
+    ListPodsRequest list_pods_req = 3;
+    ListNamespacesResponse list_namespaces_resp = 10;
+    ListPodsResponse list_pods_resp = 11;
+  }
+}
+
+message ListNamespacesRequest {}
+
+message ListNamespacesResponse {
+  repeated string namespaces = 1;
+  string error = 2;
+}
+
+message ListPodsRequest {
+  string namespace = 1;
+  // Standard Kubernetes label selector (e.g. "app=myapp").
+  string label_selector = 2;
+}
+
+message PodSummary {
+  string name = 1;
+  string namespace = 2;
+  string phase = 3;
+  map<string, string> labels = 4;
+  string resource_version = 5;
+  string node_name = 6;
+}
+
+message ListPodsResponse {
+  repeated PodSummary pods = 1;
+  string error = 2;
+}
+
+// ─────────────────────────────────────────
+// Pod Events
+// ─────────────────────────────────────────
+
+message PodEvent {
+  string cluster_id        = 1;
+  string namespace         = 2;
+  string pod_name          = 3;
+  string phase             = 4; // Pending, Running, Succeeded, Failed, Unknown
+  string event_type        = 5; // ADDED, MODIFIED, DELETED
+  int64  timestamp         = 6; // unix milliseconds
+  map<string, string> labels      = 7;
+  map<string, string> annotations = 8;
+  repeated ContainerStatus containers = 9;
+
+  // metadata.resourceVersion of the pod after this event (new object).
+  string resource_version = 10;
+  // On MODIFIED: status.phase on the previous object (informer oldObj).
+  string previous_phase = 11;
+  // Short human-readable deltas, e.g. "labels.app: v1 -> v2", "container.app.ready: false -> true".
+  repeated string change_hints = 12;
+  // spec.nodeName of the pod after this event (scheduling / running location).
+  string node_name = 13;
+}
+
+message ContainerStatus {
+  string name         = 1;
+  bool   ready        = 2;
+  int32  restart_count = 3;
+  string image        = 4;
+  string state        = 5; // running, waiting, terminated (running, waiting, terminated)
+  string reason       = 6; // CrashLoopBackOff, OOMKilled vs. (CrashLoopBackOff, OOMKilled)
+}
+
+// ─────────────────────────────────────────
+// Log Streaming
+// ─────────────────────────────────────────
+
+message LogChunk {
+  string cluster_id  = 1;
+  string namespace   = 2;
+  string pod_name    = 3;
+  string container   = 4;
+  string line        = 5;
+  int64  timestamp   = 6; // unix milliseconds
+}
+
+// ─────────────────────────────────────────
+// Config (MVP+ - WatchConfig ready for MVP+)
+// ─────────────────────────────────────────
+
+message ConfigRequest {
+  string cluster_id = 1;
+  string agent_version = 2;
+}
+
+message AgentConfig {
+  repeated WatchNamespace watch_namespaces = 1;
+  repeated LogTarget      log_targets      = 2;
+}
+
+message WatchNamespace {
+  string namespace      = 1;
+  string label_selector = 2; // optional, empty = all
+}
+
+message LogTarget {
+  string namespace      = 1;
+  string label_selector = 2;
+  repeated string container_names = 3; // empty = all containers
+}
+
+// ─────────────────────────────────────────
+// Common
+// ─────────────────────────────────────────
+
+message Ack {
+  bool   ok      = 1;
+  string message = 2; // detail in case of error
+}
