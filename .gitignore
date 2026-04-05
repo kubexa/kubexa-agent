@@ -30,4 +30,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
-config/
+
+# Repo-root local config only (secrets); do not use bare "config/" — it ignores internal/config/.
+/config/config.yaml
