@@ -1,0 +1,16 @@
+apiVersion: v2
+name: kubexa-agent
+description: Kubexa Kubernetes monitoring agent
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - monitoring
+  - kubexa
+home: https://github.com/kubexa/kubexa-agent
+sources:
+  - https://github.com/kubexa/kubexa-agent
+maintainers:
+  - name: kubexa
+    email: info@kubexa.io

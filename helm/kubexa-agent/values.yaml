@@ -1,0 +1,83 @@
+nameOverride: ""
+fullnameOverride: ""
+namespace: ""
+
+agent:
+  clusterId: ""  # required, helm install --set agent.clusterId=prod-01
+  backend:
+    host: ""     # required
+    port: 443
+    tls: true
+
+  watch:
+    resyncInterval: 30s
+    namespaces:
+      - namespace: default
+        labelSelector: ""  # empty = all
+
+  logs:
+    enabled: true
+    bufferSize: 1000
+    targets: []
+    # example:
+    # - namespace: production
+    #   labelSelector: "tier=backend"
+    #   containerNames: []
+
+  grpc:
+    dialTimeout: 10s
+    # Avoid GOAWAY ENHANCE_YOUR_CALM "too_many_pings" on strict gRPC servers / LBs (MinPing ~5m).
+    keepaliveTime: 5m
+    keepaliveTimeout: 20s
+    maxRetries: 10
+    retryBaseDelay: 1s
+    retryMaxDelay: 60s
+
+  buffer:
+    memory:
+      # 0 = use logs.bufferSize as in-memory capacity for each spillover (pod + log).
+      capacity: 0
+      maxAttempts: 5
+    redis:
+      enabled: false
+      host: localhost
+      port: 6379
+      db: 0
+
+# secrets.* → templates/secret.yaml (grpc-token, redis-password). Override with --set or external Secret workflow.
+# Agent reads token/password from env KUBEXA_GRPC_TOKEN / KUBEXA_REDIS_PASSWORD (see internal/config).
+
+image:
+  repository: kubexa/kubexa-agent
+  tag: ""  # default: Chart.appVersion
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+serviceAccount:
+  create: true
+  name: kubexa-agent
+
+# redis sidecar (buffer.redis.enabled: true is active)
+redis:
+  image: redis:8.6.2-alpine
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 50m
+      memory: 64Mi
+
+secrets:
+  grpcToken: ""
+  redisPassword: ""
+
+healthCheck:
+  enabled: false  # for MVP+ add HTTP /healthz endpoint

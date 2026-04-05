@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: {{ include "kubexa-agent.namespace" . }}
+  name: {{ include "kubexa-agent.fullname" . }}
+  labels:
+    {{- include "kubexa-agent.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "kubexa-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubexa-agent.selectorLabels" . | nindent 8 }}
+      annotations:
+        # config değişince pod restart olsun
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "kubexa-agent.serviceAccountName" . }}
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+
+      containers:
+        # ─────────────────────────────────────────
+        # Main: kubexa-agent
+        # ─────────────────────────────────────────
+        - name: kubexa-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          args:
+            - --config=/etc/kubexa/config.yaml
+
+          env:
+            - name: KUBEXA_GRPC_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kubexa-agent.fullname" . }}-secret
+                  key: grpc-token
+                  optional: true
+
+            {{- if .Values.agent.buffer.redis.enabled }}
+            - name: KUBEXA_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kubexa-agent.fullname" . }}-secret
+                  key: redis-password           # secret'taki key
+                  optional: true
+            {{- end }}
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kubexa
+              readOnly: true
+
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "true"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "true"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+        # ─────────────────────────────────────────
+        # Sidecar: Redis (optional)
+        # ─────────────────────────────────────────
+      {{- if .Values.agent.buffer.redis.enabled }}
+        - name: redis
+          image: {{ .Values.redis.image }}
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)  # env'den okur
+
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kubexa-agent.fullname" . }}-secret
+                  key: redis-password
+                  optional: true
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kubexa-agent.fullname" . }}-secret
+                  key: redis-password
+                  optional: true
+
+          ports:
+            - containerPort: 6379
+              protocol: TCP
+
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+        {{- end }}
+
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "kubexa-agent.fullname" . }}-config
+
+      terminationGracePeriodSeconds: 30

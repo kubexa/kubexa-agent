@@ -1,0 +1,21 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kubexa-agent.fullname" . }}
+  labels:
+    {{- include "kubexa-agent.labels" . | nindent 4 }}
+rules:
+  # Pod watch + list (informer requires both)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Pod log streaming
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+  # Namespace listing (AgentControl: ListNamespaces)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
