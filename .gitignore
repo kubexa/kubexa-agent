@@ -33,3 +33,6 @@ go.work.sum
 
 # Repo-root local config only (secrets); do not use bare "config/" — it ignores internal/config/.
 /config/config.yaml
+
+# Helm: local overrides (copy from my-values.example.yaml; may contain tokens)
+temp/
