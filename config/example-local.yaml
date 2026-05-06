@@ -15,14 +15,14 @@ watch:
   resyncInterval: 30s
   # Namespaces listed under logs.targets are auto-added to informers if missing.
   namespaces:
-    - namespace: default
+    - namespace: stage
       labelSelector: ""
 
 logs:
   enabled: true
   bufferSize: 1000
   targets:
-    - namespace: default
+    - namespace: stage
       labelSelector: ""
       containerNames: []
 

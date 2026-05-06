@@ -1,0 +1,56 @@
+name: Helm OCI Release
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "helm/**"
+      - ".github/workflows/helm-oci-release.yaml"
+
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write   # GHCR push için gerekli
+
+    env:
+      CHART_PATH: helm/kubexa-agent
+      REGISTRY: ghcr.io
+      IMAGE_NAMESPACE: ${{ github.repository_owner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v5
+
+      - name: Enable OCI
+        run: |
+          helm registry login $REGISTRY \
+            -u ${{ github.actor }} \
+            -p ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lint chart
+        run: helm lint $CHART_PATH
+
+      - name: Get chart version
+        id: chart_version
+        run: |
+          VERSION=$(grep '^version:' $CHART_PATH/Chart.yaml | awk '{print $2}')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Package chart
+        run: |
+          mkdir -p dist
+          helm package $CHART_PATH \
+            --destination dist \
+            --version ${{ steps.chart_version.outputs.version }}
+
+      - name: Push to GHCR (OCI)
+        run: |
+          helm push dist/*.tgz oci://$REGISTRY/${IMAGE_NAMESPACE}/charts
