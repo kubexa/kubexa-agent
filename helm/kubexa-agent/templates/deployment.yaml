@@ -15,7 +15,7 @@ spec:
       labels:
         {{- include "kubexa-agent.selectorLabels" . | nindent 8 }}
       annotations:
-        # config değişince pod restart olsun
+        # config change pod will restart when it changes
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "kubexa-agent.serviceAccountName" . }}
