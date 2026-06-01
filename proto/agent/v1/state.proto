@@ -1,0 +1,33 @@
+syntax = "proto3";
+package agent.v1;
+
+option go_package = "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1";
+
+message StateEvent {
+  EventType        type   = 1;
+  ResourceKind     kind   = 2;
+  string           name   = 3;
+  string           namespace = 4;
+  bytes            object = 5; // JSON encoded kubernetes object
+  int64            timestamp = 6;
+  map<string, string> labels = 7;
+}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_ADDED       = 1;
+  EVENT_TYPE_MODIFIED    = 2;
+  EVENT_TYPE_DELETED     = 3;
+}
+
+enum ResourceKind {
+  RESOURCE_KIND_UNSPECIFIED  = 0;
+  RESOURCE_KIND_POD          = 1;
+  RESOURCE_KIND_SERVICE      = 2;
+  RESOURCE_KIND_SECRET       = 3;
+  RESOURCE_KIND_DEPLOYMENT   = 4;
+  RESOURCE_KIND_NODE         = 5;
+  RESOURCE_KIND_NAMESPACE    = 6;
+  RESOURCE_KIND_CONFIGMAP    = 7;
+  RESOURCE_KIND_INGRESS      = 8;
+}

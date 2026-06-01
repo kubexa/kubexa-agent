@@ -1,0 +1,27 @@
+syntax = "proto3";
+package agent.v1;
+
+option go_package = "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1";
+
+message LogBatch {
+  repeated LogEntry entries = 1;
+}
+
+message LogEntry {
+  string pod_name       = 1;
+  string namespace      = 2;
+  string container      = 3;
+  int64  timestamp      = 4; // unix nanoseconds
+  string message        = 5;
+  LogLevel level        = 6;
+  map<string, string> labels = 7;  // pod labels passthrough
+  bytes  raw            = 8;       // original bytes, format bozuk ise
+}
+
+enum LogLevel {
+  LOG_LEVEL_UNSPECIFIED = 0;
+  LOG_LEVEL_DEBUG       = 1;
+  LOG_LEVEL_INFO        = 2;
+  LOG_LEVEL_WARN        = 3;
+  LOG_LEVEL_ERROR       = 4;
+}
