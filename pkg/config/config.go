@@ -1,0 +1,325 @@
+// Package config loads and validates kubexa-agent runtime configuration.
+package config
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	defaultReconnectInitialDelay = 2 * time.Second
+	defaultReconnectMaxDelay     = 60 * time.Second
+	defaultDialTimeout           = 10 * time.Second
+	defaultHandshakeTimeout      = 10 * time.Second
+	defaultTailLines             = int64(100)
+	defaultStateResyncPeriod     = 5 * time.Minute
+	defaultMaxMemoryBytes        = 64 << 20  // 64 MiB
+	defaultMaxDiskBytes          = 512 << 20 // 512 MiB
+	defaultBatchSize             = 100
+	defaultFlushInterval         = time.Second
+	defaultMetricsAddr           = ":9090"
+	defaultHealthAddr            = ":8080"
+	defaultLogLevel              = "info"
+	defaultLogFormat             = "json"
+)
+
+var defaultStateResources = []string{"pods", "services", "secrets", "deployments"}
+
+// Config is the root configuration for kubexa-agent.
+type Config struct {
+	Agent         AgentConfig         `yaml:"agent"`
+	Gateway       GatewayConfig       `yaml:"gateway"`
+	Collect       CollectConfig       `yaml:"collect"`
+	Buffer        BufferConfig        `yaml:"buffer"`
+	Observability ObservabilityConfig `yaml:"observability"`
+	Log           LogConfig           `yaml:"log"`
+}
+
+// AgentConfig identifies the agent instance and tenant.
+type AgentConfig struct {
+	// TenantToken authenticates the agent with the Kubexa gateway (required).
+	TenantToken string `yaml:"tenant_token"`
+	// AgentID uniquely identifies this agent process; generated when empty.
+	AgentID string `yaml:"agent_id"`
+	// ClusterID identifies the Kubernetes cluster; resolved from kube-system when empty.
+	ClusterID string `yaml:"cluster_id"`
+}
+
+// GatewayConfig controls connectivity to the Kubexa gateway.
+type GatewayConfig struct {
+	Address               string        `yaml:"address"`
+	TLS                   bool          `yaml:"tls"`
+	InsecureSkipVerify    bool          `yaml:"insecure_skip_verify"`
+	CACertPath            string        `yaml:"ca_cert_path"`
+	ReconnectInitialDelay time.Duration `yaml:"reconnect_initial_delay"`
+	ReconnectMaxDelay     time.Duration `yaml:"reconnect_max_delay"`
+	DialTimeout           time.Duration `yaml:"dial_timeout"`
+	HandshakeTimeout      time.Duration `yaml:"handshake_timeout"`
+}
+
+// CollectConfig groups all data collection settings.
+type CollectConfig struct {
+	Logs    LogsCollectConfig    `yaml:"logs"`
+	State   StateCollectConfig   `yaml:"state"`
+	Metrics MetricsCollectConfig `yaml:"metrics"`
+}
+
+// LogsCollectConfig configures Kubernetes log collection.
+type LogsCollectConfig struct {
+	Enabled    bool             `yaml:"enabled"`
+	Namespaces []string         `yaml:"namespaces"`
+	Selectors  []SelectorConfig `yaml:"selectors"`
+	TailLines  int64            `yaml:"tail_lines"`
+}
+
+// StateCollectConfig configures Kubernetes object state collection.
+type StateCollectConfig struct {
+	Enabled      bool          `yaml:"enabled"`
+	Namespaces   []string      `yaml:"namespaces"`
+	Resources    []string      `yaml:"resources"`
+	ResyncPeriod time.Duration `yaml:"resync_period"`
+}
+
+// MetricsCollectConfig configures metrics collection.
+type MetricsCollectConfig struct {
+	Enabled         bool                   `yaml:"enabled"`
+	KubeMetrics     bool                   `yaml:"kube_metrics"`
+	CustomEndpoints []MetricEndpointConfig `yaml:"custom_endpoints"`
+}
+
+// SelectorConfig narrows log collection to specific workloads.
+type SelectorConfig struct {
+	Namespace     string   `yaml:"namespace"`
+	LabelSelector string   `yaml:"label_selector"`
+	Containers    []string `yaml:"containers"`
+}
+
+// MetricEndpointConfig defines a scrape target for custom metrics.
+type MetricEndpointConfig struct {
+	Name        string            `yaml:"name"`
+	URL         string            `yaml:"url"`
+	Interval    time.Duration     `yaml:"interval"`
+	ExtraLabels map[string]string `yaml:"extra_labels"`
+}
+
+// BufferConfig controls in-memory and on-disk buffering before export.
+type BufferConfig struct {
+	MaxMemoryBytes int64         `yaml:"max_memory_bytes"`
+	SpillDir       string        `yaml:"spill_dir"`
+	MaxDiskBytes   int64         `yaml:"max_disk_bytes"`
+	BatchSize      int           `yaml:"batch_size"`
+	FlushInterval  time.Duration `yaml:"flush_interval"`
+}
+
+// ObservabilityConfig exposes agent self-metrics and health endpoints.
+type ObservabilityConfig struct {
+	MetricsAddr string `yaml:"metrics_addr"`
+	HealthAddr  string `yaml:"health_addr"`
+}
+
+// LogConfig configures the agent process logger.
+type LogConfig struct {
+	Level  string `yaml:"level"`
+	Format string `yaml:"format"`
+}
+
+// NamespaceUIDGetter resolves a Kubernetes namespace UID by name.
+type NamespaceUIDGetter interface {
+	NamespaceUID(ctx context.Context, name string) (string, error)
+}
+
+// Default returns a fully populated configuration with documented defaults.
+func Default() *Config {
+	resources := make([]string, len(defaultStateResources))
+	copy(resources, defaultStateResources)
+
+	return &Config{
+		Agent: AgentConfig{},
+		Gateway: GatewayConfig{
+			TLS:                   true,
+			InsecureSkipVerify:    false,
+			ReconnectInitialDelay: defaultReconnectInitialDelay,
+			ReconnectMaxDelay:     defaultReconnectMaxDelay,
+			DialTimeout:           defaultDialTimeout,
+			HandshakeTimeout:      defaultHandshakeTimeout,
+		},
+		Collect: CollectConfig{
+			Logs: LogsCollectConfig{
+				Enabled:   true,
+				TailLines: defaultTailLines,
+			},
+			State: StateCollectConfig{
+				Enabled:      true,
+				Resources:    resources,
+				ResyncPeriod: defaultStateResyncPeriod,
+			},
+			Metrics: MetricsCollectConfig{
+				Enabled:     true,
+				KubeMetrics: true,
+			},
+		},
+		Buffer: BufferConfig{
+			MaxMemoryBytes: defaultMaxMemoryBytes,
+			MaxDiskBytes:   defaultMaxDiskBytes,
+			BatchSize:      defaultBatchSize,
+			FlushInterval:  defaultFlushInterval,
+		},
+		Observability: ObservabilityConfig{
+			MetricsAddr: defaultMetricsAddr,
+			HealthAddr:  defaultHealthAddr,
+		},
+		Log: LogConfig{
+			Level:  defaultLogLevel,
+			Format: defaultLogFormat,
+		},
+	}
+}
+
+// Load reads configuration from path (when non-empty), applies environment overrides,
+// ensures agent_id is set, and validates the result.
+func Load(path string) (*Config, error) {
+	cfg := Default()
+
+	if path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read config file %q: %w", path, err)
+		}
+		if err := yaml.Unmarshal(data, cfg); err != nil {
+			return nil, fmt.Errorf("parse config YAML: %w", err)
+		}
+	}
+
+	applyEnvOverrides(cfg)
+	cfg.EnsureAgentID()
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validate config: %w", err)
+	}
+
+	return cfg, nil
+}
+
+// EnsureAgentID assigns a new UUID to agent.agent_id when it is empty.
+func (c *Config) EnsureAgentID() {
+	if c == nil || c.Agent.AgentID != "" {
+		return
+	}
+	c.Agent.AgentID = uuid.NewString()
+}
+
+// EnsureClusterID sets agent.cluster_id from the kube-system namespace UID when unset.
+func (c *Config) EnsureClusterID(ctx context.Context, getter NamespaceUIDGetter) error {
+	if c == nil {
+		return errors.New("config is nil")
+	}
+	if c.Agent.ClusterID != "" {
+		return nil
+	}
+	if getter == nil {
+		return errors.New("cluster_id is empty and namespace UID getter is nil")
+	}
+
+	uid, err := getter.NamespaceUID(ctx, "kube-system")
+	if err != nil {
+		return fmt.Errorf("resolve cluster_id from kube-system: %w", err)
+	}
+	if uid == "" {
+		return errors.New("kube-system namespace UID is empty")
+	}
+
+	c.Agent.ClusterID = uid
+	return nil
+}
+
+// Validate checks required fields and collection settings.
+func (c *Config) Validate() error {
+	if c == nil {
+		return &ValidationError{Violations: []string{"config is nil"}}
+	}
+
+	var violations []string
+
+	if strings.TrimSpace(c.Agent.TenantToken) == "" {
+		violations = append(violations, "agent.tenant_token must not be empty")
+	}
+	if strings.TrimSpace(c.Gateway.Address) == "" {
+		violations = append(violations, "gateway.address must not be empty")
+	}
+	if c.Gateway.TLS && c.Gateway.InsecureSkipVerify {
+		violations = append(violations, "gateway.insecure_skip_verify is only allowed when gateway.tls is false")
+	}
+	if c.Buffer.BatchSize <= 0 {
+		violations = append(violations, "buffer.batch_size must be greater than 0")
+	}
+	if c.Buffer.MaxMemoryBytes <= 0 {
+		violations = append(violations, "buffer.max_memory_bytes must be greater than 0")
+	}
+	if !c.Collect.Logs.Enabled && !c.Collect.State.Enabled && !c.Collect.Metrics.Enabled {
+		violations = append(violations, "at least one of collect.logs, collect.state, or collect.metrics must be enabled")
+	}
+
+	if len(violations) == 0 {
+		return nil
+	}
+	return &ValidationError{Violations: violations}
+}
+
+// ValidationError aggregates configuration validation failures.
+type ValidationError struct {
+	Violations []string
+}
+
+// Error returns all validation violations in a single message.
+func (e *ValidationError) Error() string {
+	if e == nil || len(e.Violations) == 0 {
+		return "invalid configuration"
+	}
+	return "invalid configuration: " + strings.Join(e.Violations, "; ")
+}
+
+// Redacted returns a copy of the configuration with sensitive fields masked.
+func (c *Config) Redacted() *Config {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	if out.Agent.TenantToken != "" {
+		out.Agent.TenantToken = "***"
+	}
+	return &out
+}
+
+// String returns a YAML representation with sensitive fields redacted.
+func (c *Config) String() string {
+	data, err := yaml.Marshal(c.Redacted())
+	if err != nil {
+		return fmt.Sprintf("config: marshal error: %v", err)
+	}
+	return string(data)
+}
+
+func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("KUBEXA_TENANT_TOKEN"); v != "" {
+		cfg.Agent.TenantToken = v
+	}
+	if v := os.Getenv("KUBEXA_AGENT_ID"); v != "" {
+		cfg.Agent.AgentID = v
+	}
+	if v := os.Getenv("KUBEXA_CLUSTER_ID"); v != "" {
+		cfg.Agent.ClusterID = v
+	}
+	if v := os.Getenv("KUBEXA_GATEWAY_ADDRESS"); v != "" {
+		cfg.Gateway.Address = v
+	}
+	if v := os.Getenv("KUBEXA_LOG_LEVEL"); v != "" {
+		cfg.Log.Level = v
+	}
+}
