@@ -1,147 +1,130 @@
 syntax = "proto3";
-
 package agent.v1;
 
-option go_package = "github.com/kubexa/kubexa-agent/gen/agent/v1;agentv1";
+import "proto/agent/v1/log.proto";
+import "proto/agent/v1/state.proto";
+import "proto/agent/v1/metric.proto";
+import "proto/common/v1/metadata.proto";
 
-// ─────────────────────────────────────────
-// Service
-// ─────────────────────────────────────────
+option go_package = "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1";
 
 service AgentService {
-  // Agent → Backend: stream pod events
-  rpc StreamPodEvents(stream PodEvent) returns (Ack);
-
-  // Agent → Backend: stream log chunks
-  rpc StreamLogs(stream LogChunk) returns (Ack);
-
-  // Backend → Agent: runtime config push (ready for MVP+)
-  rpc WatchConfig(ConfigRequest) returns (stream AgentConfig);
-
-  // Backend → Agent (requests) / Agent → Backend (responses): list namespaces and pods on demand.
-  // The backend sends List*Request envelopes; the agent answers with the matching *_result using the same request_id.
-  rpc AgentControl(stream AgentControlMessage) returns (stream AgentControlMessage);
+  // Bidirectional stream:
+  // Agent → Gateway: log/state/metric verisi
+  // Gateway → Agent: config update, ack, backpressure, shutdown
+  rpc Connect(stream AgentMessage) returns (stream GatewayMessage);
 }
 
-// ─────────────────────────────────────────
-// Control / query (backend asks, agent answers)
-// ─────────────────────────────────────────
+// ─── Agent → Gateway ────────────────────────────────────────────────────────
 
-message AgentControlMessage {
-  string request_id = 1;
+message AgentMessage {
+  string                  message_id = 1; // idempotency key (uuid)
+  common.v1.AgentMetadata meta       = 2;
 
-  oneof msg {
-    ListNamespacesRequest list_namespaces_req = 2;
-    ListPodsRequest list_pods_req = 3;
-    ListNamespacesResponse list_namespaces_resp = 10;
-    ListPodsResponse list_pods_resp = 11;
+  oneof payload {
+    HandshakeRequest   handshake = 3;
+    LogBatch           logs      = 4;
+    StateEvent         state     = 5;
+    MetricBatch        metrics   = 6;
+    Heartbeat          heartbeat = 7;
   }
 }
 
-message ListNamespacesRequest {}
-
-message ListNamespacesResponse {
-  repeated string namespaces = 1;
-  string error = 2;
+message HandshakeRequest {
+  string            agent_version = 1; // semver "1.2.3"
+  string            proto_version = 2; // "v1"
+  string            cluster_id    = 3;
+  string            tenant_token  = 4; // auth token
+  AgentCapabilities caps          = 5;
 }
 
-message ListPodsRequest {
-  string namespace = 1;
-  // Standard Kubernetes label selector (e.g. "app=myapp").
-  string label_selector = 2;
+message AgentCapabilities {
+  bool logs    = 1;
+  bool state   = 2;
+  bool metrics = 3;
 }
 
-message PodSummary {
-  string name = 1;
-  string namespace = 2;
-  string phase = 3;
-  map<string, string> labels = 4;
-  string resource_version = 5;
-  string node_name = 6;
+message Heartbeat {
+  int64       timestamp_unix_ms = 1;
+  AgentHealth health            = 2;
 }
 
-message ListPodsResponse {
-  repeated PodSummary pods = 1;
-  string error = 2;
+message AgentHealth {
+  int64  queue_depth      = 1;
+  int64  dropped_messages = 2;
+  string status           = 3; // "healthy" | "degraded" | "overloaded"
 }
 
-// ─────────────────────────────────────────
-// Pod Events
-// ─────────────────────────────────────────
+// ─── Gateway → Agent ────────────────────────────────────────────────────────
 
-message PodEvent {
-  string cluster_id        = 1;
-  string namespace         = 2;
-  string pod_name          = 3;
-  string phase             = 4; // Pending, Running, Succeeded, Failed, Unknown
-  string event_type        = 5; // ADDED, MODIFIED, DELETED
-  int64  timestamp         = 6; // unix milliseconds
-  map<string, string> labels      = 7;
-  map<string, string> annotations = 8;
-  repeated ContainerStatus containers = 9;
+message GatewayMessage {
+  string message_id = 1;
 
-  // metadata.resourceVersion of the pod after this event (new object).
-  string resource_version = 10;
-  // On MODIFIED: status.phase on the previous object (informer oldObj).
-  string previous_phase = 11;
-  // Short human-readable deltas, e.g. "labels.app: v1 -> v2", "container.app.ready: false -> true".
-  repeated string change_hints = 12;
-  // spec.nodeName of the pod after this event (scheduling / running location).
-  string node_name = 13;
+  oneof payload {
+    HandshakeResponse  handshake    = 2;
+    Ack                ack          = 3;
+    ConfigUpdate       config       = 4;
+    BackpressureSignal backpressure = 5;
+    Shutdown           shutdown     = 6;
+  }
 }
 
-message ContainerStatus {
-  string name         = 1;
-  bool   ready        = 2;
-  int32  restart_count = 3;
-  string image        = 4;
-  string state        = 5; // running, waiting, terminated (running, waiting, terminated)
-  string reason       = 6; // CrashLoopBackOff, OOMKilled vs. (CrashLoopBackOff, OOMKilled)
+message HandshakeResponse {
+  bool           accepted         = 1;
+  string         session_id       = 2;
+  string         server_version   = 3;
+  string         rejection_reason = 4; // accepted=false ise dolu
+  ConfigSnapshot config           = 5; // initial config
 }
-
-// ─────────────────────────────────────────
-// Log Streaming
-// ─────────────────────────────────────────
-
-message LogChunk {
-  string cluster_id  = 1;
-  string namespace   = 2;
-  string pod_name    = 3;
-  string container   = 4;
-  string line        = 5;
-  int64  timestamp   = 6; // unix milliseconds
-}
-
-// ─────────────────────────────────────────
-// Config (MVP+ - WatchConfig ready for MVP+)
-// ─────────────────────────────────────────
-
-message ConfigRequest {
-  string cluster_id = 1;
-  string agent_version = 2;
-}
-
-message AgentConfig {
-  repeated WatchNamespace watch_namespaces = 1;
-  repeated LogTarget      log_targets      = 2;
-}
-
-message WatchNamespace {
-  string namespace      = 1;
-  string label_selector = 2; // optional, empty = all
-}
-
-message LogTarget {
-  string namespace      = 1;
-  string label_selector = 2;
-  repeated string container_names = 3; // empty = all containers
-}
-
-// ─────────────────────────────────────────
-// Common
-// ─────────────────────────────────────────
 
 message Ack {
-  bool   ok      = 1;
-  string message = 2; // detail in case of error
+  repeated string message_ids = 1; // batch ack
+}
+
+message BackpressureSignal {
+  bool  throttle = 1;
+  int32 delay_ms = 2;
+}
+
+message Shutdown {
+  string reason = 1;
+}
+
+// ─── Config ─────────────────────────────────────────────────────────────────
+
+message ConfigUpdate {
+  string         config_version = 1;
+  ConfigSnapshot config         = 2;
+}
+
+message ConfigSnapshot {
+  repeated LogCollectorConfig  log_collectors   = 1;
+  repeated WatcherConfig       watchers         = 2;
+  repeated MetricScrapeConfig  metric_scrapers  = 3;
+  int32                        heartbeat_interval_sec = 4;
+  int32                        batch_size             = 5;
+  int32                        flush_interval_ms      = 6;
+}
+
+message LogCollectorConfig {
+  string            id            = 1;
+  string            namespace     = 2;
+  repeated string   pod_selectors = 3; // label selectors
+  repeated string   containers    = 4; // boş ise tümü
+  bool              follow        = 5;
+  int32             tail_lines    = 6;
+}
+
+message WatcherConfig {
+  string                 id        = 1;
+  string                 namespace = 2; // boş ise tüm namespace
+  repeated ResourceKind  kinds     = 3;
+  int32                  resync_sec = 4;
+}
+
+message MetricScrapeConfig {
+  string id              = 1;
+  string endpoint        = 2; // scrape URL
+  int32  interval_sec    = 3;
+  map<string, string> extra_labels = 4;
 }

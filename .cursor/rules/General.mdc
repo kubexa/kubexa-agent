@@ -1,0 +1,12 @@
+---
+alwaysApply: true
+---
+
+- Production-grade, senior Go developer seviyesinde kod
+- Her exported type ve function için godoc comment
+- Error wrapping ile fmt.Errorf ve %w
+- context.Context propagation her fonksiyonda
+- Interface-driven, test edilebilir tasarım
+- Structured logging zerolog ile
+- Prometheus metrics
+- Graceful shutdown desteği
