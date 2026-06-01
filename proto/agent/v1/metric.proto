@@ -1,0 +1,29 @@
+syntax = "proto3";
+package agent.v1;
+
+option go_package = "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1";
+
+message MetricBatch {
+  repeated MetricFamily families = 1;
+}
+
+message MetricFamily {
+  string           name    = 1;
+  string           help    = 2;
+  MetricType       type    = 3;
+  repeated Metric  metrics = 4;
+}
+
+message Metric {
+  map<string, string> labels    = 1;
+  double              value     = 2;
+  int64               timestamp = 3; // unix milliseconds
+}
+
+enum MetricType {
+  METRIC_TYPE_UNSPECIFIED = 0;
+  METRIC_TYPE_GAUGE       = 1;
+  METRIC_TYPE_COUNTER     = 2;
+  METRIC_TYPE_HISTOGRAM   = 3;
+  METRIC_TYPE_SUMMARY     = 4;
+}

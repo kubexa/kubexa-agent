@@ -1,8 +1,9 @@
 BINARY_NAME     := kubexa-agent
 MODULE          := github.com/kubexa/kubexa-agent
 PROTO_DIR       := proto
-GEN_DIR         := gen
+GEN_DIR         := proto/gen/go
 PROTO_FILE      := $(PROTO_DIR)/agent/v1/agent.proto
+PROTO_FILES     := $(PROTO_DIR)/agent/v1/*.proto $(PROTO_DIR)/common/v1/*.proto
 
 GO_BUILD_FLAGS  := -ldflags="-s -w"
 DOCKER_IMAGE    := kubexa/kubexa-agent
@@ -18,14 +19,15 @@ all: proto build
 
 proto: ## generate protobuf files using protoc
 	@echo "→ generating proto..."
-	@mkdir -p $(GEN_DIR)/agent/v1
+	@rm -rf gen
+	@mkdir -p $(GEN_DIR)/agent/v1 $(GEN_DIR)/common/v1
 	protoc \
-		--proto_path=$(PROTO_DIR) \
-		--go_out=$(GEN_DIR) \
-		--go_opt=paths=source_relative \
-		--go-grpc_out=$(GEN_DIR) \
-		--go-grpc_opt=paths=source_relative \
-		agent/v1/agent.proto
+		--proto_path=. \
+		--go_out=. \
+		--go_opt=module=$(MODULE) \
+		--go-grpc_out=. \
+		--go-grpc_opt=module=$(MODULE) \
+		$(PROTO_FILES)
 	@echo "✓ proto generated"
 
 ## ─────────────────────────────────────────
@@ -97,7 +99,7 @@ helm-package: ## package helm chart
 ## ─────────────────────────────────────────
 
 clean: ## clean build artifacts
-	rm -rf bin/ dist/
+	rm -rf bin/ dist/ gen/ $(GEN_DIR)/
 	@echo "✓ cleaned"
 
 ## ─────────────────────────────────────────
