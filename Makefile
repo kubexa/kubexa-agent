@@ -5,11 +5,18 @@ GEN_DIR         := proto/gen/go
 PROTO_FILE      := $(PROTO_DIR)/agent/v1/agent.proto
 PROTO_FILES     := $(PROTO_DIR)/agent/v1/*.proto $(PROTO_DIR)/common/v1/*.proto
 
-GO_BUILD_FLAGS  := -ldflags="-s -w"
+VERSION         ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT          ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_TIME      ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+LDFLAGS         := -s -w \
+	-X github.com/kubexa/kubexa-agent/pkg/buildinfo.Version=$(VERSION) \
+	-X github.com/kubexa/kubexa-agent/pkg/buildinfo.Commit=$(COMMIT) \
+	-X github.com/kubexa/kubexa-agent/pkg/buildinfo.BuildTime=$(BUILD_TIME)
+GO_BUILD_FLAGS  := -ldflags="$(LDFLAGS)"
 DOCKER_IMAGE    := kubexa/kubexa-agent
-DOCKER_TAG      := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+DOCKER_TAG      := $(VERSION)
 
-.PHONY: all build test lint proto gen clean docker-build helm-lint run run-local run-dev-grpc help
+.PHONY: all build test lint proto gen clean docker-build helm-lint run run-local run-dev run-dev-grpc help
 
 all: proto build
 
@@ -46,6 +53,9 @@ run: ## run locally (uses ./config/config.yaml or /etc/kubexa/config.yaml unless
 run-local: ## run agent with config/example-local.yaml
 	go run ./cmd/agent --config=config/example-local.yaml
 
+run-dev: ## run agent in dev mode (debug logs, localhost bind, kubeconfig)
+	go run -ldflags="$(LDFLAGS)" ./cmd/agent --dev --config=config/example-local.yaml
+
 run-dev-grpc: ## run local AgentService mock (insecure gRPC on 127.0.0.1:50051)
 	go run ./cmd/dev-grpc-server
 
@@ -65,7 +75,9 @@ lint: ## run golangci-lint
 
 docker-build: ## build docker image
 	docker build \
-		--build-arg VERSION=$(DOCKER_TAG) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
 		-t $(DOCKER_IMAGE):$(DOCKER_TAG) \
 		-t $(DOCKER_IMAGE):latest \
 		.

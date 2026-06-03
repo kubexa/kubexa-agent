@@ -1,0 +1,80 @@
+# Local development configuration for kubexa-agent.
+#
+# Run:
+#   make run-dev
+#   # or: go run ./cmd/agent --dev --config=config/example-local.yaml
+#
+# Start the mock gateway (separate terminal):
+#   make run-dev-grpc
+#
+# Overrides: KUBEXA_TENANT_TOKEN, KUBEXA_GATEWAY_ADDRESS, KUBEXA_LOG_LEVEL, etc.
+
+agent:
+  # Replace with a real token in production. Env: KUBEXA_TENANT_TOKEN
+  tenant_token: "dev-local-token"
+  # agent_id: ""          # auto-generated UUID when empty
+  # cluster_id: ""        # auto-resolved from kube-system namespace UID when empty
+
+gateway:
+  # Matches cmd/dev-grpc-server default (insecure gRPC)
+  address: "127.0.0.1:50051"
+  tls: false
+  reconnect_initial_delay: 2s
+  reconnect_max_delay: 30s
+  dial_timeout: 10s
+  handshake_timeout: 10s
+
+collect:
+  logs:
+    enabled: true
+    tail_lines: 100
+    follow: true
+    # Optional: persist stream read positions across restarts (separate from buffer.spill_dir).
+    checkpoint_dir: "./temp/.kubexa/log-checkpoints"
+    exclude_namespaces:
+      - kube-system
+      - kube-public
+    # Per-namespace log collection rules.
+    # Empty rules = all namespaces (auto-normalized at startup).
+    rules:
+      - id: admin-api
+        namespace: stage
+        pod_names:
+          - be-*
+        label_selector: log=backend-log
+        containers:
+          - backend-admin
+  state:
+    enabled: true
+    resync_period: 5m
+    # Per-namespace state collection rules.
+    rules:
+      - id: prod-core
+        namespace: production
+        resources:
+          - pods
+          - services
+      - namespace: ingress-nginx
+        resources:
+          - ingresses
+        resync_period: 2m
+  metrics:
+    enabled: true
+    kube_metrics: true
+    custom_endpoints: []
+
+buffer:
+  max_memory_bytes: 33554432 # 32 MiB (smaller for local)
+  spill_dir: "./temp/.kubexa/spill"
+  max_disk_bytes: 134217728 # 128 MiB
+  batch_size: 50
+  flush_interval: 1s
+
+observability:
+  # With --dev, main binds these to 127.0.0.1 only
+  health_addr: ":8080"
+  metrics_addr: ":9090"
+
+log:
+  level: debug
+  format: json

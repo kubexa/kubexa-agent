@@ -503,7 +503,7 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 }
 
 func (m *streamManager) startSessionWorkers(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
-	m.sessionWG.Add(2)
+	m.sessionWG.Add(3)
 	go func() {
 		defer m.sessionWG.Done()
 		m.sendLoop(ctx, stream)
@@ -512,7 +512,10 @@ func (m *streamManager) startSessionWorkers(ctx context.Context, stream agentv1.
 		defer m.sessionWG.Done()
 		m.recvLoop(ctx, stream)
 	}()
-	go m.drainBufferedQueue(ctx, stream)
+	go func() {
+		defer m.sessionWG.Done()
+		m.drainBufferedQueue(ctx, stream)
+	}()
 }
 
 func (m *streamManager) waitSession(ctx context.Context) error {
@@ -630,7 +633,7 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 	if batchSize <= 0 {
 		batchSize = 100
 	}
-	for ctx.Err() == nil && m.ready.Load() && m.queue.Depth() > 0 {
+	for ctx.Err() == nil && m.ready.Load() {
 		items, err := m.queue.DequeueBatch(ctx, batchSize)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -638,6 +641,9 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 			}
 			m.log.Err(err).Warn("drain queue batch failed")
 			return
+		}
+		if len(items) == 0 {
+			continue
 		}
 		var ackIDs []string
 		for _, item := range items {

@@ -112,7 +112,10 @@ func (c *client) Logs(ctx context.Context, namespace, pod, container string, opt
 	if opts.TailLines > 0 {
 		logOpts.TailLines = &opts.TailLines
 	}
-	if opts.Since > 0 {
+	if !opts.SinceTime.IsZero() {
+		since := metav1.NewTime(opts.SinceTime.UTC())
+		logOpts.SinceTime = &since
+	} else if opts.Since > 0 {
 		since := metav1.NewTime(time.Now().Add(-opts.Since))
 		logOpts.SinceTime = &since
 	}
