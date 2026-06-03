@@ -31,7 +31,11 @@ type LogOptions struct {
 	// Follow streams logs as they are written.
 	Follow bool
 	// Since returns logs newer than this duration relative to the request time.
+	// Ignored when SinceTime is set.
 	Since time.Duration
+	// SinceTime returns logs at or after this instant (API semantics: strictly after).
+	// Used on reconnect to avoid re-reading the full log file.
+	SinceTime time.Time
 	// Timestamps prefixes each log line with a timestamp.
 	Timestamps bool
 }
