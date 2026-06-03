@@ -61,6 +61,13 @@ type Queue interface {
 	Close() error
 }
 
+// CapacityAware is implemented by Queue implementations that expose a maximum item capacity.
+type CapacityAware interface {
+	Queue
+	// Capacity returns the maximum number of items the queue can hold across tiers.
+	Capacity() int64
+}
+
 type inflightEntry struct {
 	item   Item
 	onDisk bool
@@ -160,6 +167,33 @@ func memorySlotCapacity(maxMemoryBytes int64) int {
 		return 1
 	}
 	return slots
+}
+
+func diskSlotCapacity(maxDiskBytes int64) int64 {
+	if maxDiskBytes <= 0 {
+		return 0
+	}
+	slots := maxDiskBytes / avgItemSizeEstimate
+	if slots < 1 {
+		return 1
+	}
+	return slots
+}
+
+// Capacity returns the maximum number of items the queue can hold in memory and on disk.
+func (q *bufferedQueue) Capacity() int64 {
+	if q == nil {
+		return 0
+	}
+	capacity := int64(cap(q.memCh))
+	if q.disk != nil {
+		maxDisk := q.cfg.MaxDiskBytes
+		if maxDisk <= 0 {
+			maxDisk = 512 << 20
+		}
+		capacity += diskSlotCapacity(maxDisk)
+	}
+	return capacity
 }
 
 func (q *bufferedQueue) itemSize(item Item) int64 {

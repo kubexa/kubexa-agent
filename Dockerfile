@@ -4,23 +4,24 @@
 FROM golang:1.26.0-alpine AS builder
 
 ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
 
 WORKDIR /app
 
-# download dependencies (layer cache)
 COPY go.mod go.sum ./
 RUN go mod download
 
-# copy proto gen output
-COPY gen/ gen/
-
-# copy source code
+COPY proto/gen/go/ proto/gen/go/
 COPY cmd/ cmd/
 COPY internal/ internal/
+COPY pkg/ pkg/
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build \
-    -ldflags="-s -w -X main.version=${VERSION}" \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-s -w \
+      -X github.com/kubexa/kubexa-agent/pkg/buildinfo.Version=${VERSION} \
+      -X github.com/kubexa/kubexa-agent/pkg/buildinfo.Commit=${COMMIT} \
+      -X github.com/kubexa/kubexa-agent/pkg/buildinfo.BuildTime=${BUILD_TIME}" \
     -o /kubexa-agent \
     ./cmd/agent
 

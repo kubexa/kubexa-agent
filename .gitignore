@@ -28,6 +28,7 @@ go.work.sum
 .env
 
 # Editor/IDE
+.cursor/
 # .idea/
 # .vscode/
 
@@ -36,3 +37,4 @@ go.work.sum
 
 # Helm: local overrides (copy from my-values.example.yaml; may contain tokens)
 temp/
+/bin

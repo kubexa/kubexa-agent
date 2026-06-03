@@ -46,12 +46,15 @@ func TestDefault(t *testing.T) {
 		t.Errorf("collect.state.resync_period = %v, want 5m", cfg.Collect.State.ResyncPeriod)
 	}
 	wantResources := []string{"pods", "services", "secrets", "deployments"}
-	if len(cfg.Collect.State.Resources) != len(wantResources) {
-		t.Fatalf("collect.state.resources len = %d, want %d", len(cfg.Collect.State.Resources), len(wantResources))
+	if len(cfg.Collect.State.Rules) != 1 {
+		t.Fatalf("collect.state.rules len = %d, want 1", len(cfg.Collect.State.Rules))
+	}
+	if len(cfg.Collect.State.Rules[0].Resources) != len(wantResources) {
+		t.Fatalf("collect.state.rules[0].resources len = %d, want %d", len(cfg.Collect.State.Rules[0].Resources), len(wantResources))
 	}
 	for i, r := range wantResources {
-		if cfg.Collect.State.Resources[i] != r {
-			t.Errorf("collect.state.resources[%d] = %q, want %q", i, cfg.Collect.State.Resources[i], r)
+		if cfg.Collect.State.Rules[0].Resources[i] != r {
+			t.Errorf("collect.state.rules[0].resources[%d] = %q, want %q", i, cfg.Collect.State.Rules[0].Resources[i], r)
 		}
 	}
 

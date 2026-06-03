@@ -73,18 +73,60 @@ type CollectConfig struct {
 
 // LogsCollectConfig configures Kubernetes log collection.
 type LogsCollectConfig struct {
-	Enabled    bool             `yaml:"enabled"`
-	Namespaces []string         `yaml:"namespaces"`
-	Selectors  []SelectorConfig `yaml:"selectors"`
-	TailLines  int64            `yaml:"tail_lines"`
+	Enabled   bool               `yaml:"enabled"`
+	TailLines int64              `yaml:"tail_lines"`
+	Follow    bool               `yaml:"follow"`
+	// CheckpointDir enables SQLite persistence of per-stream read positions.
+	// When empty, checkpoints are disabled and tail_lines is used on each new stream.
+	CheckpointDir string `yaml:"checkpoint_dir,omitempty"`
+	// ExcludeNamespaces skips pods in these namespaces during log discovery.
+	ExcludeNamespaces []string           `yaml:"exclude_namespaces,omitempty"`
+	Rules             []LogNamespaceRule `yaml:"rules"`
+}
+
+// LogNamespaceRule defines log collection settings scoped to a namespace.
+type LogNamespaceRule struct {
+	// ID uniquely identifies the rule; generated when empty.
+	ID string `yaml:"id,omitempty"`
+	// Namespace limits collection to this namespace; empty means all namespaces.
+	Namespace string `yaml:"namespace"`
+	// PodNames limits collection to pods with matching names (supports * suffix wildcards).
+	PodNames []string `yaml:"pod_names,omitempty"`
+	// LabelSelector filters pods using Kubernetes label selector syntax.
+	LabelSelector string `yaml:"label_selector,omitempty"`
+	// FieldSelector filters pods using Kubernetes field selector syntax.
+	FieldSelector string `yaml:"field_selector,omitempty"`
+	// Labels is shorthand for label equality matches; merged into LabelSelector when unset.
+	Labels map[string]string `yaml:"labels,omitempty"`
+	// Containers limits log streams to named containers; empty collects all containers.
+	Containers []string `yaml:"containers,omitempty"`
+	// Follow streams logs after the initial tail; nil uses LogsCollectConfig.Follow.
+	Follow *bool `yaml:"follow,omitempty"`
+	// TailLines overrides the global tail_lines for this rule; nil uses LogsCollectConfig.TailLines.
+	TailLines *int64 `yaml:"tail_lines,omitempty"`
 }
 
 // StateCollectConfig configures Kubernetes object state collection.
 type StateCollectConfig struct {
-	Enabled      bool          `yaml:"enabled"`
-	Namespaces   []string      `yaml:"namespaces"`
-	Resources    []string      `yaml:"resources"`
-	ResyncPeriod time.Duration `yaml:"resync_period"`
+	Enabled      bool                 `yaml:"enabled"`
+	ResyncPeriod time.Duration        `yaml:"resync_period"`
+	Rules        []StateNamespaceRule `yaml:"rules"`
+}
+
+// StateNamespaceRule defines state collection settings scoped to a namespace.
+type StateNamespaceRule struct {
+	// ID uniquely identifies the rule; generated when empty.
+	ID string `yaml:"id,omitempty"`
+	// Namespace limits collection to this namespace; empty means all namespaces.
+	Namespace string `yaml:"namespace"`
+	// Resources lists Kubernetes resource kinds to watch (e.g. pods, services, ingresses).
+	Resources []string `yaml:"resources"`
+	// LabelSelector filters watched objects using Kubernetes label selector syntax.
+	LabelSelector string `yaml:"label_selector,omitempty"`
+	// FieldSelector filters watched objects using Kubernetes field selector syntax.
+	FieldSelector string `yaml:"field_selector,omitempty"`
+	// ResyncPeriod overrides the global resync_period for this rule; zero uses StateCollectConfig.ResyncPeriod.
+	ResyncPeriod time.Duration `yaml:"resync_period,omitempty"`
 }
 
 // MetricsCollectConfig configures metrics collection.
@@ -92,13 +134,6 @@ type MetricsCollectConfig struct {
 	Enabled         bool                   `yaml:"enabled"`
 	KubeMetrics     bool                   `yaml:"kube_metrics"`
 	CustomEndpoints []MetricEndpointConfig `yaml:"custom_endpoints"`
-}
-
-// SelectorConfig narrows log collection to specific workloads.
-type SelectorConfig struct {
-	Namespace     string   `yaml:"namespace"`
-	LabelSelector string   `yaml:"label_selector"`
-	Containers    []string `yaml:"containers"`
 }
 
 // MetricEndpointConfig defines a scrape target for custom metrics.
@@ -154,11 +189,17 @@ func Default() *Config {
 			Logs: LogsCollectConfig{
 				Enabled:   true,
 				TailLines: defaultTailLines,
+				Follow:    true,
+				Rules: []LogNamespaceRule{
+					{Namespace: ""},
+				},
 			},
 			State: StateCollectConfig{
 				Enabled:      true,
-				Resources:    resources,
 				ResyncPeriod: defaultStateResyncPeriod,
+				Rules: []StateNamespaceRule{
+					{Resources: resources},
+				},
 			},
 			Metrics: MetricsCollectConfig{
 				Enabled:     true,
@@ -199,11 +240,27 @@ func Load(path string) (*Config, error) {
 
 	applyEnvOverrides(cfg)
 	cfg.EnsureAgentID()
+	cfg.Normalize()
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
 
+	return cfg, nil
+}
+
+// LoadFromYAML parses configuration from YAML bytes (used in tests and tooling).
+func LoadFromYAML(data []byte) (*Config, error) {
+	cfg := Default()
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config YAML: %w", err)
+	}
+	applyEnvOverrides(cfg)
+	cfg.EnsureAgentID()
+	cfg.Normalize()
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validate config: %w", err)
+	}
 	return cfg, nil
 }
 
@@ -245,6 +302,8 @@ func (c *Config) Validate() error {
 		return &ValidationError{Violations: []string{"config is nil"}}
 	}
 
+	c.Normalize()
+
 	var violations []string
 
 	if strings.TrimSpace(c.Agent.TenantToken) == "" {
@@ -265,6 +324,9 @@ func (c *Config) Validate() error {
 	if !c.Collect.Logs.Enabled && !c.Collect.State.Enabled && !c.Collect.Metrics.Enabled {
 		violations = append(violations, "at least one of collect.logs, collect.state, or collect.metrics must be enabled")
 	}
+
+	violations = append(violations, c.Collect.Logs.validate()...)
+	violations = append(violations, c.Collect.State.validate()...)
 
 	if len(violations) == 0 {
 		return nil
