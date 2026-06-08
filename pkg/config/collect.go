@@ -20,6 +20,7 @@ func (c *Config) Normalize() {
 	}
 	c.Collect.Logs.normalize()
 	c.Collect.State.normalize()
+	c.Collect.Metrics.normalize()
 }
 
 func (l *LogsCollectConfig) normalize() {
@@ -92,6 +93,136 @@ func (r *StateNamespaceRule) normalize(index int) {
 	if r.ID == "" {
 		r.ID = fmt.Sprintf("state-%d", index)
 	}
+}
+
+func (m *MetricsCollectConfig) normalize() {
+	if m == nil {
+		return
+	}
+	switch {
+	case m.KubeMetrics && len(m.Rules) == 0:
+		m.Rules = []MetricsNamespaceRule{{Resources: []string{"pods", "nodes"}}}
+	case m.Enabled && len(m.Rules) == 0 && len(m.CustomEndpoints) == 0:
+		m.Rules = []MetricsNamespaceRule{{Resources: []string{"pods", "nodes"}}}
+	}
+	for i := range m.Rules {
+		m.Rules[i].normalize(i)
+	}
+}
+
+func (r *MetricsNamespaceRule) normalize(index int) {
+	if r == nil {
+		return
+	}
+	if r.ID == "" {
+		r.ID = fmt.Sprintf("metrics-%d", index)
+	}
+	if r.LabelSelector == "" && len(r.Labels) > 0 {
+		r.LabelSelector = labelsToSelector(r.Labels)
+	}
+}
+
+func (m *MetricsCollectConfig) validate() []string {
+	if m == nil || !m.Enabled {
+		return nil
+	}
+	if len(m.Rules) == 0 && len(m.CustomEndpoints) == 0 {
+		return []string{"collect.metrics must define rules and/or custom_endpoints when metrics collection is enabled"}
+	}
+	var violations []string
+	seen := make(map[string]struct{}, len(m.Rules))
+	for i, rule := range m.Rules {
+		violations = append(violations, rule.validate(i)...)
+		if rule.ID == "" {
+			continue
+		}
+		if _, dup := seen[rule.ID]; dup {
+			violations = append(violations, fmt.Sprintf("collect.metrics.rules[%d].id %q is duplicated", i, rule.ID))
+		}
+		seen[rule.ID] = struct{}{}
+	}
+	return violations
+}
+
+func (r *MetricsNamespaceRule) validate(index int) []string {
+	if r == nil {
+		return nil
+	}
+	prefix := fmt.Sprintf("collect.metrics.rules[%d]", index)
+	var violations []string
+	if len(r.Resources) == 0 {
+		violations = append(violations, prefix+".resources must contain at least one resource")
+	}
+	for j, resource := range r.Resources {
+		if _, err := ParseMetricsResource(resource); err != nil {
+			violations = append(violations, fmt.Sprintf("%s.resources[%d]: %v", prefix, j, err))
+		}
+	}
+	return violations
+}
+
+// EffectiveLabelSelector returns the label selector for the rule, including Labels shorthand.
+func (r *MetricsNamespaceRule) EffectiveLabelSelector() string {
+	if r == nil {
+		return ""
+	}
+	if r.LabelSelector != "" {
+		return r.LabelSelector
+	}
+	return labelsToSelector(r.Labels)
+}
+
+// ResolvePodInterval returns the effective pod scrape interval for the rule.
+func (r *MetricsNamespaceRule) ResolvePodInterval(global time.Duration) time.Duration {
+	if r == nil || r.PodInterval <= 0 {
+		return global
+	}
+	return r.PodInterval
+}
+
+// ResolveNodeInterval returns the effective node scrape interval for the rule.
+func (r *MetricsNamespaceRule) ResolveNodeInterval(global time.Duration) time.Duration {
+	if r == nil || r.NodeInterval <= 0 {
+		return global
+	}
+	return r.NodeInterval
+}
+
+// IncludesPods reports whether the rule collects pod metrics.
+func (r *MetricsNamespaceRule) IncludesPods() bool {
+	return r != nil && ruleIncludesResource(r.Resources, metricsResourcePod)
+}
+
+// IncludesNodes reports whether the rule collects node metrics.
+func (r *MetricsNamespaceRule) IncludesNodes() bool {
+	return r != nil && ruleIncludesResource(r.Resources, metricsResourceNode)
+}
+
+const (
+	metricsResourcePod  = "pods"
+	metricsResourceNode = "nodes"
+)
+
+// ParseMetricsResource maps a configured resource name to a metrics resource kind.
+func ParseMetricsResource(name string) (string, error) {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case metricsResourcePod, "pod":
+		return metricsResourcePod, nil
+	case metricsResourceNode, "node":
+		return metricsResourceNode, nil
+	default:
+		return "", fmt.Errorf("unsupported metrics resource %q (supported: pods, nodes)", name)
+	}
+}
+
+func ruleIncludesResource(resources []string, want string) bool {
+	for _, name := range resources {
+		if parsed, err := ParseMetricsResource(name); err == nil && parsed == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *LogsCollectConfig) validate() []string {

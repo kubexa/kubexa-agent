@@ -57,6 +57,7 @@ type NodeMetric struct {
 	CPUMillicores int64
 	MemoryBytes   int64
 	Timestamp     time.Time
+	Window        time.Duration
 }
 
 // PodMetric holds current CPU and memory usage for a Kubernetes pod.
@@ -66,4 +67,5 @@ type PodMetric struct {
 	CPUMillicores int64
 	MemoryBytes   int64
 	Timestamp     time.Time
+	Window        time.Duration
 }
