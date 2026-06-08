@@ -76,6 +76,60 @@ func (MetricType) EnumDescriptor() ([]byte, []int) {
 	return file_proto_agent_v1_metric_proto_rawDescGZIP(), []int{0}
 }
 
+// KubeMetricsResourceType identifies a Kubernetes Metrics API resource.
+type KubeMetricsResourceType int32
+
+const (
+	KubeMetricsResourceType_KUBE_METRICS_RESOURCE_TYPE_UNSPECIFIED KubeMetricsResourceType = 0
+	KubeMetricsResourceType_KUBE_METRICS_RESOURCE_TYPE_POD         KubeMetricsResourceType = 1
+	KubeMetricsResourceType_KUBE_METRICS_RESOURCE_TYPE_NODE        KubeMetricsResourceType = 2
+)
+
+// Enum value maps for KubeMetricsResourceType.
+var (
+	KubeMetricsResourceType_name = map[int32]string{
+		0: "KUBE_METRICS_RESOURCE_TYPE_UNSPECIFIED",
+		1: "KUBE_METRICS_RESOURCE_TYPE_POD",
+		2: "KUBE_METRICS_RESOURCE_TYPE_NODE",
+	}
+	KubeMetricsResourceType_value = map[string]int32{
+		"KUBE_METRICS_RESOURCE_TYPE_UNSPECIFIED": 0,
+		"KUBE_METRICS_RESOURCE_TYPE_POD":         1,
+		"KUBE_METRICS_RESOURCE_TYPE_NODE":        2,
+	}
+)
+
+func (x KubeMetricsResourceType) Enum() *KubeMetricsResourceType {
+	p := new(KubeMetricsResourceType)
+	*p = x
+	return p
+}
+
+func (x KubeMetricsResourceType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (KubeMetricsResourceType) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_agent_v1_metric_proto_enumTypes[1].Descriptor()
+}
+
+func (KubeMetricsResourceType) Type() protoreflect.EnumType {
+	return &file_proto_agent_v1_metric_proto_enumTypes[1]
+}
+
+func (x KubeMetricsResourceType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use KubeMetricsResourceType.Descriptor instead.
+func (KubeMetricsResourceType) EnumDescriptor() ([]byte, []int) {
+	return file_proto_agent_v1_metric_proto_rawDescGZIP(), []int{1}
+}
+
+// MetricBatch is the legacy structured Prometheus payload.
+// Prefer AgentMessage.kube_metrics or AgentMessage.prometheus_metrics for new integrations.
+//
+// Deprecated: Marked as deprecated in proto/agent/v1/metric.proto.
 type MetricBatch struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Families      []*MetricFamily        `protobuf:"bytes,1,rep,name=families,proto3" json:"families,omitempty"`
@@ -248,13 +302,167 @@ func (x *Metric) GetTimestamp() int64 {
 	return 0
 }
 
+// MetricsEvent carries CPU/memory usage from the Kubernetes Metrics API.
+type MetricsEvent struct {
+	state         protoimpl.MessageState  `protogen:"open.v1"`
+	ResourceType  KubeMetricsResourceType `protobuf:"varint,1,opt,name=resource_type,json=resourceType,proto3,enum=agent.v1.KubeMetricsResourceType" json:"resource_type,omitempty"`
+	Namespace     string                  `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Name          string                  `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	CpuMillicores int64                   `protobuf:"varint,4,opt,name=cpu_millicores,json=cpuMillicores,proto3" json:"cpu_millicores,omitempty"`
+	MemoryBytes   int64                   `protobuf:"varint,5,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
+	Timestamp     int64                   `protobuf:"varint,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"` // unix milliseconds
+	WindowSeconds int32                   `protobuf:"varint,7,opt,name=window_seconds,json=windowSeconds,proto3" json:"window_seconds,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MetricsEvent) Reset() {
+	*x = MetricsEvent{}
+	mi := &file_proto_agent_v1_metric_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MetricsEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MetricsEvent) ProtoMessage() {}
+
+func (x *MetricsEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_metric_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MetricsEvent.ProtoReflect.Descriptor instead.
+func (*MetricsEvent) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_metric_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *MetricsEvent) GetResourceType() KubeMetricsResourceType {
+	if x != nil {
+		return x.ResourceType
+	}
+	return KubeMetricsResourceType_KUBE_METRICS_RESOURCE_TYPE_UNSPECIFIED
+}
+
+func (x *MetricsEvent) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *MetricsEvent) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *MetricsEvent) GetCpuMillicores() int64 {
+	if x != nil {
+		return x.CpuMillicores
+	}
+	return 0
+}
+
+func (x *MetricsEvent) GetMemoryBytes() int64 {
+	if x != nil {
+		return x.MemoryBytes
+	}
+	return 0
+}
+
+func (x *MetricsEvent) GetTimestamp() int64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
+func (x *MetricsEvent) GetWindowSeconds() int32 {
+	if x != nil {
+		return x.WindowSeconds
+	}
+	return 0
+}
+
+// PrometheusMetricsEvent carries one scraped Prometheus metric family.
+type PrometheusMetricsEvent struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	TargetUrl        string                 `protobuf:"bytes,1,opt,name=target_url,json=targetUrl,proto3" json:"target_url,omitempty"`
+	MetricFamilyJson string                 `protobuf:"bytes,2,opt,name=metric_family_json,json=metricFamilyJson,proto3" json:"metric_family_json,omitempty"`
+	ScrapedAt        int64                  `protobuf:"varint,3,opt,name=scraped_at,json=scrapedAt,proto3" json:"scraped_at,omitempty"` // unix milliseconds
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *PrometheusMetricsEvent) Reset() {
+	*x = PrometheusMetricsEvent{}
+	mi := &file_proto_agent_v1_metric_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrometheusMetricsEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrometheusMetricsEvent) ProtoMessage() {}
+
+func (x *PrometheusMetricsEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_metric_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrometheusMetricsEvent.ProtoReflect.Descriptor instead.
+func (*PrometheusMetricsEvent) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_metric_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *PrometheusMetricsEvent) GetTargetUrl() string {
+	if x != nil {
+		return x.TargetUrl
+	}
+	return ""
+}
+
+func (x *PrometheusMetricsEvent) GetMetricFamilyJson() string {
+	if x != nil {
+		return x.MetricFamilyJson
+	}
+	return ""
+}
+
+func (x *PrometheusMetricsEvent) GetScrapedAt() int64 {
+	if x != nil {
+		return x.ScrapedAt
+	}
+	return 0
+}
+
 var File_proto_agent_v1_metric_proto protoreflect.FileDescriptor
 
 const file_proto_agent_v1_metric_proto_rawDesc = "" +
 	"\n" +
-	"\x1bproto/agent/v1/metric.proto\x12\bagent.v1\"A\n" +
+	"\x1bproto/agent/v1/metric.proto\x12\bagent.v1\"E\n" +
 	"\vMetricBatch\x122\n" +
-	"\bfamilies\x18\x01 \x03(\v2\x16.agent.v1.MetricFamilyR\bfamilies\"\x8c\x01\n" +
+	"\bfamilies\x18\x01 \x03(\v2\x16.agent.v1.MetricFamilyR\bfamilies:\x02\x18\x01\"\x8c\x01\n" +
 	"\fMetricFamily\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04help\x18\x02 \x01(\tR\x04help\x12(\n" +
@@ -266,14 +474,32 @@ const file_proto_agent_v1_metric_proto_rawDesc = "" +
 	"\ttimestamp\x18\x03 \x01(\x03R\ttimestamp\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\x8d\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x97\x02\n" +
+	"\fMetricsEvent\x12F\n" +
+	"\rresource_type\x18\x01 \x01(\x0e2!.agent.v1.KubeMetricsResourceTypeR\fresourceType\x12\x1c\n" +
+	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12%\n" +
+	"\x0ecpu_millicores\x18\x04 \x01(\x03R\rcpuMillicores\x12!\n" +
+	"\fmemory_bytes\x18\x05 \x01(\x03R\vmemoryBytes\x12\x1c\n" +
+	"\ttimestamp\x18\x06 \x01(\x03R\ttimestamp\x12%\n" +
+	"\x0ewindow_seconds\x18\a \x01(\x05R\rwindowSeconds\"\x84\x01\n" +
+	"\x16PrometheusMetricsEvent\x12\x1d\n" +
+	"\n" +
+	"target_url\x18\x01 \x01(\tR\ttargetUrl\x12,\n" +
+	"\x12metric_family_json\x18\x02 \x01(\tR\x10metricFamilyJson\x12\x1d\n" +
+	"\n" +
+	"scraped_at\x18\x03 \x01(\x03R\tscrapedAt*\x8d\x01\n" +
 	"\n" +
 	"MetricType\x12\x1b\n" +
 	"\x17METRIC_TYPE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11METRIC_TYPE_GAUGE\x10\x01\x12\x17\n" +
 	"\x13METRIC_TYPE_COUNTER\x10\x02\x12\x19\n" +
 	"\x15METRIC_TYPE_HISTOGRAM\x10\x03\x12\x17\n" +
-	"\x13METRIC_TYPE_SUMMARY\x10\x04B>Z<github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1b\x06proto3"
+	"\x13METRIC_TYPE_SUMMARY\x10\x04*\x8e\x01\n" +
+	"\x17KubeMetricsResourceType\x12*\n" +
+	"&KUBE_METRICS_RESOURCE_TYPE_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1eKUBE_METRICS_RESOURCE_TYPE_POD\x10\x01\x12#\n" +
+	"\x1fKUBE_METRICS_RESOURCE_TYPE_NODE\x10\x02B>Z<github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1b\x06proto3"
 
 var (
 	file_proto_agent_v1_metric_proto_rawDescOnce sync.Once
@@ -287,25 +513,29 @@ func file_proto_agent_v1_metric_proto_rawDescGZIP() []byte {
 	return file_proto_agent_v1_metric_proto_rawDescData
 }
 
-var file_proto_agent_v1_metric_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_agent_v1_metric_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_proto_agent_v1_metric_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_proto_agent_v1_metric_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_proto_agent_v1_metric_proto_goTypes = []any{
-	(MetricType)(0),      // 0: agent.v1.MetricType
-	(*MetricBatch)(nil),  // 1: agent.v1.MetricBatch
-	(*MetricFamily)(nil), // 2: agent.v1.MetricFamily
-	(*Metric)(nil),       // 3: agent.v1.Metric
-	nil,                  // 4: agent.v1.Metric.LabelsEntry
+	(MetricType)(0),                // 0: agent.v1.MetricType
+	(KubeMetricsResourceType)(0),   // 1: agent.v1.KubeMetricsResourceType
+	(*MetricBatch)(nil),            // 2: agent.v1.MetricBatch
+	(*MetricFamily)(nil),           // 3: agent.v1.MetricFamily
+	(*Metric)(nil),                 // 4: agent.v1.Metric
+	(*MetricsEvent)(nil),           // 5: agent.v1.MetricsEvent
+	(*PrometheusMetricsEvent)(nil), // 6: agent.v1.PrometheusMetricsEvent
+	nil,                            // 7: agent.v1.Metric.LabelsEntry
 }
 var file_proto_agent_v1_metric_proto_depIdxs = []int32{
-	2, // 0: agent.v1.MetricBatch.families:type_name -> agent.v1.MetricFamily
+	3, // 0: agent.v1.MetricBatch.families:type_name -> agent.v1.MetricFamily
 	0, // 1: agent.v1.MetricFamily.type:type_name -> agent.v1.MetricType
-	3, // 2: agent.v1.MetricFamily.metrics:type_name -> agent.v1.Metric
-	4, // 3: agent.v1.Metric.labels:type_name -> agent.v1.Metric.LabelsEntry
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	4, // 2: agent.v1.MetricFamily.metrics:type_name -> agent.v1.Metric
+	7, // 3: agent.v1.Metric.labels:type_name -> agent.v1.Metric.LabelsEntry
+	1, // 4: agent.v1.MetricsEvent.resource_type:type_name -> agent.v1.KubeMetricsResourceType
+	5, // [5:5] is the sub-list for method output_type
+	5, // [5:5] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_metric_proto_init() }
@@ -318,8 +548,8 @@ func file_proto_agent_v1_metric_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_v1_metric_proto_rawDesc), len(file_proto_agent_v1_metric_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   4,
+			NumEnums:      2,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

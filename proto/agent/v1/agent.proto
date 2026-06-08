@@ -8,6 +8,12 @@ import "proto/common/v1/metadata.proto";
 
 option go_package = "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1";
 
+// Wire-format compatibility policy:
+//   - Field numbers and oneof discriminators are stable; never reuse or retype.
+//   - Removed fields must use `reserved`; new capabilities use new field numbers.
+//   - Superseded payloads stay on the wire with [deprecated = true].
+//   - API versioning is negotiated at handshake via proto_version fields (see pkg/protoversion).
+
 service AgentService {
   // Bidirectional stream:
   // Agent → Gateway: log/state/metric verisi
@@ -22,20 +28,23 @@ message AgentMessage {
   common.v1.AgentMetadata meta       = 2;
 
   oneof payload {
-    HandshakeRequest   handshake = 3;
-    LogBatch           logs      = 4;
-    StateEvent         state     = 5;
-    MetricBatch        metrics   = 6;
-    Heartbeat          heartbeat = 7;
+    HandshakeRequest       handshake          = 3;
+    LogBatch               logs               = 4;
+    StateEvent             state              = 5;
+    MetricBatch            metrics            = 6 [deprecated = true]; // use kube_metrics / prometheus_metrics
+    Heartbeat              heartbeat          = 7;
+    MetricsEvent           kube_metrics       = 8;
+    PrometheusMetricsEvent prometheus_metrics = 9;
   }
 }
 
 message HandshakeRequest {
-  string            agent_version = 1; // semver "1.2.3"
-  string            proto_version = 2; // "v1"
-  string            cluster_id    = 3;
-  string            tenant_token  = 4; // auth token
-  AgentCapabilities caps          = 5;
+  string            agent_version            = 1; // semver "1.2.3"
+  string            proto_version            = 2; // preferred API version, e.g. "v1"
+  string            cluster_id               = 3;
+  string            tenant_token             = 4; // auth token
+  AgentCapabilities caps                     = 5;
+  repeated string   supported_proto_versions = 6; // versions this agent can speak (newest first)
 }
 
 message AgentCapabilities {
@@ -70,11 +79,13 @@ message GatewayMessage {
 }
 
 message HandshakeResponse {
-  bool           accepted         = 1;
-  string         session_id       = 2;
-  string         server_version   = 3;
-  string         rejection_reason = 4; // accepted=false ise dolu
-  ConfigSnapshot config           = 5; // initial config
+  bool           accepted                 = 1;
+  string         session_id               = 2;
+  string         server_version           = 3;
+  string         rejection_reason         = 4; // accepted=false ise dolu
+  ConfigSnapshot config                   = 5; // initial config
+  string         proto_version            = 6; // negotiated API version, e.g. "v1"
+  repeated string supported_proto_versions = 7; // gateway-supported versions (newest first)
 }
 
 message Ack {

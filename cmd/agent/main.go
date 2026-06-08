@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/kubexa/kubexa-agent/internal/collector/logs"
+	metricscollector "github.com/kubexa/kubexa-agent/internal/collector/metrics"
 	"github.com/kubexa/kubexa-agent/internal/collector/state"
 	"github.com/kubexa/kubexa-agent/internal/health"
 	"github.com/kubexa/kubexa-agent/internal/k8s"
@@ -293,7 +294,23 @@ func buildCollectors(
 		collectors = append(collectors, stateColl)
 	}
 
-	// TODO(step-12): metrics collector
+	if cfg.Collect.Metrics.Enabled {
+		metricsColl, err := metricscollector.New(metricscollector.Options{
+			Config: metricscollector.ConfigFromRoot(cfg),
+			Kube:   kube,
+			Queue:  q,
+			AgentMeta: &commonv1.AgentMetadata{
+				ClusterId: cfg.Agent.ClusterID,
+				AgentId:   cfg.Agent.AgentID,
+			},
+			Logger:     logger.New("metrics-scraper", logger.WithAgentID(cfg.Agent.AgentID)),
+			Registerer: reg,
+		})
+		if err != nil {
+			return nil, err
+		}
+		collectors = append(collectors, metricsColl)
+	}
 
 	return collectors, nil
 }

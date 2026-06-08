@@ -378,6 +378,7 @@ func nodeMetricFrom(item metricsv1beta1.NodeMetrics) NodeMetric {
 		CPUMillicores: cpu.MilliValue(),
 		MemoryBytes:   memory.Value(),
 		Timestamp:     item.Timestamp.Time,
+		Window:        item.Window.Duration,
 	}
 }
 
@@ -397,5 +398,6 @@ func podMetricFrom(item metricsv1beta1.PodMetrics) PodMetric {
 		CPUMillicores: totalCPU,
 		MemoryBytes:   totalMemory,
 		Timestamp:     item.Timestamp.Time,
+		Window:        item.Window.Duration,
 	}
 }

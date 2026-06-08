@@ -3,7 +3,10 @@ package agent.v1;
 
 option go_package = "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1";
 
+// MetricBatch is the legacy structured Prometheus payload.
+// Prefer AgentMessage.kube_metrics or AgentMessage.prometheus_metrics for new integrations.
 message MetricBatch {
+  option deprecated = true;
   repeated MetricFamily families = 1;
 }
 
@@ -26,4 +29,29 @@ enum MetricType {
   METRIC_TYPE_COUNTER     = 2;
   METRIC_TYPE_HISTOGRAM   = 3;
   METRIC_TYPE_SUMMARY     = 4;
+}
+
+// KubeMetricsResourceType identifies a Kubernetes Metrics API resource.
+enum KubeMetricsResourceType {
+  KUBE_METRICS_RESOURCE_TYPE_UNSPECIFIED = 0;
+  KUBE_METRICS_RESOURCE_TYPE_POD         = 1;
+  KUBE_METRICS_RESOURCE_TYPE_NODE        = 2;
+}
+
+// MetricsEvent carries CPU/memory usage from the Kubernetes Metrics API.
+message MetricsEvent {
+  KubeMetricsResourceType resource_type = 1;
+  string                  namespace     = 2;
+  string                  name          = 3;
+  int64                   cpu_millicores = 4;
+  int64                   memory_bytes   = 5;
+  int64                   timestamp      = 6; // unix milliseconds
+  int32                   window_seconds = 7;
+}
+
+// PrometheusMetricsEvent carries one scraped Prometheus metric family.
+message PrometheusMetricsEvent {
+  string target_url         = 1;
+  string metric_family_json = 2;
+  int64  scraped_at         = 3; // unix milliseconds
 }

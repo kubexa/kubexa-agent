@@ -22,6 +22,7 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	"github.com/kubexa/kubexa-agent/internal/queue"
 	"github.com/kubexa/kubexa-agent/pkg/config"
+	"github.com/kubexa/kubexa-agent/pkg/protoversion"
 )
 
 const testBufSize = 1 << 20
@@ -423,7 +424,7 @@ func TestAuthInterceptorMetadata(t *testing.T) {
 	}
 	assertMD(t, gotMD, "x-tenant-token", "rotating-token")
 	assertMD(t, gotMD, "x-agent-version", AgentVersion)
-	assertMD(t, gotMD, "x-proto-version", protoVersion)
+	assertMD(t, gotMD, "x-proto-version", protoversion.Current)
 	assertMD(t, gotMD, "x-cluster-id", "cluster-1")
 }
 

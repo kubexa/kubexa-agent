@@ -19,6 +19,7 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	"github.com/kubexa/kubexa-agent/internal/queue"
 	"github.com/kubexa/kubexa-agent/pkg/config"
+	"github.com/kubexa/kubexa-agent/pkg/protoversion"
 )
 
 const (
@@ -436,14 +437,16 @@ func (m *streamManager) defaultDial(ctx context.Context) (*grpc.ClientConn, agen
 }
 
 func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentService_ConnectClient) (string, error) {
+	preferred, supported := protoversion.AgentHandshake()
 	req := &agentv1.AgentMessage{
 		MessageId: uuid.NewString(),
 		Payload: &agentv1.AgentMessage_Handshake{
 			Handshake: &agentv1.HandshakeRequest{
-				AgentVersion: AgentVersion,
-				ProtoVersion: protoVersion,
-				ClusterId:    m.cfg.Agent.ClusterID,
-				TenantToken:  m.cfg.Agent.TenantToken,
+				AgentVersion:            AgentVersion,
+				ProtoVersion:            preferred,
+				SupportedProtoVersions:  supported,
+				ClusterId:               m.cfg.Agent.ClusterID,
+				TenantToken:             m.cfg.Agent.TenantToken,
 				Caps: &agentv1.AgentCapabilities{
 					Logs:    m.cfg.Collect.Logs.Enabled,
 					State:   m.cfg.Collect.State.Enabled,
@@ -490,6 +493,14 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 	}
 	if !hs.GetAccepted() {
 		return "", handshakeRejected(hs.GetRejectionReason())
+	}
+	if err := protoversion.ValidateGatewayResponse(hs.GetProtoVersion(), hs.GetSupportedProtoVersions()); err != nil {
+		return "", handshakeRejected(err.Error())
+	}
+	if negotiated := protoversion.Normalize(hs.GetProtoVersion()); negotiated != "" {
+		m.log.Info("proto version negotiated",
+			logger.F("proto_version", negotiated),
+		)
 	}
 
 	if hs.GetConfig() != nil {

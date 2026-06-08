@@ -33,6 +33,8 @@ type AgentMessage struct {
 	//	*AgentMessage_State
 	//	*AgentMessage_Metrics
 	//	*AgentMessage_Heartbeat
+	//	*AgentMessage_KubeMetrics
+	//	*AgentMessage_PrometheusMetrics
 	Payload       isAgentMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -116,6 +118,7 @@ func (x *AgentMessage) GetState() *StateEvent {
 	return nil
 }
 
+// Deprecated: Marked as deprecated in proto/agent/v1/agent.proto.
 func (x *AgentMessage) GetMetrics() *MetricBatch {
 	if x != nil {
 		if x, ok := x.Payload.(*AgentMessage_Metrics); ok {
@@ -129,6 +132,24 @@ func (x *AgentMessage) GetHeartbeat() *Heartbeat {
 	if x != nil {
 		if x, ok := x.Payload.(*AgentMessage_Heartbeat); ok {
 			return x.Heartbeat
+		}
+	}
+	return nil
+}
+
+func (x *AgentMessage) GetKubeMetrics() *MetricsEvent {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentMessage_KubeMetrics); ok {
+			return x.KubeMetrics
+		}
+	}
+	return nil
+}
+
+func (x *AgentMessage) GetPrometheusMetrics() *PrometheusMetricsEvent {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentMessage_PrometheusMetrics); ok {
+			return x.PrometheusMetrics
 		}
 	}
 	return nil
@@ -151,11 +172,20 @@ type AgentMessage_State struct {
 }
 
 type AgentMessage_Metrics struct {
-	Metrics *MetricBatch `protobuf:"bytes,6,opt,name=metrics,proto3,oneof"`
+	// Deprecated: Marked as deprecated in proto/agent/v1/agent.proto.
+	Metrics *MetricBatch `protobuf:"bytes,6,opt,name=metrics,proto3,oneof"` // use kube_metrics / prometheus_metrics
 }
 
 type AgentMessage_Heartbeat struct {
 	Heartbeat *Heartbeat `protobuf:"bytes,7,opt,name=heartbeat,proto3,oneof"`
+}
+
+type AgentMessage_KubeMetrics struct {
+	KubeMetrics *MetricsEvent `protobuf:"bytes,8,opt,name=kube_metrics,json=kubeMetrics,proto3,oneof"`
+}
+
+type AgentMessage_PrometheusMetrics struct {
+	PrometheusMetrics *PrometheusMetricsEvent `protobuf:"bytes,9,opt,name=prometheus_metrics,json=prometheusMetrics,proto3,oneof"`
 }
 
 func (*AgentMessage_Handshake) isAgentMessage_Payload() {}
@@ -168,15 +198,20 @@ func (*AgentMessage_Metrics) isAgentMessage_Payload() {}
 
 func (*AgentMessage_Heartbeat) isAgentMessage_Payload() {}
 
+func (*AgentMessage_KubeMetrics) isAgentMessage_Payload() {}
+
+func (*AgentMessage_PrometheusMetrics) isAgentMessage_Payload() {}
+
 type HandshakeRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	AgentVersion  string                 `protobuf:"bytes,1,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"` // semver "1.2.3"
-	ProtoVersion  string                 `protobuf:"bytes,2,opt,name=proto_version,json=protoVersion,proto3" json:"proto_version,omitempty"` // "v1"
-	ClusterId     string                 `protobuf:"bytes,3,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
-	TenantToken   string                 `protobuf:"bytes,4,opt,name=tenant_token,json=tenantToken,proto3" json:"tenant_token,omitempty"` // auth token
-	Caps          *AgentCapabilities     `protobuf:"bytes,5,opt,name=caps,proto3" json:"caps,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	AgentVersion           string                 `protobuf:"bytes,1,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"` // semver "1.2.3"
+	ProtoVersion           string                 `protobuf:"bytes,2,opt,name=proto_version,json=protoVersion,proto3" json:"proto_version,omitempty"` // preferred API version, e.g. "v1"
+	ClusterId              string                 `protobuf:"bytes,3,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
+	TenantToken            string                 `protobuf:"bytes,4,opt,name=tenant_token,json=tenantToken,proto3" json:"tenant_token,omitempty"` // auth token
+	Caps                   *AgentCapabilities     `protobuf:"bytes,5,opt,name=caps,proto3" json:"caps,omitempty"`
+	SupportedProtoVersions []string               `protobuf:"bytes,6,rep,name=supported_proto_versions,json=supportedProtoVersions,proto3" json:"supported_proto_versions,omitempty"` // versions this agent can speak (newest first)
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *HandshakeRequest) Reset() {
@@ -240,6 +275,13 @@ func (x *HandshakeRequest) GetTenantToken() string {
 func (x *HandshakeRequest) GetCaps() *AgentCapabilities {
 	if x != nil {
 		return x.Caps
+	}
+	return nil
+}
+
+func (x *HandshakeRequest) GetSupportedProtoVersions() []string {
+	if x != nil {
+		return x.SupportedProtoVersions
 	}
 	return nil
 }
@@ -555,14 +597,16 @@ func (*GatewayMessage_Backpressure) isGatewayMessage_Payload() {}
 func (*GatewayMessage_Shutdown) isGatewayMessage_Payload() {}
 
 type HandshakeResponse struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	Accepted        bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	SessionId       string                 `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	ServerVersion   string                 `protobuf:"bytes,3,opt,name=server_version,json=serverVersion,proto3" json:"server_version,omitempty"`
-	RejectionReason string                 `protobuf:"bytes,4,opt,name=rejection_reason,json=rejectionReason,proto3" json:"rejection_reason,omitempty"` // accepted=false ise dolu
-	Config          *ConfigSnapshot        `protobuf:"bytes,5,opt,name=config,proto3" json:"config,omitempty"`                                          // initial config
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	Accepted               bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	SessionId              string                 `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	ServerVersion          string                 `protobuf:"bytes,3,opt,name=server_version,json=serverVersion,proto3" json:"server_version,omitempty"`
+	RejectionReason        string                 `protobuf:"bytes,4,opt,name=rejection_reason,json=rejectionReason,proto3" json:"rejection_reason,omitempty"`                        // accepted=false ise dolu
+	Config                 *ConfigSnapshot        `protobuf:"bytes,5,opt,name=config,proto3" json:"config,omitempty"`                                                                 // initial config
+	ProtoVersion           string                 `protobuf:"bytes,6,opt,name=proto_version,json=protoVersion,proto3" json:"proto_version,omitempty"`                                 // negotiated API version, e.g. "v1"
+	SupportedProtoVersions []string               `protobuf:"bytes,7,rep,name=supported_proto_versions,json=supportedProtoVersions,proto3" json:"supported_proto_versions,omitempty"` // gateway-supported versions (newest first)
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *HandshakeResponse) Reset() {
@@ -626,6 +670,20 @@ func (x *HandshakeResponse) GetRejectionReason() string {
 func (x *HandshakeResponse) GetConfig() *ConfigSnapshot {
 	if x != nil {
 		return x.Config
+	}
+	return nil
+}
+
+func (x *HandshakeResponse) GetProtoVersion() string {
+	if x != nil {
+		return x.ProtoVersion
+	}
+	return ""
+}
+
+func (x *HandshakeResponse) GetSupportedProtoVersions() []string {
+	if x != nil {
+		return x.SupportedProtoVersions
 	}
 	return nil
 }
@@ -1130,24 +1188,27 @@ var File_proto_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x1aproto/agent/v1/agent.proto\x12\bagent.v1\x1a\x18proto/agent/v1/log.proto\x1a\x1aproto/agent/v1/state.proto\x1a\x1bproto/agent/v1/metric.proto\x1a\x1eproto/common/v1/metadata.proto\"\xe2\x02\n" +
+	"\x1aproto/agent/v1/agent.proto\x12\bagent.v1\x1a\x18proto/agent/v1/log.proto\x1a\x1aproto/agent/v1/state.proto\x1a\x1bproto/agent/v1/metric.proto\x1a\x1eproto/common/v1/metadata.proto\"\xf6\x03\n" +
 	"\fAgentMessage\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x12,\n" +
 	"\x04meta\x18\x02 \x01(\v2\x18.common.v1.AgentMetadataR\x04meta\x12:\n" +
 	"\thandshake\x18\x03 \x01(\v2\x1a.agent.v1.HandshakeRequestH\x00R\thandshake\x12(\n" +
 	"\x04logs\x18\x04 \x01(\v2\x12.agent.v1.LogBatchH\x00R\x04logs\x12,\n" +
-	"\x05state\x18\x05 \x01(\v2\x14.agent.v1.StateEventH\x00R\x05state\x121\n" +
-	"\ametrics\x18\x06 \x01(\v2\x15.agent.v1.MetricBatchH\x00R\ametrics\x123\n" +
-	"\theartbeat\x18\a \x01(\v2\x13.agent.v1.HeartbeatH\x00R\theartbeatB\t\n" +
-	"\apayload\"\xcf\x01\n" +
+	"\x05state\x18\x05 \x01(\v2\x14.agent.v1.StateEventH\x00R\x05state\x125\n" +
+	"\ametrics\x18\x06 \x01(\v2\x15.agent.v1.MetricBatchB\x02\x18\x01H\x00R\ametrics\x123\n" +
+	"\theartbeat\x18\a \x01(\v2\x13.agent.v1.HeartbeatH\x00R\theartbeat\x12;\n" +
+	"\fkube_metrics\x18\b \x01(\v2\x16.agent.v1.MetricsEventH\x00R\vkubeMetrics\x12Q\n" +
+	"\x12prometheus_metrics\x18\t \x01(\v2 .agent.v1.PrometheusMetricsEventH\x00R\x11prometheusMetricsB\t\n" +
+	"\apayload\"\x89\x02\n" +
 	"\x10HandshakeRequest\x12#\n" +
 	"\ragent_version\x18\x01 \x01(\tR\fagentVersion\x12#\n" +
 	"\rproto_version\x18\x02 \x01(\tR\fprotoVersion\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x03 \x01(\tR\tclusterId\x12!\n" +
 	"\ftenant_token\x18\x04 \x01(\tR\vtenantToken\x12/\n" +
-	"\x04caps\x18\x05 \x01(\v2\x1b.agent.v1.AgentCapabilitiesR\x04caps\"W\n" +
+	"\x04caps\x18\x05 \x01(\v2\x1b.agent.v1.AgentCapabilitiesR\x04caps\x128\n" +
+	"\x18supported_proto_versions\x18\x06 \x03(\tR\x16supportedProtoVersions\"W\n" +
 	"\x11AgentCapabilities\x12\x12\n" +
 	"\x04logs\x18\x01 \x01(\bR\x04logs\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\bR\x05state\x12\x18\n" +
@@ -1168,14 +1229,16 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x06config\x18\x04 \x01(\v2\x16.agent.v1.ConfigUpdateH\x00R\x06config\x12B\n" +
 	"\fbackpressure\x18\x05 \x01(\v2\x1c.agent.v1.BackpressureSignalH\x00R\fbackpressure\x120\n" +
 	"\bshutdown\x18\x06 \x01(\v2\x12.agent.v1.ShutdownH\x00R\bshutdownB\t\n" +
-	"\apayload\"\xd2\x01\n" +
+	"\apayload\"\xb1\x02\n" +
 	"\x11HandshakeResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x02 \x01(\tR\tsessionId\x12%\n" +
 	"\x0eserver_version\x18\x03 \x01(\tR\rserverVersion\x12)\n" +
 	"\x10rejection_reason\x18\x04 \x01(\tR\x0frejectionReason\x120\n" +
-	"\x06config\x18\x05 \x01(\v2\x18.agent.v1.ConfigSnapshotR\x06config\"&\n" +
+	"\x06config\x18\x05 \x01(\v2\x18.agent.v1.ConfigSnapshotR\x06config\x12#\n" +
+	"\rproto_version\x18\x06 \x01(\tR\fprotoVersion\x128\n" +
+	"\x18supported_proto_versions\x18\a \x03(\tR\x16supportedProtoVersions\"&\n" +
 	"\x03Ack\x12\x1f\n" +
 	"\vmessage_ids\x18\x01 \x03(\tR\n" +
 	"messageIds\"K\n" +
@@ -1236,27 +1299,29 @@ func file_proto_agent_v1_agent_proto_rawDescGZIP() []byte {
 
 var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_proto_agent_v1_agent_proto_goTypes = []any{
-	(*AgentMessage)(nil),       // 0: agent.v1.AgentMessage
-	(*HandshakeRequest)(nil),   // 1: agent.v1.HandshakeRequest
-	(*AgentCapabilities)(nil),  // 2: agent.v1.AgentCapabilities
-	(*Heartbeat)(nil),          // 3: agent.v1.Heartbeat
-	(*AgentHealth)(nil),        // 4: agent.v1.AgentHealth
-	(*GatewayMessage)(nil),     // 5: agent.v1.GatewayMessage
-	(*HandshakeResponse)(nil),  // 6: agent.v1.HandshakeResponse
-	(*Ack)(nil),                // 7: agent.v1.Ack
-	(*BackpressureSignal)(nil), // 8: agent.v1.BackpressureSignal
-	(*Shutdown)(nil),           // 9: agent.v1.Shutdown
-	(*ConfigUpdate)(nil),       // 10: agent.v1.ConfigUpdate
-	(*ConfigSnapshot)(nil),     // 11: agent.v1.ConfigSnapshot
-	(*LogCollectorConfig)(nil), // 12: agent.v1.LogCollectorConfig
-	(*WatcherConfig)(nil),      // 13: agent.v1.WatcherConfig
-	(*MetricScrapeConfig)(nil), // 14: agent.v1.MetricScrapeConfig
-	nil,                        // 15: agent.v1.MetricScrapeConfig.ExtraLabelsEntry
-	(*v1.AgentMetadata)(nil),   // 16: common.v1.AgentMetadata
-	(*LogBatch)(nil),           // 17: agent.v1.LogBatch
-	(*StateEvent)(nil),         // 18: agent.v1.StateEvent
-	(*MetricBatch)(nil),        // 19: agent.v1.MetricBatch
-	(ResourceKind)(0),          // 20: agent.v1.ResourceKind
+	(*AgentMessage)(nil),           // 0: agent.v1.AgentMessage
+	(*HandshakeRequest)(nil),       // 1: agent.v1.HandshakeRequest
+	(*AgentCapabilities)(nil),      // 2: agent.v1.AgentCapabilities
+	(*Heartbeat)(nil),              // 3: agent.v1.Heartbeat
+	(*AgentHealth)(nil),            // 4: agent.v1.AgentHealth
+	(*GatewayMessage)(nil),         // 5: agent.v1.GatewayMessage
+	(*HandshakeResponse)(nil),      // 6: agent.v1.HandshakeResponse
+	(*Ack)(nil),                    // 7: agent.v1.Ack
+	(*BackpressureSignal)(nil),     // 8: agent.v1.BackpressureSignal
+	(*Shutdown)(nil),               // 9: agent.v1.Shutdown
+	(*ConfigUpdate)(nil),           // 10: agent.v1.ConfigUpdate
+	(*ConfigSnapshot)(nil),         // 11: agent.v1.ConfigSnapshot
+	(*LogCollectorConfig)(nil),     // 12: agent.v1.LogCollectorConfig
+	(*WatcherConfig)(nil),          // 13: agent.v1.WatcherConfig
+	(*MetricScrapeConfig)(nil),     // 14: agent.v1.MetricScrapeConfig
+	nil,                            // 15: agent.v1.MetricScrapeConfig.ExtraLabelsEntry
+	(*v1.AgentMetadata)(nil),       // 16: common.v1.AgentMetadata
+	(*LogBatch)(nil),               // 17: agent.v1.LogBatch
+	(*StateEvent)(nil),             // 18: agent.v1.StateEvent
+	(*MetricBatch)(nil),            // 19: agent.v1.MetricBatch
+	(*MetricsEvent)(nil),           // 20: agent.v1.MetricsEvent
+	(*PrometheusMetricsEvent)(nil), // 21: agent.v1.PrometheusMetricsEvent
+	(ResourceKind)(0),              // 22: agent.v1.ResourceKind
 }
 var file_proto_agent_v1_agent_proto_depIdxs = []int32{
 	16, // 0: agent.v1.AgentMessage.meta:type_name -> common.v1.AgentMetadata
@@ -1265,27 +1330,29 @@ var file_proto_agent_v1_agent_proto_depIdxs = []int32{
 	18, // 3: agent.v1.AgentMessage.state:type_name -> agent.v1.StateEvent
 	19, // 4: agent.v1.AgentMessage.metrics:type_name -> agent.v1.MetricBatch
 	3,  // 5: agent.v1.AgentMessage.heartbeat:type_name -> agent.v1.Heartbeat
-	2,  // 6: agent.v1.HandshakeRequest.caps:type_name -> agent.v1.AgentCapabilities
-	4,  // 7: agent.v1.Heartbeat.health:type_name -> agent.v1.AgentHealth
-	6,  // 8: agent.v1.GatewayMessage.handshake:type_name -> agent.v1.HandshakeResponse
-	7,  // 9: agent.v1.GatewayMessage.ack:type_name -> agent.v1.Ack
-	10, // 10: agent.v1.GatewayMessage.config:type_name -> agent.v1.ConfigUpdate
-	8,  // 11: agent.v1.GatewayMessage.backpressure:type_name -> agent.v1.BackpressureSignal
-	9,  // 12: agent.v1.GatewayMessage.shutdown:type_name -> agent.v1.Shutdown
-	11, // 13: agent.v1.HandshakeResponse.config:type_name -> agent.v1.ConfigSnapshot
-	11, // 14: agent.v1.ConfigUpdate.config:type_name -> agent.v1.ConfigSnapshot
-	12, // 15: agent.v1.ConfigSnapshot.log_collectors:type_name -> agent.v1.LogCollectorConfig
-	13, // 16: agent.v1.ConfigSnapshot.watchers:type_name -> agent.v1.WatcherConfig
-	14, // 17: agent.v1.ConfigSnapshot.metric_scrapers:type_name -> agent.v1.MetricScrapeConfig
-	20, // 18: agent.v1.WatcherConfig.kinds:type_name -> agent.v1.ResourceKind
-	15, // 19: agent.v1.MetricScrapeConfig.extra_labels:type_name -> agent.v1.MetricScrapeConfig.ExtraLabelsEntry
-	0,  // 20: agent.v1.AgentService.Connect:input_type -> agent.v1.AgentMessage
-	5,  // 21: agent.v1.AgentService.Connect:output_type -> agent.v1.GatewayMessage
-	21, // [21:22] is the sub-list for method output_type
-	20, // [20:21] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	20, // 6: agent.v1.AgentMessage.kube_metrics:type_name -> agent.v1.MetricsEvent
+	21, // 7: agent.v1.AgentMessage.prometheus_metrics:type_name -> agent.v1.PrometheusMetricsEvent
+	2,  // 8: agent.v1.HandshakeRequest.caps:type_name -> agent.v1.AgentCapabilities
+	4,  // 9: agent.v1.Heartbeat.health:type_name -> agent.v1.AgentHealth
+	6,  // 10: agent.v1.GatewayMessage.handshake:type_name -> agent.v1.HandshakeResponse
+	7,  // 11: agent.v1.GatewayMessage.ack:type_name -> agent.v1.Ack
+	10, // 12: agent.v1.GatewayMessage.config:type_name -> agent.v1.ConfigUpdate
+	8,  // 13: agent.v1.GatewayMessage.backpressure:type_name -> agent.v1.BackpressureSignal
+	9,  // 14: agent.v1.GatewayMessage.shutdown:type_name -> agent.v1.Shutdown
+	11, // 15: agent.v1.HandshakeResponse.config:type_name -> agent.v1.ConfigSnapshot
+	11, // 16: agent.v1.ConfigUpdate.config:type_name -> agent.v1.ConfigSnapshot
+	12, // 17: agent.v1.ConfigSnapshot.log_collectors:type_name -> agent.v1.LogCollectorConfig
+	13, // 18: agent.v1.ConfigSnapshot.watchers:type_name -> agent.v1.WatcherConfig
+	14, // 19: agent.v1.ConfigSnapshot.metric_scrapers:type_name -> agent.v1.MetricScrapeConfig
+	22, // 20: agent.v1.WatcherConfig.kinds:type_name -> agent.v1.ResourceKind
+	15, // 21: agent.v1.MetricScrapeConfig.extra_labels:type_name -> agent.v1.MetricScrapeConfig.ExtraLabelsEntry
+	0,  // 22: agent.v1.AgentService.Connect:input_type -> agent.v1.AgentMessage
+	5,  // 23: agent.v1.AgentService.Connect:output_type -> agent.v1.GatewayMessage
+	23, // [23:24] is the sub-list for method output_type
+	22, // [22:23] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_agent_proto_init() }
@@ -1302,6 +1369,8 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*AgentMessage_State)(nil),
 		(*AgentMessage_Metrics)(nil),
 		(*AgentMessage_Heartbeat)(nil),
+		(*AgentMessage_KubeMetrics)(nil),
+		(*AgentMessage_PrometheusMetrics)(nil),
 	}
 	file_proto_agent_v1_agent_proto_msgTypes[5].OneofWrappers = []any{
 		(*GatewayMessage_Handshake)(nil),

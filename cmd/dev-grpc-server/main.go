@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
+	"github.com/kubexa/kubexa-agent/pkg/protoversion"
 )
 
 const serverVersion = "dev-grpc-server"
@@ -104,10 +105,31 @@ func (g *devGateway) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessag
 		return status.Error(codes.PermissionDenied, rejectReason)
 	}
 
-	log.Printf("✓ handshake accepted session=%s cluster=%q agent_version=%q caps={logs:%v state:%v metrics:%v}",
+	negotiated, err := protoversion.ValidateAgentRequest(hs.GetProtoVersion(), hs.GetSupportedProtoVersions())
+	if err != nil {
+		rejectReason := err.Error()
+		log.Printf("✗ handshake rejected: %s", rejectReason)
+		resp := &agentv1.GatewayMessage{
+			MessageId: uuid.NewString(),
+			Payload: &agentv1.GatewayMessage_Handshake{
+				Handshake: &agentv1.HandshakeResponse{
+					Accepted:        false,
+					RejectionReason: rejectReason,
+					ServerVersion:   serverVersion,
+				},
+			},
+		}
+		if sendErr := stream.Send(resp); sendErr != nil {
+			return sendErr
+		}
+		return status.Error(codes.FailedPrecondition, rejectReason)
+	}
+
+	log.Printf("✓ handshake accepted session=%s cluster=%q agent_version=%q proto_version=%q caps={logs:%v state:%v metrics:%v}",
 		sessionID,
 		hs.GetClusterId(),
 		hs.GetAgentVersion(),
+		negotiated,
 		hs.GetCaps().GetLogs(),
 		hs.GetCaps().GetState(),
 		hs.GetCaps().GetMetrics(),
@@ -117,9 +139,11 @@ func (g *devGateway) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessag
 		MessageId: uuid.NewString(),
 		Payload: &agentv1.GatewayMessage_Handshake{
 			Handshake: &agentv1.HandshakeResponse{
-				Accepted:      true,
-				SessionId:     sessionID,
-				ServerVersion: serverVersion,
+				Accepted:               true,
+				SessionId:              sessionID,
+				ServerVersion:          serverVersion,
+				ProtoVersion:           negotiated,
+				SupportedProtoVersions: protoversion.Supported,
 			},
 		},
 	}); err != nil {
@@ -222,6 +246,34 @@ func printAgentMessage(msg *agentv1.AgentMessage, sessionID string) {
 		}
 		if raw := ev.GetObject(); len(raw) > 0 {
 			event["object"] = parseJSONValue(raw)
+		}
+		printJSONLine(event)
+	case *agentv1.AgentMessage_KubeMetrics:
+		ev := p.KubeMetrics
+		event := cloneMap(base)
+		event["type"] = "kube_metrics"
+		event["resource_type"] = strings.TrimPrefix(ev.GetResourceType().String(), "KUBE_METRICS_RESOURCE_TYPE_")
+		event["namespace"] = ev.GetNamespace()
+		event["name"] = ev.GetName()
+		event["cpu_millicores"] = ev.GetCpuMillicores()
+		event["memory_bytes"] = ev.GetMemoryBytes()
+		event["window_seconds"] = ev.GetWindowSeconds()
+		if ts := ev.GetTimestamp(); ts != 0 {
+			event["timestamp"] = time.UnixMilli(ts).UTC().Format(time.RFC3339Nano)
+			event["timestamp_ms"] = ts
+		}
+		printJSONLine(event)
+	case *agentv1.AgentMessage_PrometheusMetrics:
+		ev := p.PrometheusMetrics
+		event := cloneMap(base)
+		event["type"] = "prometheus_metrics"
+		event["target_url"] = ev.GetTargetUrl()
+		if ts := ev.GetScrapedAt(); ts != 0 {
+			event["scraped_at"] = time.UnixMilli(ts).UTC().Format(time.RFC3339Nano)
+			event["scraped_at_ms"] = ts
+		}
+		if raw := ev.GetMetricFamilyJson(); raw != "" {
+			event["metric_family"] = parseJSONString(raw)
 		}
 		printJSONLine(event)
 	case *agentv1.AgentMessage_Metrics:

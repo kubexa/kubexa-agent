@@ -58,8 +58,15 @@ func TestDefault(t *testing.T) {
 		}
 	}
 
-	if !cfg.Collect.Metrics.Enabled || !cfg.Collect.Metrics.KubeMetrics {
-		t.Errorf("collect.metrics = %+v, want enabled and kube_metrics true", cfg.Collect.Metrics)
+	if !cfg.Collect.Metrics.Enabled {
+		t.Error("collect.metrics.enabled = false, want true")
+	}
+	cfg.Normalize()
+	if len(cfg.Collect.Metrics.Rules) != 1 {
+		t.Fatalf("collect.metrics.rules len = %d, want 1", len(cfg.Collect.Metrics.Rules))
+	}
+	if !cfg.Collect.Metrics.Rules[0].IncludesPods() || !cfg.Collect.Metrics.Rules[0].IncludesNodes() {
+		t.Errorf("collect.metrics.rules[0] = %+v, want pods and nodes", cfg.Collect.Metrics.Rules[0])
 	}
 
 	if cfg.Buffer.MaxMemoryBytes != 64<<20 {
@@ -155,6 +162,9 @@ log:
 	}
 	if cfg.Collect.Metrics.KubeMetrics {
 		t.Error("collect.metrics.kube_metrics = true, want false")
+	}
+	if len(cfg.Collect.Metrics.Rules) != 0 {
+		t.Errorf("collect.metrics.rules len = %d, want 0", len(cfg.Collect.Metrics.Rules))
 	}
 	if len(cfg.Collect.Metrics.CustomEndpoints) != 1 {
 		t.Fatalf("custom_endpoints len = %d, want 1", len(cfg.Collect.Metrics.CustomEndpoints))
