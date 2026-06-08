@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/kubexa/kubexa-agent/internal/collector/logs"
+	"github.com/kubexa/kubexa-agent/internal/collector/state"
 	"github.com/kubexa/kubexa-agent/internal/health"
 	"github.com/kubexa/kubexa-agent/internal/k8s"
 	"github.com/kubexa/kubexa-agent/internal/k8s/k8sconfig"
@@ -157,10 +158,21 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 
 	metricsSrv := metrics.NewServer(metricsAddr, gatherer, logger.New("metrics"))
 
+	log.Info("collection settings",
+		logger.F("logs_enabled", cfg.Collect.Logs.Enabled),
+		logger.F("state_enabled", cfg.Collect.State.Enabled),
+		logger.F("metrics_enabled", cfg.Collect.Metrics.Enabled),
+	)
+
 	collectors, err := buildCollectors(cfg, kube, q, mainReg, log)
 	if err != nil {
 		_ = q.Close()
 		return fmt.Errorf("collectors: %w", err)
+	}
+	for _, coll := range collectors {
+		if ready, ok := coll.(health.StateWatcherReady); ok {
+			healthSrv.Register(health.NewStateWatcherChecker(ready))
+		}
 	}
 
 	g, ctx := errgroup.WithContext(parentCtx)
@@ -263,7 +275,24 @@ func buildCollectors(
 		collectors = append(collectors, logColl)
 	}
 
-	// TODO(step-11): state collector
+	if cfg.Collect.State.Enabled {
+		stateColl, err := state.New(state.Options{
+			Config: state.ConfigFromRoot(cfg),
+			Kube:   kube,
+			Queue:  q,
+			AgentMeta: &commonv1.AgentMetadata{
+				ClusterId: cfg.Agent.ClusterID,
+				AgentId:   cfg.Agent.AgentID,
+			},
+			Logger:     logger.New("state-watcher", logger.WithAgentID(cfg.Agent.AgentID)),
+			Registerer: reg,
+		})
+		if err != nil {
+			return nil, err
+		}
+		collectors = append(collectors, stateColl)
+	}
+
 	// TODO(step-12): metrics collector
 
 	return collectors, nil

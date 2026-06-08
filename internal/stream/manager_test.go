@@ -535,6 +535,76 @@ func TestDrainBufferedQueueAfterConnect(t *testing.T) {
 	cancel()
 }
 
+func TestDrainBufferedQueueSkipsLogsWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	var received sync.Map
+	srv := &mockGateway{
+		onConnect: func(stream grpc.BidiStreamingServer[agentv1.AgentMessage, agentv1.GatewayMessage]) error {
+			msg, err := stream.Recv()
+			if err != nil {
+				return err
+			}
+			if msg.GetHandshake() == nil {
+				return status.Error(codes.InvalidArgument, "expected handshake")
+			}
+			if err := stream.Send(&agentv1.GatewayMessage{
+				Payload: &agentv1.GatewayMessage_Handshake{
+					Handshake: &agentv1.HandshakeResponse{Accepted: true, SessionId: "sess-skip-logs"},
+				},
+			}); err != nil {
+				return err
+			}
+
+			for {
+				msg, err := stream.Recv()
+				if err != nil {
+					return err
+				}
+				received.Store(msg.GetMessageId(), msg)
+			}
+		},
+	}
+	_, lis := startBufGRPCServer(t, srv)
+
+	cfg := testConfig()
+	cfg.Collect.Logs.Enabled = false
+	q := newTestQueue(t)
+	sm, _ := newTestManager(t, cfg, q, lis)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = sm.Run(ctx) }()
+
+	waitFor(t, 3*time.Second, func() bool { return sm.Connected() })
+
+	logMsg := &agentv1.AgentMessage{
+		MessageId: "queued-log-disabled",
+		Payload: &agentv1.AgentMessage_Logs{
+			Logs: &agentv1.LogBatch{
+				Entries: []*agentv1.LogEntry{
+					{Namespace: "stage", PodName: "be-1", Message: "should not be delivered"},
+				},
+			},
+		},
+	}
+	payload, err := proto.Marshal(logMsg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := q.Enqueue(context.Background(), queue.Item{ID: logMsg.MessageId, Payload: payload}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	waitFor(t, 3*time.Second, func() bool { return q.Depth() == 0 })
+
+	if _, ok := received.Load("queued-log-disabled"); ok {
+		t.Fatal("log message was delivered while collect.logs.enabled is false")
+	}
+
+	cancel()
+}
+
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
