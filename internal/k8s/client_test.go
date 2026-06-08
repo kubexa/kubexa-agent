@@ -16,6 +16,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	testingk8s "k8s.io/client-go/testing"
@@ -25,6 +26,15 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/k8s/k8sconfig"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 )
+
+func testClient(t *testing.T, kube *fake.Clientset, metrics *metricsfake.Clientset, api *apiMetrics) Client {
+	t.Helper()
+	if metrics == nil {
+		metrics = metricsfake.NewSimpleClientset()
+	}
+	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+	return newClient(kube, dyn, metrics, logger.New("k8s-test"), api)
+}
 
 func TestDetectInClusterExplicit(t *testing.T) {
 	t.Parallel()
@@ -138,7 +148,7 @@ func TestNamespaceUID(t *testing.T) {
 		},
 	})
 
-	c := newClient(kube, metricsfake.NewSimpleClientset(), logger.New("k8s-test"), nil)
+	c := testClient(t, kube, nil, nil)
 	got, err := c.NamespaceUID(context.Background(), "kube-system")
 	if err != nil {
 		t.Fatalf("NamespaceUID() error = %v", err)
@@ -154,7 +164,7 @@ func TestReady(t *testing.T) {
 	kube := fake.NewSimpleClientset(&corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "default"},
 	})
-	c := newClient(kube, metricsfake.NewSimpleClientset(), logger.New("k8s-test"), nil)
+	c := testClient(t, kube, nil, nil)
 
 	if err := c.Ready(context.Background()); err != nil {
 		t.Fatalf("Ready() error = %v", err)
@@ -169,7 +179,7 @@ func TestReadyFailure(t *testing.T) {
 		return true, nil, apierrors.NewServiceUnavailable("api unavailable")
 	})
 
-	c := newClient(kube, metricsfake.NewSimpleClientset(), logger.New("k8s-test"), nil)
+	c := testClient(t, kube, nil, nil)
 	err := c.Ready(context.Background())
 	if err == nil {
 		t.Fatal("Ready() expected error")
@@ -195,7 +205,8 @@ func TestRetryOnTransientError(t *testing.T) {
 	logBuf := &bytes.Buffer{}
 	log := logger.New("k8s-test", logger.WithWriter(logBuf), logger.WithLevel(logger.LevelWarn))
 
-	c := newClient(kube, metricsfake.NewSimpleClientset(), log, nil)
+	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+	c := newClient(kube, dyn, metricsfake.NewSimpleClientset(), log, nil)
 	uid, err := c.NamespaceUID(context.Background(), "kube-system")
 	if err != nil {
 		t.Fatalf("NamespaceUID() error = %v", err)
@@ -224,7 +235,7 @@ func TestMetricsRegistration(t *testing.T) {
 		t.Fatalf("newAPIMetrics() error = %v", err)
 	}
 
-	c := newClient(kube, metricsfake.NewSimpleClientset(), logger.New("k8s-test"), apiMetrics)
+	c := testClient(t, kube, nil, apiMetrics)
 	if err := c.Ready(context.Background()); err != nil {
 		t.Fatalf("Ready() error = %v", err)
 	}
@@ -347,7 +358,7 @@ func TestPodMetrics(t *testing.T) {
 		return true, &metricsv1beta1.PodMetricsList{Items: []metricsv1beta1.PodMetrics{want}}, nil
 	})
 
-	c := newClient(fake.NewSimpleClientset(), metricsClient, logger.New("k8s-test"), nil)
+	c := testClient(t, fake.NewSimpleClientset(), metricsClient, nil)
 	got, err := c.PodMetrics(context.Background(), "default")
 	if err != nil {
 		t.Fatalf("PodMetrics() error = %v", err)

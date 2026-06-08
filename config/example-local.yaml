@@ -26,7 +26,7 @@ gateway:
 
 collect:
   logs:
-    enabled: true
+    enabled: false
     tail_lines: 100
     follow: true
     # Optional: persist stream read positions across restarts (separate from buffer.spill_dir).
@@ -49,15 +49,15 @@ collect:
     resync_period: 5m
     # Per-namespace state collection rules.
     rules:
-      - id: prod-core
-        namespace: production
+      - id: stage-core
+        namespace: stage
         resources:
           - pods
           - services
-      - namespace: ingress-nginx
-        resources:
-          - ingresses
-        resync_period: 2m
+          - jobs
+          - cronjobs
+          - deployments
+          - statefulsets
   metrics:
     enabled: true
     kube_metrics: true

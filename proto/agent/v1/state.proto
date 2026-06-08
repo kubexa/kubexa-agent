@@ -4,13 +4,15 @@ package agent.v1;
 option go_package = "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1";
 
 message StateEvent {
-  EventType        type   = 1;
-  ResourceKind     kind   = 2;
-  string           name   = 3;
-  string           namespace = 4;
-  bytes            object = 5; // JSON encoded kubernetes object
-  int64            timestamp = 6;
-  map<string, string> labels = 7;
+  EventType           type         = 1;
+  ResourceKind        kind         = 2;
+  string              name         = 3;
+  string              namespace    = 4;
+  bytes               object       = 5; // JSON encoded kubernetes object
+  int64               timestamp    = 6;
+  map<string, string> labels       = 7;
+  string              api_version  = 8; // group/version, e.g. "batch/v1"
+  string              resource     = 9; // plural API resource, e.g. "jobs"
 }
 
 enum EventType {
@@ -21,13 +23,29 @@ enum EventType {
 }
 
 enum ResourceKind {
-  RESOURCE_KIND_UNSPECIFIED  = 0;
-  RESOURCE_KIND_POD          = 1;
-  RESOURCE_KIND_SERVICE      = 2;
-  RESOURCE_KIND_SECRET       = 3;
-  RESOURCE_KIND_DEPLOYMENT   = 4;
-  RESOURCE_KIND_NODE         = 5;
-  RESOURCE_KIND_NAMESPACE    = 6;
-  RESOURCE_KIND_CONFIGMAP    = 7;
-  RESOURCE_KIND_INGRESS      = 8;
+  RESOURCE_KIND_UNSPECIFIED       = 0;
+  RESOURCE_KIND_POD               = 1;
+  RESOURCE_KIND_SERVICE           = 2;
+  RESOURCE_KIND_SECRET            = 3;
+  RESOURCE_KIND_DEPLOYMENT        = 4;
+  RESOURCE_KIND_NODE              = 5;
+  RESOURCE_KIND_NAMESPACE         = 6;
+  RESOURCE_KIND_CONFIGMAP         = 7;
+  RESOURCE_KIND_INGRESS           = 8;
+  RESOURCE_KIND_JOB               = 9;
+  RESOURCE_KIND_CRONJOB           = 10;
+  RESOURCE_KIND_STATEFULSET       = 11;
+  RESOURCE_KIND_DAEMONSET         = 12;
+  RESOURCE_KIND_REPLICASET        = 13;
+  RESOURCE_KIND_PERSISTENT_VOLUME_CLAIM = 14;
+  RESOURCE_KIND_HORIZONTAL_POD_AUTOSCALER = 15;
+  RESOURCE_KIND_SERVICE_ACCOUNT   = 16;
+  RESOURCE_KIND_ROLE              = 17;
+  RESOURCE_KIND_ROLE_BINDING      = 18;
+  RESOURCE_KIND_CLUSTER_ROLE      = 19;
+  RESOURCE_KIND_CLUSTER_ROLE_BINDING = 20;
+  RESOURCE_KIND_NETWORK_POLICY    = 21;
+  RESOURCE_KIND_POD_DISRUPTION_BUDGET = 22;
+  RESOURCE_KIND_STORAGE_CLASS     = 23;
+  RESOURCE_KIND_ENDPOINT_SLICE    = 24;
 }
