@@ -55,7 +55,9 @@ func TestParseResourceKind(t *testing.T) {
 		{"pods", "pods", agentv1.ResourceKind_RESOURCE_KIND_POD, false},
 		{"ingress", "ingress", agentv1.ResourceKind_RESOURCE_KIND_INGRESS, false},
 		{"ingresses", "ingresses", agentv1.ResourceKind_RESOURCE_KIND_INGRESS, false},
-		{"unknown", "cronjobs", agentv1.ResourceKind_RESOURCE_KIND_UNSPECIFIED, true},
+		{"jobs", "jobs", agentv1.ResourceKind_RESOURCE_KIND_JOB, false},
+		{"cronjobs", "cronjobs", agentv1.ResourceKind_RESOURCE_KIND_CRONJOB, false},
+		{"unknown", "not-a-resource", agentv1.ResourceKind_RESOURCE_KIND_UNSPECIFIED, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

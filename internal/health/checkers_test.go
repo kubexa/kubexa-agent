@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 
@@ -40,6 +42,10 @@ func (m *mockK8sClient) PodMetrics(context.Context, string) ([]k8s.PodMetric, er
 func (m *mockK8sClient) NamespaceUID(context.Context, string) (string, error) { return "", nil }
 
 func (m *mockK8sClient) Ready(ctx context.Context) error { return m.ready }
+
+func (m *mockK8sClient) Clientset() kubernetes.Interface { return nil }
+
+func (m *mockK8sClient) Dynamic() dynamic.Interface { return nil }
 
 type mockStreamManager struct {
 	connected bool

@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -44,6 +45,12 @@ type Client interface {
 
 	// Ready returns nil if the Kubernetes API is reachable.
 	Ready(ctx context.Context) error
+
+	// Clientset returns the underlying Kubernetes client for shared informers.
+	Clientset() kubernetes.Interface
+
+	// Dynamic returns the dynamic client for arbitrary API resources (CRDs).
+	Dynamic() dynamic.Interface
 }
 
 // inClusterConfigFunc resolves in-cluster REST config; overridden in tests.
@@ -51,6 +58,7 @@ var inClusterConfigFunc = rest.InClusterConfig
 
 type client struct {
 	kube    kubernetes.Interface
+	dynamic dynamic.Interface
 	metrics metricsclientset.Interface
 	log     *logger.Logger
 	api     *apiMetrics
@@ -77,6 +85,11 @@ func New(cfg *k8sconfig.Config, log *logger.Logger) (Client, error) {
 		return nil, fmt.Errorf("k8s client: create metrics clientset: %w", err)
 	}
 
+	dynamicClient, err := dynamic.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("k8s client: create dynamic clientset: %w", err)
+	}
+
 	var apiMetrics *apiMetrics
 	if cfg.MetricsRegisterer != nil {
 		apiMetrics, err = newAPIMetrics(cfg.MetricsRegisterer)
@@ -85,12 +98,13 @@ func New(cfg *k8sconfig.Config, log *logger.Logger) (Client, error) {
 		}
 	}
 
-	return newClient(kube, metricsClient, log, apiMetrics), nil
+	return newClient(kube, dynamicClient, metricsClient, log, apiMetrics), nil
 }
 
-func newClient(kube kubernetes.Interface, metrics metricsclientset.Interface, log *logger.Logger, api *apiMetrics) Client {
+func newClient(kube kubernetes.Interface, dyn dynamic.Interface, metrics metricsclientset.Interface, log *logger.Logger, api *apiMetrics) Client {
 	return &client{
 		kube:    kube,
+		dynamic: dyn,
 		metrics: metrics,
 		log:     log,
 		api:     api,
@@ -207,6 +221,16 @@ func (c *client) NamespaceUID(ctx context.Context, name string) (string, error) 
 		return "", fmt.Errorf("k8s client: get namespace %q: %w", name, err)
 	}
 	return string(ns.UID), nil
+}
+
+// Clientset returns the underlying Kubernetes clientset.
+func (c *client) Clientset() kubernetes.Interface {
+	return c.kube
+}
+
+// Dynamic returns the underlying dynamic clientset.
+func (c *client) Dynamic() dynamic.Interface {
+	return c.dynamic
 }
 
 // Ready returns nil when the Kubernetes API server is reachable.

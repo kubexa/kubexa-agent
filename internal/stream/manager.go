@@ -628,6 +628,18 @@ func (m *streamManager) handleGatewayMessage(msg *agentv1.GatewayMessage) {
 	}
 }
 
+// shouldDeliverQueuedMessage reports whether a recovered queue item may be sent on the stream.
+// Log payloads are dropped when collect.logs.enabled is false so stale spill data is not exported.
+func shouldDeliverQueuedMessage(cfg *config.Config, msg *agentv1.AgentMessage) bool {
+	if cfg == nil || msg == nil {
+		return false
+	}
+	if _, isLog := msg.Payload.(*agentv1.AgentMessage_Logs); isLog && !cfg.Collect.Logs.Enabled {
+		return false
+	}
+	return true
+}
+
 func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
 	batchSize := m.cfg.Buffer.BatchSize
 	if batchSize <= 0 {
@@ -646,10 +658,16 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 			continue
 		}
 		var ackIDs []string
+		var skippedLogs int
 		for _, item := range items {
 			var msg agentv1.AgentMessage
 			if err := proto.Unmarshal(item.Payload, &msg); err != nil {
 				m.log.Err(err).Warn("skip invalid queued payload", logger.F("id", item.ID))
+				ackIDs = append(ackIDs, item.ID)
+				continue
+			}
+			if !shouldDeliverQueuedMessage(m.cfg, &msg) {
+				skippedLogs++
 				ackIDs = append(ackIDs, item.ID)
 				continue
 			}
@@ -659,6 +677,11 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				return
 			}
 			ackIDs = append(ackIDs, item.ID)
+		}
+		if skippedLogs > 0 {
+			m.log.Info("discarded buffered log messages (logs collection disabled)",
+				logger.F("count", skippedLogs),
+			)
 		}
 		if len(ackIDs) > 0 {
 			_ = m.queue.Ack(ackIDs)

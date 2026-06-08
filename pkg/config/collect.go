@@ -9,28 +9,9 @@ import (
 	"github.com/google/uuid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/kubexa/kubexa-agent/pkg/config/k8sresource"
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
-
-// Supported state resource names (lowercase plural).
-var supportedStateResources = map[string]agentv1.ResourceKind{
-	"pods":         agentv1.ResourceKind_RESOURCE_KIND_POD,
-	"pod":          agentv1.ResourceKind_RESOURCE_KIND_POD,
-	"services":     agentv1.ResourceKind_RESOURCE_KIND_SERVICE,
-	"service":      agentv1.ResourceKind_RESOURCE_KIND_SERVICE,
-	"secrets":      agentv1.ResourceKind_RESOURCE_KIND_SECRET,
-	"secret":       agentv1.ResourceKind_RESOURCE_KIND_SECRET,
-	"deployments":  agentv1.ResourceKind_RESOURCE_KIND_DEPLOYMENT,
-	"deployment":   agentv1.ResourceKind_RESOURCE_KIND_DEPLOYMENT,
-	"nodes":        agentv1.ResourceKind_RESOURCE_KIND_NODE,
-	"node":         agentv1.ResourceKind_RESOURCE_KIND_NODE,
-	"namespaces":   agentv1.ResourceKind_RESOURCE_KIND_NAMESPACE,
-	"namespace":    agentv1.ResourceKind_RESOURCE_KIND_NAMESPACE,
-	"configmaps":   agentv1.ResourceKind_RESOURCE_KIND_CONFIGMAP,
-	"configmap":    agentv1.ResourceKind_RESOURCE_KIND_CONFIGMAP,
-	"ingresses":    agentv1.ResourceKind_RESOURCE_KIND_INGRESS,
-	"ingress":      agentv1.ResourceKind_RESOURCE_KIND_INGRESS,
-}
 
 // Normalize fills default collection rules and assigns rule IDs where missing.
 func (c *Config) Normalize() {
@@ -248,15 +229,12 @@ func (r *StateNamespaceRule) WatchListOptions() metav1.ListOptions {
 
 // ParseResourceKind maps a configured resource name to its proto ResourceKind.
 func ParseResourceKind(name string) (agentv1.ResourceKind, error) {
-	key := strings.ToLower(strings.TrimSpace(name))
-	if key == "" {
-		return agentv1.ResourceKind_RESOURCE_KIND_UNSPECIFIED, fmt.Errorf("resource name must not be empty")
-	}
-	kind, ok := supportedStateResources[key]
-	if !ok {
-		return agentv1.ResourceKind_RESOURCE_KIND_UNSPECIFIED, fmt.Errorf("unsupported resource %q", name)
-	}
-	return kind, nil
+	return k8sresource.ParseResourceKind(name)
+}
+
+// ParseStateResource maps a configured resource name to full API metadata.
+func ParseStateResource(name string) (k8sresource.Descriptor, error) {
+	return k8sresource.Parse(name)
 }
 
 // ParseResourceKinds maps configured resource names to proto ResourceKind values.
@@ -274,7 +252,7 @@ func ParseResourceKinds(names []string) ([]agentv1.ResourceKind, error) {
 
 // ToProtoLogCollectors converts log collection rules to gateway proto configs.
 func (l *LogsCollectConfig) ToProtoLogCollectors() ([]*agentv1.LogCollectorConfig, error) {
-	if l == nil {
+	if l == nil || !l.Enabled {
 		return nil, nil
 	}
 	out := make([]*agentv1.LogCollectorConfig, 0, len(l.Rules))
