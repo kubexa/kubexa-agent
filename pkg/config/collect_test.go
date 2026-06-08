@@ -186,3 +186,33 @@ func TestValidateStateRuleResources(t *testing.T) {
 		t.Fatal("Validate() = nil, want error for invalid resource")
 	}
 }
+
+func TestMetricsNamespaceRuleIncludesResources(t *testing.T) {
+	rule := config.MetricsNamespaceRule{Resources: []string{"pods", "nodes"}}
+	if !rule.IncludesPods() || !rule.IncludesNodes() {
+		t.Fatalf("IncludesPods/IncludesNodes = false, want true for %+v", rule)
+	}
+}
+
+func TestValidateMetricsRuleResources(t *testing.T) {
+	cfg := config.Default()
+	cfg.Collect.Metrics.Rules = []config.MetricsNamespaceRule{
+		{ID: "bad", Namespace: "default", Resources: []string{"deployments"}},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() = nil, want error for invalid metrics resource")
+	}
+}
+
+func TestMetricsKubeMetricsLegacyNormalize(t *testing.T) {
+	cfg := config.Default()
+	cfg.Collect.Metrics.Rules = nil
+	cfg.Collect.Metrics.KubeMetrics = true
+	cfg.Normalize()
+	if len(cfg.Collect.Metrics.Rules) != 1 {
+		t.Fatalf("rules len = %d, want 1 after kube_metrics normalize", len(cfg.Collect.Metrics.Rules))
+	}
+	if !cfg.Collect.Metrics.Rules[0].IncludesPods() || !cfg.Collect.Metrics.Rules[0].IncludesNodes() {
+		t.Errorf("legacy rule = %+v", cfg.Collect.Metrics.Rules[0])
+	}
+}

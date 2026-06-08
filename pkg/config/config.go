@@ -132,8 +132,37 @@ type StateNamespaceRule struct {
 // MetricsCollectConfig configures metrics collection.
 type MetricsCollectConfig struct {
 	Enabled         bool                   `yaml:"enabled"`
-	KubeMetrics     bool                   `yaml:"kube_metrics"`
+	PodInterval     time.Duration          `yaml:"pod_interval"`
+	NodeInterval    time.Duration          `yaml:"node_interval"`
+	Rules           []MetricsNamespaceRule `yaml:"rules"`
 	CustomEndpoints []MetricEndpointConfig `yaml:"custom_endpoints"`
+	// KubeMetrics is deprecated; use rules instead. When true and rules is empty,
+	// normalize creates a cluster-wide pods+nodes rule for backward compatibility.
+	KubeMetrics bool `yaml:"kube_metrics,omitempty"`
+}
+
+// MetricsNamespaceRule defines Kubernetes Metrics API collection scoped by namespace and filters.
+type MetricsNamespaceRule struct {
+	// ID uniquely identifies the rule; generated when empty.
+	ID string `yaml:"id,omitempty"`
+	// Namespace limits pod metrics to this namespace; empty means all namespaces.
+	Namespace string `yaml:"namespace"`
+	// Resources lists metrics resources to scrape (pods, nodes).
+	Resources []string `yaml:"resources"`
+	// PodNames limits pod metrics to matching pod names (supports * suffix wildcards).
+	PodNames []string `yaml:"pod_names,omitempty"`
+	// NodeNames limits node metrics to matching node names (supports * suffix wildcards).
+	NodeNames []string `yaml:"node_names,omitempty"`
+	// LabelSelector filters pods using Kubernetes label selector syntax.
+	LabelSelector string `yaml:"label_selector,omitempty"`
+	// FieldSelector filters pods using Kubernetes field selector syntax.
+	FieldSelector string `yaml:"field_selector,omitempty"`
+	// Labels is shorthand for label equality matches; merged into LabelSelector when unset.
+	Labels map[string]string `yaml:"labels,omitempty"`
+	// PodInterval overrides MetricsCollectConfig.PodInterval for this rule.
+	PodInterval time.Duration `yaml:"pod_interval,omitempty"`
+	// NodeInterval overrides MetricsCollectConfig.NodeInterval for this rule.
+	NodeInterval time.Duration `yaml:"node_interval,omitempty"`
 }
 
 // MetricEndpointConfig defines a scrape target for custom metrics.
@@ -202,8 +231,7 @@ func Default() *Config {
 				},
 			},
 			Metrics: MetricsCollectConfig{
-				Enabled:     true,
-				KubeMetrics: true,
+				Enabled: true,
 			},
 		},
 		Buffer: BufferConfig{
@@ -327,6 +355,7 @@ func (c *Config) Validate() error {
 
 	violations = append(violations, c.Collect.Logs.validate()...)
 	violations = append(violations, c.Collect.State.validate()...)
+	violations = append(violations, c.Collect.Metrics.validate()...)
 
 	if len(violations) == 0 {
 		return nil

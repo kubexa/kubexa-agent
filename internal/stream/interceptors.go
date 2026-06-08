@@ -14,9 +14,8 @@ import (
 
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	"github.com/kubexa/kubexa-agent/pkg/config"
+	"github.com/kubexa/kubexa-agent/pkg/protoversion"
 )
-
-const protoVersion = "v1"
 
 // AgentVersion is the semver reported to the gateway; override at link time when needed.
 var AgentVersion = "dev"
@@ -112,7 +111,7 @@ func (d interceptorDeps) attachAuth(ctx context.Context) context.Context {
 	return metadata.AppendToOutgoingContext(ctx,
 		"x-tenant-token", cfg.Agent.TenantToken,
 		"x-agent-version", AgentVersion,
-		"x-proto-version", protoVersion,
+		"x-proto-version", protoversion.Current,
 		"x-cluster-id", cfg.Agent.ClusterID,
 	)
 }
