@@ -15,7 +15,8 @@ const lastAppliedConfigAnnotation = "kubectl.kubernetes.io/last-applied-configur
 
 var jsonBufPool = sync.Pool{
 	New: func() any {
-		return make([]byte, 0, 4096)
+		b := make([]byte, 0, 4096)
+		return &b
 	},
 }
 
@@ -103,11 +104,11 @@ func MarshalObjectJSON(obj runtime.Object, pluralResource string) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
-	buf := jsonBufPool.Get().([]byte)
-	buf = append(buf[:0], enc...)
-	result := make([]byte, len(buf))
-	copy(result, buf)
-	jsonBufPool.Put(buf)
+	bufPtr := jsonBufPool.Get().(*[]byte)
+	*bufPtr = append((*bufPtr)[:0], enc...)
+	result := make([]byte, len(*bufPtr))
+	copy(result, *bufPtr)
+	jsonBufPool.Put(bufPtr)
 	return result, nil
 }
 

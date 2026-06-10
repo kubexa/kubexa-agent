@@ -71,7 +71,7 @@ func (f *MetricFilter) Allows(name string) bool {
 
 // ParsePrometheusText parses Prometheus exposition format (text 0.0.4) from data.
 func ParsePrometheusText(data []byte) ([]ParsedFamily, error) {
-	dec := expfmt.NewDecoder(bytes.NewReader(data), expfmt.FmtText)
+	dec := expfmt.NewDecoder(bytes.NewReader(data), expfmt.NewFormat(expfmt.TypeTextPlain))
 	var families []ParsedFamily
 	for {
 		var fam dto.MetricFamily

@@ -254,7 +254,9 @@ func (c *Collector) startInformers(ctx context.Context) error {
 			seenInformers[key] = struct{}{}
 
 			informer := factory.ForResource(desc.GVR).Informer()
-			informer.AddEventHandler(emitter.handlersFor(desc))
+			if _, err := informer.AddEventHandler(emitter.handlersFor(desc)); err != nil {
+				return fmt.Errorf("register event handler for %s: %w", desc.MetricLabel, err)
+			}
 			allSyncs = append(allSyncs, informer.HasSynced)
 			c.metrics.setCacheSynced(desc.MetricLabel, false)
 			syncedLabels = append(syncedLabels, desc.MetricLabel)

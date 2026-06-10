@@ -243,6 +243,7 @@ func TestContextHelpers(t *testing.T) {
 			t.Fatal("noop logger should not write")
 		}
 
+		//nolint:staticcheck // verifies nil context yields noop logger
 		noop2 := FromContext(nil)
 		if noop2 == nil {
 			t.Fatal("expected noop logger, not nil")
@@ -325,6 +326,7 @@ func TestNewContextNilUsesBackground(t *testing.T) {
 	withLevel(t, LevelInfo, func() {
 		var buf bytes.Buffer
 		log := New("agent", WithWriter(&buf))
+		//nolint:staticcheck // verifies nil parent context is treated as background
 		ctx := NewContext(nil, log)
 		FromContext(ctx).Info("ok")
 		if !strings.Contains(buf.String(), "ok") {

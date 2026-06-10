@@ -277,21 +277,8 @@ func printAgentMessage(msg *agentv1.AgentMessage, sessionID string) {
 		}
 		printJSONLine(event)
 	case *agentv1.AgentMessage_Metrics:
-		for _, fam := range p.Metrics.GetFamilies() {
-			for _, m := range fam.GetMetrics() {
-				event := cloneMap(base)
-				event["type"] = "metric"
-				event["family"] = fam.GetName()
-				event["help"] = fam.GetHelp()
-				event["metric_type"] = strings.TrimPrefix(fam.GetType().String(), "METRIC_TYPE_")
-				event["labels"] = m.GetLabels()
-				event["value"] = m.GetValue()
-				if m.GetTimestamp() != 0 {
-					event["timestamp_ms"] = m.GetTimestamp()
-				}
-				printJSONLine(event)
-			}
-		}
+		//nolint:staticcheck // legacy MetricBatch payload; dev server prints all wire formats
+		printLegacyMetricBatch(p.Metrics, base)
 	case *agentv1.AgentMessage_Heartbeat:
 		h := p.Heartbeat
 		health := h.GetHealth()
@@ -308,6 +295,27 @@ func printAgentMessage(msg *agentv1.AgentMessage, sessionID string) {
 		event := cloneMap(base)
 		event["type"] = "unknown"
 		printJSONLine(event)
+	}
+}
+
+// printLegacyMetricBatch logs deprecated MetricBatch payloads for older agents.
+//
+//nolint:staticcheck // dev server intentionally handles legacy AgentMessage.Metrics wire format
+func printLegacyMetricBatch(batch *agentv1.MetricBatch, base map[string]any) {
+	for _, fam := range batch.GetFamilies() {
+		for _, m := range fam.GetMetrics() {
+			event := cloneMap(base)
+			event["type"] = "metric"
+			event["family"] = fam.GetName()
+			event["help"] = fam.GetHelp()
+			event["metric_type"] = strings.TrimPrefix(fam.GetType().String(), "METRIC_TYPE_")
+			event["labels"] = m.GetLabels()
+			event["value"] = m.GetValue()
+			if m.GetTimestamp() != 0 {
+				event["timestamp_ms"] = m.GetTimestamp()
+			}
+			printJSONLine(event)
+		}
 	}
 }
 

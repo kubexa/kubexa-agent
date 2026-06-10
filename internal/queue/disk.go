@@ -296,7 +296,7 @@ func replaySegment(path string, pending map[string]Item, acked map[string]struct
 	if err != nil {
 		return fmt.Errorf("open segment %q: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	r := bufio.NewReader(f)
 	magic := make([]byte, len(walMagic))

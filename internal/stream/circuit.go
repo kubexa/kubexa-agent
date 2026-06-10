@@ -72,14 +72,6 @@ func classifyGRPCError(err error) (permanent bool, transient bool) {
 	}
 }
 
-func permanentFromCode(code codes.Code, detail string) error {
-	msg := fmt.Sprintf("gateway rejected connection: %s", code.String())
-	if detail != "" {
-		msg = fmt.Sprintf("%s: %s", msg, detail)
-	}
-	return &permanentGatewayError{code: code, message: msg}
-}
-
 func handshakeRejected(reason string) error {
 	msg := "gateway rejected handshake"
 	if reason != "" {
