@@ -139,7 +139,7 @@ func (s *customScraper) fetch(ctx context.Context, client *http.Client, target S
 	if err != nil {
 		return nil, 0, fmt.Errorf("execute scrape request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	const maxBody = 32 << 20
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
