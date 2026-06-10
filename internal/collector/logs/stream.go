@@ -252,7 +252,7 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 	if err != nil {
 		return fmt.Errorf("open log stream: %w", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	scanner := bufio.NewScanner(reader)
 	const maxLineSize = 256 * 1024

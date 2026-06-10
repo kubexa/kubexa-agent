@@ -89,16 +89,6 @@ func waitForHealth(t *testing.T, addr, path string) {
 	t.Fatalf("health server at %s did not become ready", addr)
 }
 
-func newTestHealthMetrics(t *testing.T) *metrics.HealthMetrics {
-	t.Helper()
-	reg := prometheus.NewRegistry()
-	m, err := metrics.New(reg, "test", "cluster", "agent")
-	if err != nil {
-		t.Fatalf("metrics.New() error = %v", err)
-	}
-	return m.Health()
-}
-
 func TestLivenessAlwaysOK(t *testing.T) {
 	t.Parallel()
 
@@ -110,7 +100,7 @@ func TestLivenessAlwaysOK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /healthz error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -151,7 +141,7 @@ func TestReadinessAllHealthy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /readyz error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -514,7 +504,7 @@ func TestStartReturnsListenErrorWhenPortInUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
-	defer occupied.Close()
+	defer func() { _ = occupied.Close() }()
 
 	srv := New(HealthConfig{Addr: occupied.Addr().String()}, logger.New("health-test"), nil)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
