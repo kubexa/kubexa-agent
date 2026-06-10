@@ -1,0 +1,29 @@
+Kubexa agent has been deployed (singleton: replicas=1).
+
+WARNING: Do not scale this Deployment above 1 replica — duplicate data would be sent to the gateway.
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+Gateway:   {{ include "kubexa-agent.gatewayAddress" . }} (tls={{ .Values.gateway.tls }})
+
+Collectors:
+  logs:    {{ .Values.collect.logs.enabled }}
+  state:   {{ .Values.collect.state.enabled }}
+  metrics: {{ .Values.collect.metrics.enabled }}
+
+Health:  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "kubexa-agent.fullname" . }} {{ .Values.service.healthPort }}:{{ .Values.service.healthPort }}
+Metrics: kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "kubexa-agent.fullname" . }} {{ .Values.service.metricsPort }}:{{ .Values.service.metricsPort }}
+
+Upgrade example:
+  helm upgrade {{ .Release.Name }} ./helm/kubexa-agent \
+    --namespace {{ .Release.Namespace }} \
+    --reuse-values \
+    --set collect.logs.rules[0].namespace=production
+
+OCI install (GHCR):
+  helm install {{ .Release.Name }} oci://ghcr.io/kubexa/charts/kubexa-agent \
+    --version {{ .Chart.Version }} \
+    --namespace {{ .Release.Namespace }} \
+    --create-namespace \
+    --set gateway.host=gateway.example.com \
+    --set secret.tenantToken=<token>

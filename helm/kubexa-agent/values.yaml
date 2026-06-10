@@ -1,0 +1,203 @@
+# Default values for kubexa-agent.
+# Values map 1:1 to pkg/config.Config (see templates/configmap.yaml).
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/kubexa/kubexa-agent
+  tag: "" # defaults to Chart.appVersion when empty
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+rbac:
+  create: true
+  # Extra ClusterRole rules appended to the generated role.
+  extraRules: []
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Singleton deployment: the agent must run exactly one replica per cluster.
+# Multiple replicas duplicate logs, state events, and metrics to the gateway
+# (no leader election). replicas is fixed at 1 in templates/deployment.yaml.
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Persistent volume for buffer spill and log checkpoints.
+persistence:
+  enabled: true
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+  annotations: {}
+
+# Sensitive values — prefer existingSecret in production.
+secret:
+  create: true
+  # Use an existing Secret instead of creating one (key: tenant-token).
+  existingSecret: ""
+  existingSecretKey: tenant-token
+  # Inline token used only when secret.create=true and existingSecret="".
+  # Override at install: --set secret.tenantToken=<token> or use secret.existingSecret.
+  tenantToken: "CHANGEME"
+
+# Optional env overrides (see pkg/config applyEnvOverrides).
+# Example: KUBEXA_GATEWAY_ADDRESS, KUBEXA_CLUSTER_ID, KUBEXA_LOG_LEVEL
+env: {}
+
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+
+# ─── agent config (config.yaml) ─────────────────────────────────────────────
+
+agent:
+  # tenant_token is injected via KUBEXA_TENANT_TOKEN from Secret — leave empty here.
+  tenantToken: ""
+  agentId: ""
+  clusterId: "" # auto-resolved from kube-system UID when empty
+
+gateway:
+  # Full host:port address. When set, overrides gateway.host/port.
+  address: ""
+  host: gateway.kubexa.dev
+  port: 443
+  tls: true
+  insecureSkipVerify: false
+  caCertPath: ""
+  reconnectInitialDelay: 2s
+  reconnectMaxDelay: 60s
+  dialTimeout: 10s
+  handshakeTimeout: 10s
+
+collect:
+  logs:
+    enabled: true
+    tailLines: 100
+    follow: true
+    checkpointDir: /var/lib/kubexa/log-checkpoints
+    excludeNamespaces:
+      - kube-system
+      - kube-public
+    rules: []
+    # Example:
+    # rules:
+    #   - id: prod-api
+    #     namespace: production
+    #     podNames:
+    #       - api-*
+    #     labelSelector: app=api
+    #     containers:
+    #       - api
+
+  state:
+    enabled: true
+    resyncPeriod: 5m
+    rules:
+      - id: cluster-core
+        namespace: ""
+        resources:
+          - pods
+          - services
+          - deployments
+          - secrets
+
+  metrics:
+    enabled: true
+    podInterval: 30s
+    nodeInterval: 30s
+    kubeMetrics: false
+    rules:
+      - id: cluster-metrics
+        namespace: ""
+        resources:
+          - pods
+          - nodes
+    customEndpoints: []
+    # Example:
+    # customEndpoints:
+    #   - name: my-app
+    #     url: http://my-app.metrics.svc:8080/metrics
+    #     interval: 30s
+    #     extraLabels:
+    #       service: my-app
+
+buffer:
+  maxMemoryBytes: 67108864 # 64 MiB
+  spillDir: /var/lib/kubexa/spill
+  maxDiskBytes: 536870912 # 512 MiB
+  batchSize: 100
+  flushInterval: 1s
+
+observability:
+  metricsAddr: ":9090"
+  healthAddr: ":8080"
+
+log:
+  level: info
+  format: json
+
+# ClusterIP Service exposing agent health and self-metrics endpoints.
+service:
+  enabled: true
+  type: ClusterIP
+  annotations: {}
+  metricsPort: 9090
+  healthPort: 8080
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: health
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3

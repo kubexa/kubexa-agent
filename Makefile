@@ -16,7 +16,7 @@ GO_BUILD_FLAGS  := -ldflags="$(LDFLAGS)"
 DOCKER_IMAGE    := kubexa/kubexa-agent
 DOCKER_TAG      := $(VERSION)
 
-.PHONY: all build test lint proto gen clean docker-build helm-lint run run-local run-dev run-dev-grpc help
+.PHONY: all build test lint proto gen clean docker-build helm-lint helm-template helm-package helm-push-oci run run-local run-dev run-dev-grpc help
 
 all: proto build
 
@@ -94,17 +94,22 @@ docker-push: ## push docker image
 helm-lint: ## run helm chart lint
 	helm lint helm/kubexa-agent
 
-helm-template: ## run helm template (debug)
+helm-template: ## render chart manifests (debug)
 	helm template kubexa-agent helm/kubexa-agent \
-		--set agent.clusterId=local-dev \
-		--set agent.backend.host=localhost \
-		--set agent.backend.port=50051 \
-		--set agent.backend.tls=false
+		--namespace kubexa \
+		--set secret.tenantToken=dev-token \
+		--set gateway.address=127.0.0.1:50051 \
+		--set gateway.tls=false \
+		--set persistence.enabled=false
 
-helm-package: ## package helm chart
+helm-package: ## package helm chart to dist/
 	@mkdir -p dist
-	helm package helm/kubexa-agent -d dist
+	helm package helm/kubexa-agent -d dist \
+		--version $(shell grep '^version:' helm/kubexa-agent/Chart.yaml | awk '{print $$2}')
 	@echo "✓ chart packaged to dist/"
+
+helm-push-oci: helm-package ## push chart to GHCR OCI (requires helm registry login)
+	helm push dist/kubexa-agent-*.tgz oci://ghcr.io/kubexa/charts
 
 ## ─────────────────────────────────────────
 ## Clean

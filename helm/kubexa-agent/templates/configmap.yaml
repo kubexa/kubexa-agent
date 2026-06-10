@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kubexa-agent.configMapName" . }}
+  labels:
+    {{- include "kubexa-agent.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    agent:
+      tenant_token: {{ .Values.agent.tenantToken | quote }}
+      {{- with .Values.agent.agentId }}
+      agent_id: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.agent.clusterId }}
+      cluster_id: {{ . | quote }}
+      {{- end }}
+
+    gateway:
+      address: {{ include "kubexa-agent.gatewayAddress" . | quote }}
+      tls: {{ .Values.gateway.tls }}
+      insecure_skip_verify: {{ .Values.gateway.insecureSkipVerify }}
+      {{- with .Values.gateway.caCertPath }}
+      ca_cert_path: {{ . | quote }}
+      {{- end }}
+      reconnect_initial_delay: {{ .Values.gateway.reconnectInitialDelay | quote }}
+      reconnect_max_delay: {{ .Values.gateway.reconnectMaxDelay | quote }}
+      dial_timeout: {{ .Values.gateway.dialTimeout | quote }}
+      handshake_timeout: {{ .Values.gateway.handshakeTimeout | quote }}
+
+    collect:
+      logs:
+        enabled: {{ .Values.collect.logs.enabled }}
+        tail_lines: {{ .Values.collect.logs.tailLines }}
+        follow: {{ .Values.collect.logs.follow }}
+        {{- with .Values.collect.logs.checkpointDir }}
+        checkpoint_dir: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.collect.logs.excludeNamespaces }}
+        exclude_namespaces:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.collect.logs.rules }}
+        rules:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+
+      state:
+        enabled: {{ .Values.collect.state.enabled }}
+        resync_period: {{ .Values.collect.state.resyncPeriod | quote }}
+        {{- with .Values.collect.state.rules }}
+        rules:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+
+      metrics:
+        enabled: {{ .Values.collect.metrics.enabled }}
+        pod_interval: {{ .Values.collect.metrics.podInterval | quote }}
+        node_interval: {{ .Values.collect.metrics.nodeInterval | quote }}
+        {{- if .Values.collect.metrics.kubeMetrics }}
+        kube_metrics: true
+        {{- end }}
+        {{- with .Values.collect.metrics.rules }}
+        rules:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.collect.metrics.customEndpoints }}
+        custom_endpoints:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+
+    buffer:
+      max_memory_bytes: {{ .Values.buffer.maxMemoryBytes }}
+      spill_dir: {{ .Values.buffer.spillDir | quote }}
+      max_disk_bytes: {{ .Values.buffer.maxDiskBytes }}
+      batch_size: {{ .Values.buffer.batchSize }}
+      flush_interval: {{ .Values.buffer.flushInterval | quote }}
+
+    observability:
+      metrics_addr: {{ .Values.observability.metricsAddr | quote }}
+      health_addr: {{ .Values.observability.healthAddr | quote }}
+
+    log:
+      level: {{ .Values.log.level | quote }}
+      format: {{ .Values.log.format | quote }}

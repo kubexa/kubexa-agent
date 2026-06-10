@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["gateway", "secret"],
+  "properties": {
+    "gateway": {
+      "type": "object",
+      "properties": {
+        "address": { "type": "string" },
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "tls": { "type": "boolean" }
+      }
+    },
+    "secret": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "existingSecret": { "type": "string" },
+        "tenantToken": { "type": "string" }
+      }
+    },
+    "collect": {
+      "type": "object",
+      "properties": {
+        "logs": { "type": "object" },
+        "state": { "type": "object" },
+        "metrics": { "type": "object" }
+      }
+    }
+  }
+}
