@@ -176,7 +176,7 @@ func TestReadinessAnyUnhealthy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /readyz error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
@@ -244,7 +244,7 @@ func TestReadinessCheckerTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /readyz error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
@@ -384,7 +384,7 @@ func TestVerboseQueryParameter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET verbose readyz error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var body readinessResponse
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
@@ -444,7 +444,7 @@ func TestRegisterOverwriteDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /readyz error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 after overwrite", resp.StatusCode)
