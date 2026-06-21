@@ -10,6 +10,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
@@ -380,7 +381,7 @@ func nodeMetricFrom(item metricsv1beta1.NodeMetrics) NodeMetric {
 	memory := item.Usage[corev1.ResourceMemory]
 	return NodeMetric{
 		Name:          item.Name,
-		CPUMillicores: cpu.MilliValue(),
+		CPUNanocores: cpu.ScaledValue(resource.Nano),
 		MemoryBytes:   memory.Value(),
 		Timestamp:     item.Timestamp.Time,
 		Window:        item.Window.Duration,
@@ -391,7 +392,7 @@ func podMetricFrom(item metricsv1beta1.PodMetrics) PodMetric {
 	var totalCPU, totalMemory int64
 	for _, container := range item.Containers {
 		if q, ok := container.Usage[corev1.ResourceCPU]; ok {
-			totalCPU += q.MilliValue()
+			totalCPU += q.ScaledValue(resource.Nano)
 		}
 		if q, ok := container.Usage[corev1.ResourceMemory]; ok {
 			totalMemory += q.Value()
@@ -400,7 +401,7 @@ func podMetricFrom(item metricsv1beta1.PodMetrics) PodMetric {
 	return PodMetric{
 		Name:          item.Name,
 		Namespace:     item.Namespace,
-		CPUMillicores: totalCPU,
+		CPUNanocores: totalCPU,
 		MemoryBytes:   totalMemory,
 		Timestamp:     item.Timestamp.Time,
 		Window:        item.Window.Duration,

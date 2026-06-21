@@ -54,17 +54,17 @@ type WatchOptions struct {
 type NodeMetric struct {
 	Name          string
 	Namespace     string
-	CPUMillicores int64
-	MemoryBytes   int64
-	Timestamp     time.Time
-	Window        time.Duration
+	CPUNanocores int64
+	MemoryBytes  int64
+	Timestamp    time.Time
+	Window       time.Duration
 }
 
 // PodMetric holds current CPU and memory usage for a Kubernetes pod.
 type PodMetric struct {
-	Name          string
-	Namespace     string
-	CPUMillicores int64
+	Name         string
+	Namespace    string
+	CPUNanocores int64
 	MemoryBytes   int64
 	Timestamp     time.Time
 	Window        time.Duration

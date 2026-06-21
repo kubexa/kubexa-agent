@@ -160,7 +160,7 @@ func podMetricEvent(m k8s.PodMetric) *agentv1.MetricsEvent {
 		ResourceType:  agentv1.KubeMetricsResourceType_KUBE_METRICS_RESOURCE_TYPE_POD,
 		Namespace:     m.Namespace,
 		Name:          m.Name,
-		CpuMillicores: m.CPUMillicores,
+		CpuNanocores:  m.CPUNanocores,
 		MemoryBytes:   m.MemoryBytes,
 		Timestamp:     m.Timestamp.UTC().UnixMilli(),
 		WindowSeconds: windowSeconds(m.Window),
@@ -171,7 +171,7 @@ func nodeMetricEvent(m k8s.NodeMetric) *agentv1.MetricsEvent {
 	return &agentv1.MetricsEvent{
 		ResourceType:  agentv1.KubeMetricsResourceType_KUBE_METRICS_RESOURCE_TYPE_NODE,
 		Name:          m.Name,
-		CpuMillicores: m.CPUMillicores,
+		CpuNanocores:  m.CPUNanocores,
 		MemoryBytes:   m.MemoryBytes,
 		Timestamp:     m.Timestamp.UTC().UnixMilli(),
 		WindowSeconds: windowSeconds(m.Window),
