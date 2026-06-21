@@ -11,6 +11,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/kubexa/kubexa-agent/internal/logger"
+	agentmetrics "github.com/kubexa/kubexa-agent/internal/metrics"
 	"github.com/kubexa/kubexa-agent/pkg/config"
 )
 
@@ -25,10 +26,19 @@ func testBufferConfig(t *testing.T, spillDir string, maxMemory int64) *config.Bu
 	return cfg
 }
 
+func newTestQueueMetrics(t *testing.T, reg *prometheus.Registry) *agentmetrics.QueueMetrics {
+	t.Helper()
+	m, err := agentmetrics.New(reg, "test", "cluster", "agent")
+	if err != nil {
+		t.Fatalf("metrics.New() error = %v", err)
+	}
+	return m.Queue()
+}
+
 func newTestQueue(t *testing.T, cfg *config.BufferConfig) Queue {
 	t.Helper()
 	reg := prometheus.NewRegistry()
-	q, err := New(cfg, logger.New("queue-test"), reg)
+	q, err := New(cfg, logger.New("queue-test"), newTestQueueMetrics(t, reg))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -187,7 +197,7 @@ func TestDiskSpillAndRecovery(t *testing.T) {
 	it := item("persist", []byte("wal-payload-0123456789"))
 
 	{
-		q, err := New(cfg, logger.New("queue-test"), prometheus.NewRegistry())
+		q, err := New(cfg, logger.New("queue-test"), newTestQueueMetrics(t, prometheus.NewRegistry()))
 		if err != nil {
 			t.Fatalf("New() error = %v", err)
 		}
@@ -206,7 +216,7 @@ func TestDiskSpillAndRecovery(t *testing.T) {
 		}
 	}
 
-	q2, err := New(cfg, logger.New("queue-test"), prometheus.NewRegistry())
+	q2, err := New(cfg, logger.New("queue-test"), newTestQueueMetrics(t, prometheus.NewRegistry()))
 	if err != nil {
 		t.Fatalf("New(recover) error = %v", err)
 	}
@@ -300,7 +310,7 @@ func TestMetricsCorrectness(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	cfg := testBufferConfig(t, "", 64<<10)
-	q, err := New(cfg, logger.New("queue-test"), reg)
+	q, err := New(cfg, logger.New("queue-test"), newTestQueueMetrics(t, reg))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -360,7 +370,7 @@ func TestDepthGauge(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	cfg := testBufferConfig(t, "", 64<<10)
-	q, err := New(cfg, logger.New("queue-test"), reg)
+	q, err := New(cfg, logger.New("queue-test"), newTestQueueMetrics(t, reg))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -406,7 +416,7 @@ func gatherGauge(t *testing.T, reg *prometheus.Registry, name, label string) flo
 func TestValidateConfig(t *testing.T) {
 	t.Parallel()
 
-	_, err := New(&config.BufferConfig{MaxMemoryBytes: 0}, nil, prometheus.NewRegistry())
+	_, err := New(&config.BufferConfig{MaxMemoryBytes: 0}, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid max memory")
 	}

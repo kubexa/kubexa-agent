@@ -20,6 +20,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 	"github.com/kubexa/kubexa-agent/internal/logger"
+	agentmetrics "github.com/kubexa/kubexa-agent/internal/metrics"
 	"github.com/kubexa/kubexa-agent/internal/queue"
 	"github.com/kubexa/kubexa-agent/pkg/config"
 	"github.com/kubexa/kubexa-agent/pkg/protoversion"
@@ -40,13 +41,26 @@ func testConfig() *config.Config {
 	return cfg
 }
 
+func newTestAgentMetrics(t *testing.T, reg *prometheus.Registry) (*agentmetrics.Metrics, *agentmetrics.StreamMetrics, *agentmetrics.ConnectionMetrics) {
+	t.Helper()
+	m, err := agentmetrics.New(reg, "test", "cluster-1", "agent-1")
+	if err != nil {
+		t.Fatalf("metrics.New: %v", err)
+	}
+	return m, m.Stream(), m.Connection()
+}
+
 func newTestQueue(t *testing.T) queue.Queue {
 	t.Helper()
 	reg := prometheus.NewRegistry()
+	m, err := agentmetrics.New(reg, "test", "cluster-1", "agent-1")
+	if err != nil {
+		t.Fatalf("metrics.New: %v", err)
+	}
 	q, err := queue.New(&config.BufferConfig{
 		MaxMemoryBytes: 1 << 20,
 		BatchSize:      10,
-	}, logger.New("queue-test"), reg)
+	}, logger.New("queue-test"), m.Queue())
 	if err != nil {
 		t.Fatalf("queue.New: %v", err)
 	}
@@ -82,13 +96,14 @@ func dialBufnet(ctx context.Context, lis *bufconn.Listener, opts ...grpc.DialOpt
 func newTestManager(t *testing.T, cfg *config.Config, q queue.Queue, lis *bufconn.Listener) (*streamManager, *prometheus.Registry) {
 	t.Helper()
 	reg := prometheus.NewRegistry()
-	mgr, err := New(cfg, q, logger.New("stream-test"), reg)
+	_, streamMetrics, connMetrics := newTestAgentMetrics(t, reg)
+	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	sm := mgr.(*streamManager)
 	sm.dial = func(ctx context.Context) (*grpc.ClientConn, agentv1.AgentServiceClient, error) {
-		ic := interceptorDeps{cfg: func() *config.Config { return cfg }, log: sm.log, metrics: sm.metrics}
+		ic := interceptorDeps{cfg: func() *config.Config { return cfg }, log: sm.log, streamMetrics: sm.streamMetrics}
 		conn, err := dialBufnet(ctx, lis,
 			grpc.WithChainUnaryInterceptor(ic.chainUnary()...),
 			grpc.WithChainStreamInterceptor(ic.chainStream()...),
@@ -101,24 +116,30 @@ func newTestManager(t *testing.T, cfg *config.Config, q queue.Queue, lis *bufcon
 	return sm, reg
 }
 
-func gaugeState(t *testing.T, reg *prometheus.Registry) float64 {
+func gaugeState(t *testing.T, reg *prometheus.Registry) string {
 	t.Helper()
 	g, err := reg.Gather()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, mf := range g {
-		if mf.GetName() != "kubexa_grpc_connection_state" {
+		if mf.GetName() != "kubexa_connection_state" {
 			continue
 		}
-		metrics := mf.GetMetric()
-		if len(metrics) == 0 {
-			t.Fatal("connection_state has no samples")
+		for _, metric := range mf.GetMetric() {
+			if metric.GetGauge().GetValue() != 1 {
+				continue
+			}
+			for _, lp := range metric.GetLabel() {
+				if lp.GetName() == "state" {
+					return lp.GetValue()
+				}
+			}
 		}
-		return metrics[0].GetGauge().GetValue()
+		t.Fatal("connection_state has no active state sample")
 	}
 	t.Fatal("connection_state metric not found")
-	return 0
+	return ""
 }
 
 func TestStateMachineTransitions(t *testing.T) {
@@ -152,8 +173,8 @@ func TestStateMachineTransitions(t *testing.T) {
 	if got := sm.SessionID(); got != "sess-1" {
 		t.Fatalf("SessionID() = %q, want sess-1", got)
 	}
-	if v := gaugeState(t, reg); v != stateGaugeValue(StateReady) {
-		t.Fatalf("gauge state = %v, want ready(%v)", v, stateGaugeValue(StateReady))
+	if state := gaugeState(t, reg); state != StateReady.String() {
+		t.Fatalf("connection state = %q, want %q", state, StateReady.String())
 	}
 
 	cancel()

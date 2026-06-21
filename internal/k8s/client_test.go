@@ -25,6 +25,7 @@ import (
 
 	"github.com/kubexa/kubexa-agent/internal/k8s/k8sconfig"
 	"github.com/kubexa/kubexa-agent/internal/logger"
+	agentmetrics "github.com/kubexa/kubexa-agent/internal/metrics"
 )
 
 func testClient(t *testing.T, kube *fake.Clientset, metrics *metricsfake.Clientset, api *apiMetrics) Client {
@@ -226,16 +227,16 @@ func TestMetricsRegistration(t *testing.T) {
 	t.Parallel()
 
 	reg := prometheus.NewRegistry()
+	m, err := agentmetrics.New(reg, "test", "cluster", "agent")
+	if err != nil {
+		t.Fatalf("metrics.New() error = %v", err)
+	}
+
 	kube := fake.NewSimpleClientset(&corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "default"},
 	})
 
-	apiMetrics, err := newAPIMetrics(reg)
-	if err != nil {
-		t.Fatalf("newAPIMetrics() error = %v", err)
-	}
-
-	c := testClient(t, kube, nil, apiMetrics)
+	c := testClient(t, kube, nil, newAPIMetrics(m.K8s()))
 	if err := c.Ready(context.Background()); err != nil {
 		t.Fatalf("Ready() error = %v", err)
 	}
@@ -276,7 +277,7 @@ func TestMetricsRegistration(t *testing.T) {
 	}
 }
 
-func TestNewRegistersMetricsWhenRegistererProvided(t *testing.T) {
+func TestEnableMetrics(t *testing.T) {
 	orig := inClusterConfigFunc
 	t.Cleanup(func() { inClusterConfigFunc = orig })
 
@@ -285,18 +286,19 @@ func TestNewRegistersMetricsWhenRegistererProvided(t *testing.T) {
 	}
 
 	reg := prometheus.NewRegistry()
+	m, err := agentmetrics.New(reg, "test", "cluster", "agent")
+	if err != nil {
+		t.Fatalf("metrics.New() error = %v", err)
+	}
+
 	trueVal := true
-	_, err := New(&k8sconfig.Config{
-		InCluster:         &trueVal,
-		MetricsRegisterer: reg,
+	client, err := New(&k8sconfig.Config{
+		InCluster: &trueVal,
 	}, logger.New("k8s-test"))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-
-	if _, err := newAPIMetrics(reg); err == nil {
-		t.Fatal("expected duplicate metric registration error")
-	}
+	client.EnableMetrics(m.K8s())
 }
 
 func TestIsTransientError(t *testing.T) {

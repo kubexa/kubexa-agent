@@ -41,8 +41,3 @@ func (s ConnState) String() string {
 		return fmt.Sprintf("unknown(%d)", int(s))
 	}
 }
-
-// stateGaugeValue maps ConnState to the Prometheus gauge value for kubexa_grpc_connection_state.
-func stateGaugeValue(s ConnState) float64 {
-	return float64(s)
-}

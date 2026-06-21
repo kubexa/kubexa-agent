@@ -43,6 +43,8 @@ func (m *mockK8sClient) NamespaceUID(context.Context, string) (string, error) { 
 
 func (m *mockK8sClient) Ready(ctx context.Context) error { return m.ready }
 
+func (m *mockK8sClient) EnableMetrics(k8s.MetricsRecorder) {}
+
 func (m *mockK8sClient) Clientset() kubernetes.Interface { return nil }
 
 func (m *mockK8sClient) Dynamic() dynamic.Interface { return nil }
