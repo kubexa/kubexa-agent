@@ -46,6 +46,9 @@ type Client interface {
 	// Ready returns nil if the Kubernetes API is reachable.
 	Ready(ctx context.Context) error
 
+	// EnableMetrics attaches Prometheus recorders for Kubernetes API calls.
+	EnableMetrics(rec MetricsRecorder)
+
 	// Clientset returns the underlying Kubernetes client for shared informers.
 	Clientset() kubernetes.Interface
 
@@ -91,14 +94,16 @@ func New(cfg *k8sconfig.Config, log *logger.Logger) (Client, error) {
 	}
 
 	var apiMetrics *apiMetrics
-	if cfg.MetricsRegisterer != nil {
-		apiMetrics, err = newAPIMetrics(cfg.MetricsRegisterer)
-		if err != nil {
-			return nil, fmt.Errorf("k8s client: register metrics: %w", err)
-		}
-	}
 
 	return newClient(kube, dynamicClient, metricsClient, log, apiMetrics), nil
+}
+
+// EnableMetrics attaches Prometheus recorders for Kubernetes API calls.
+func (c *client) EnableMetrics(rec MetricsRecorder) {
+	if c == nil {
+		return
+	}
+	c.api = newAPIMetrics(rec)
 }
 
 func newClient(kube kubernetes.Interface, dyn dynamic.Interface, metrics metricsclientset.Interface, log *logger.Logger, api *apiMetrics) Client {

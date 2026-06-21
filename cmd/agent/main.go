@@ -109,12 +109,8 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	shutdownTimeout := defaultShutdownTimeout
 
 	mainReg := prometheus.NewRegistry()
-	queueReg := prometheus.NewRegistry()
-	streamReg := prometheus.NewRegistry()
-	k8sReg := prometheus.NewRegistry()
-	gatherer := prometheus.Gatherers{mainReg, queueReg, streamReg, k8sReg}
 
-	kube, err := initKubernetes(parentCtx, cfg, devMode, k8sReg, log)
+	kube, err := initKubernetes(parentCtx, cfg, devMode, log)
 	if err != nil {
 		return fmt.Errorf("kubernetes: %w", err)
 	}
@@ -130,15 +126,21 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	if err != nil {
 		return fmt.Errorf("metrics: %w", err)
 	}
-	_ = agentMetrics
+	kube.EnableMetrics(agentMetrics.K8s())
 
-	q, err := queue.New(&cfg.Buffer, logger.New("queue", logger.WithAgentID(cfg.Agent.AgentID)), queueReg)
+	q, err := queue.New(&cfg.Buffer, logger.New("queue", logger.WithAgentID(cfg.Agent.AgentID)), agentMetrics.Queue())
 	if err != nil {
 		return fmt.Errorf("queue: %w", err)
 	}
 	log.Info("queue initialized", logger.F("spill_dir", cfg.Buffer.SpillDir))
 
-	streamMgr, err := stream.New(cfg, q, logger.New("stream", logger.WithAgentID(cfg.Agent.AgentID)), streamReg)
+	streamMgr, err := stream.New(
+		cfg,
+		q,
+		logger.New("stream", logger.WithAgentID(cfg.Agent.AgentID)),
+		agentMetrics.Stream(),
+		agentMetrics.Connection(),
+	)
 	if err != nil {
 		_ = q.Close()
 		return fmt.Errorf("stream manager: %w", err)
@@ -157,7 +159,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	healthSrv.Register(health.NewQueueChecker(q, 0))
 	healthSrv.Register(health.NewStreamChecker(streamMgr))
 
-	metricsSrv := metrics.NewServer(metricsAddr, gatherer, logger.New("metrics"))
+	metricsSrv := metrics.NewServer(metricsAddr, mainReg, logger.New("metrics"))
 
 	log.Info("collection settings",
 		logger.F("logs_enabled", cfg.Collect.Logs.Enabled),
@@ -315,8 +317,8 @@ func buildCollectors(
 	return collectors, nil
 }
 
-func initKubernetes(ctx context.Context, cfg *config.Config, devMode bool, reg prometheus.Registerer, log *logger.Logger) (k8s.Client, error) {
-	kube, err := k8s.New(&k8sconfig.Config{MetricsRegisterer: reg}, logger.New("k8s"))
+func initKubernetes(ctx context.Context, cfg *config.Config, devMode bool, log *logger.Logger) (k8s.Client, error) {
+	kube, err := k8s.New(&k8sconfig.Config{}, logger.New("k8s"))
 	if err != nil {
 		return nil, err
 	}

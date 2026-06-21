@@ -1,8 +1,6 @@
 // Package k8sconfig holds configuration for the Kubernetes API client.
 package k8sconfig
 
-import "github.com/prometheus/client_golang/prometheus"
-
 const (
 	// DefaultQPS is the default client-go REST client QPS limit.
 	DefaultQPS float32 = 50
@@ -26,7 +24,4 @@ type Config struct {
 
 	// Burst sets the client-go rate limiter burst. Defaults to DefaultBurst.
 	Burst int
-
-	// MetricsRegisterer registers Prometheus metrics. When nil, metrics are not registered.
-	MetricsRegisterer prometheus.Registerer
 }

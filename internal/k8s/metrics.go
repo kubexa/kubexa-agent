@@ -1,78 +1,32 @@
 package k8s
 
-import (
-	"github.com/prometheus/client_golang/prometheus"
-)
-
-const (
-	metricNamespace = "kubexa"
-	metricSubsystem = "k8s"
-)
-
-// apiMetrics holds Prometheus instrumentation for Kubernetes API calls.
-type apiMetrics struct {
-	requestsTotal   *prometheus.CounterVec
-	requestDuration *prometheus.HistogramVec
-	errorsTotal     *prometheus.CounterVec
+// MetricsRecorder records Kubernetes API Prometheus metrics.
+type MetricsRecorder interface {
+	ObserveRequest(method, resource, status string, seconds float64)
+	IncError(method, resource, errorType string)
 }
 
-// newAPIMetrics constructs and registers Kubernetes API metrics on reg.
-func newAPIMetrics(reg prometheus.Registerer) (*apiMetrics, error) {
-	m := &apiMetrics{
-		requestsTotal: prometheus.NewCounterVec(
-			prometheus.CounterOpts{
-				Namespace: metricNamespace,
-				Subsystem: metricSubsystem,
-				Name:      "api_requests_total",
-				Help:      "Total number of Kubernetes API requests.",
-			},
-			[]string{"method", "resource", "status"},
-		),
-		requestDuration: prometheus.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Namespace: metricNamespace,
-				Subsystem: metricSubsystem,
-				Name:      "api_request_duration_seconds",
-				Help:      "Kubernetes API request duration in seconds.",
-				Buckets:   prometheus.DefBuckets,
-			},
-			[]string{"method", "resource"},
-		),
-		errorsTotal: prometheus.NewCounterVec(
-			prometheus.CounterOpts{
-				Namespace: metricNamespace,
-				Subsystem: metricSubsystem,
-				Name:      "api_errors_total",
-				Help:      "Total number of Kubernetes API errors.",
-			},
-			[]string{"method", "resource", "error_type"},
-		),
-	}
+type apiMetrics struct {
+	rec MetricsRecorder
+}
 
-	collectors := []prometheus.Collector{
-		m.requestsTotal,
-		m.requestDuration,
-		m.errorsTotal,
+func newAPIMetrics(rec MetricsRecorder) *apiMetrics {
+	if rec == nil {
+		return nil
 	}
-	for _, c := range collectors {
-		if err := reg.Register(c); err != nil {
-			return nil, err
-		}
-	}
-	return m, nil
+	return &apiMetrics{rec: rec}
 }
 
 func (m *apiMetrics) observe(method, resource, status string, durationSeconds float64) {
-	if m == nil {
+	if m == nil || m.rec == nil {
 		return
 	}
-	m.requestsTotal.WithLabelValues(method, resource, status).Inc()
-	m.requestDuration.WithLabelValues(method, resource).Observe(durationSeconds)
+	m.rec.ObserveRequest(method, resource, status, durationSeconds)
 }
 
 func (m *apiMetrics) observeError(method, resource, errorType string) {
-	if m == nil {
+	if m == nil || m.rec == nil {
 		return
 	}
-	m.errorsTotal.WithLabelValues(method, resource, errorType).Inc()
+	m.rec.IncError(method, resource, errorType)
 }
