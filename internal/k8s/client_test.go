@@ -368,11 +368,53 @@ func TestPodMetrics(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("PodMetrics() len = %d, want 1", len(got))
 	}
-	if got[0].CPUMillicores != 150 {
-		t.Fatalf("CPUMillicores = %d, want 150", got[0].CPUMillicores)
+	if got[0].CPUNanocores != 150_000_000 {
+		t.Fatalf("CPUNanocores = %d, want 150000000", got[0].CPUNanocores)
 	}
 	if got[0].MemoryBytes != 1536 {
 		t.Fatalf("MemoryBytes = %d, want 1536", got[0].MemoryBytes)
+	}
+}
+
+func TestPodMetricsSubMillicorePrecision(t *testing.T) {
+	t.Parallel()
+
+	now := metav1.Now()
+	want := metricsv1beta1.PodMetrics{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "precise",
+			Namespace: "default",
+		},
+		Timestamp: now,
+		Containers: []metricsv1beta1.ContainerMetrics{
+			{
+				Name: "app",
+				Usage: corev1.ResourceList{
+					corev1.ResourceCPU:    *resource.NewScaledQuantity(1_500_500, resource.Nano),
+					corev1.ResourceMemory: *resource.NewQuantity(1024, resource.BinarySI),
+				},
+			},
+		},
+	}
+
+	metricsClient := metricsfake.NewSimpleClientset()
+	metricsClient.PrependReactor("list", "pods", func(action testingk8s.Action) (bool, runtime.Object, error) {
+		if action.GetNamespace() != "default" {
+			return false, nil, nil
+		}
+		return true, &metricsv1beta1.PodMetricsList{Items: []metricsv1beta1.PodMetrics{want}}, nil
+	})
+
+	c := testClient(t, fake.NewSimpleClientset(), metricsClient, nil)
+	got, err := c.PodMetrics(context.Background(), "default")
+	if err != nil {
+		t.Fatalf("PodMetrics() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("PodMetrics() len = %d, want 1", len(got))
+	}
+	if got[0].CPUNanocores != 1_500_500 {
+		t.Fatalf("CPUNanocores = %d, want 1500500", got[0].CPUNanocores)
 	}
 }
 

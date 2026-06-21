@@ -308,7 +308,7 @@ type MetricsEvent struct {
 	ResourceType  KubeMetricsResourceType `protobuf:"varint,1,opt,name=resource_type,json=resourceType,proto3,enum=agent.v1.KubeMetricsResourceType" json:"resource_type,omitempty"`
 	Namespace     string                  `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
 	Name          string                  `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
-	CpuMillicores int64                   `protobuf:"varint,4,opt,name=cpu_millicores,json=cpuMillicores,proto3" json:"cpu_millicores,omitempty"`
+	CpuNanocores  int64                   `protobuf:"varint,4,opt,name=cpu_nanocores,json=cpuNanocores,proto3" json:"cpu_nanocores,omitempty"` // Kubernetes CPU usage in nanocores (1 core = 1_000_000_000)
 	MemoryBytes   int64                   `protobuf:"varint,5,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
 	Timestamp     int64                   `protobuf:"varint,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"` // unix milliseconds
 	WindowSeconds int32                   `protobuf:"varint,7,opt,name=window_seconds,json=windowSeconds,proto3" json:"window_seconds,omitempty"`
@@ -367,9 +367,9 @@ func (x *MetricsEvent) GetName() string {
 	return ""
 }
 
-func (x *MetricsEvent) GetCpuMillicores() int64 {
+func (x *MetricsEvent) GetCpuNanocores() int64 {
 	if x != nil {
-		return x.CpuMillicores
+		return x.CpuNanocores
 	}
 	return 0
 }
@@ -474,12 +474,12 @@ const file_proto_agent_v1_metric_proto_rawDesc = "" +
 	"\ttimestamp\x18\x03 \x01(\x03R\ttimestamp\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x97\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x95\x02\n" +
 	"\fMetricsEvent\x12F\n" +
 	"\rresource_type\x18\x01 \x01(\x0e2!.agent.v1.KubeMetricsResourceTypeR\fresourceType\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x12\n" +
-	"\x04name\x18\x03 \x01(\tR\x04name\x12%\n" +
-	"\x0ecpu_millicores\x18\x04 \x01(\x03R\rcpuMillicores\x12!\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12#\n" +
+	"\rcpu_nanocores\x18\x04 \x01(\x03R\fcpuNanocores\x12!\n" +
 	"\fmemory_bytes\x18\x05 \x01(\x03R\vmemoryBytes\x12\x1c\n" +
 	"\ttimestamp\x18\x06 \x01(\x03R\ttimestamp\x12%\n" +
 	"\x0ewindow_seconds\x18\a \x01(\x05R\rwindowSeconds\"\x84\x01\n" +

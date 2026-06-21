@@ -43,7 +43,7 @@ message MetricsEvent {
   KubeMetricsResourceType resource_type = 1;
   string                  namespace     = 2;
   string                  name          = 3;
-  int64                   cpu_millicores = 4;
+  int64                   cpu_nanocores  = 4; // Kubernetes CPU usage in nanocores (1 core = 1_000_000_000)
   int64                   memory_bytes   = 5;
   int64                   timestamp      = 6; // unix milliseconds
   int32                   window_seconds = 7;

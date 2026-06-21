@@ -255,7 +255,7 @@ func printAgentMessage(msg *agentv1.AgentMessage, sessionID string) {
 		event["resource_type"] = strings.TrimPrefix(ev.GetResourceType().String(), "KUBE_METRICS_RESOURCE_TYPE_")
 		event["namespace"] = ev.GetNamespace()
 		event["name"] = ev.GetName()
-		event["cpu_millicores"] = ev.GetCpuMillicores()
+		event["cpu_nanocores"] = ev.GetCpuNanocores()
 		event["memory_bytes"] = ev.GetMemoryBytes()
 		event["window_seconds"] = ev.GetWindowSeconds()
 		if ts := ev.GetTimestamp(); ts != 0 {
