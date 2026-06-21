@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kubexa/kubexa-agent/internal/logger"
+	agentmetrics "github.com/kubexa/kubexa-agent/internal/metrics"
 )
 
 const (
@@ -38,7 +39,7 @@ type diskStore struct {
 	dir         string
 	maxBytes    int64
 	log         *logger.Logger
-	metrics     *queueMetrics
+	metrics     *agentmetrics.QueueMetrics
 	mu          sync.Mutex
 	segment     *os.File
 	segmentPath string
@@ -49,7 +50,7 @@ type diskStore struct {
 }
 
 // newDiskStore opens or creates spill storage under dir.
-func newDiskStore(dir string, maxBytes int64, log *logger.Logger, metrics *queueMetrics) (*diskStore, error) {
+func newDiskStore(dir string, maxBytes int64, log *logger.Logger, metrics *agentmetrics.QueueMetrics) (*diskStore, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create spill dir %q: %w", dir, err)
 	}
@@ -66,7 +67,7 @@ func newDiskStore(dir string, maxBytes int64, log *logger.Logger, metrics *queue
 	}
 	ds.refreshTotalBytes()
 	if metrics != nil {
-		metrics.setDiskBytes(ds.totalBytes)
+		metrics.SetDiskBytes(float64(ds.totalBytes))
 	}
 	return ds, nil
 }
@@ -249,7 +250,7 @@ func (ds *diskStore) appendRecord(recType byte, body []byte) error {
 	ds.segmentSize += written
 	ds.totalBytes += written
 	if ds.metrics != nil {
-		ds.metrics.addDiskBytes(written)
+		ds.metrics.AddDiskBytes(float64(written))
 	}
 	return nil
 }

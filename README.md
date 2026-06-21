@@ -101,6 +101,61 @@ helm install kubexa-agent ./helm/kubexa-agent \
   --set secret.existingSecret=kubexa-agent-token
 ```
 
+## Memory and resource sizing
+
+The Helm chart defaults to **256 MiB request / 512 MiB limit** (`helm/kubexa-agent/values.yaml`). Actual RSS depends on cluster size, collector settings, and whether the gateway keeps up with export. Figures below are **order-of-magnitude estimates** for planning—not hard guarantees.
+
+### Where memory goes
+
+| Component | Default cap | Notes |
+|-----------|-------------|-------|
+| Buffer queue (RAM) | 64 MiB (`buffer.max_memory_bytes`) | Hard cap; overflow spills to disk |
+| Buffer queue (disk) | 512 MiB (`buffer.max_disk_bytes`) | Requires PVC when persistence is enabled |
+| Log streams | Up to 200 concurrent (`MaxConcurrentStreams`) | Per-stream read buffers; each log line is a separate queue item |
+| State informer cache | Uncapped | Scales with watched objects (pods, secrets, etc.) |
+| Go runtime + client-go + gRPC | ~60–80 MiB baseline | Always present |
+
+### Scenarios (estimated RSS)
+
+| Scenario | Estimated memory |
+|----------|------------------|
+| Agent + stream only (all collectors disabled) | 60–100 MiB |
+| Default Helm install, small cluster (~50 pods), gateway connected | 150–200 MiB |
+| Medium cluster (~500 pods), all collectors enabled | 200–280 MiB |
+| Gateway disconnected + heavy log volume | 250–400 MiB |
+| Large cluster (5000+ pods), broad state watch + many log streams | 400–600+ MiB |
+
+### What drives spikes
+
+- **Log collector** — highest variable cost when enabled. High line rates fill the 64 MiB RAM buffer quickly; if the gateway is slow or offline, streams keep producing and spill to disk. Narrow `collect.logs.rules` and `exclude_namespaces` in busy clusters.
+- **State watcher** — client-go informer caches hold full object copies in memory. Watching `secrets` across many namespaces is expensive. Prefer namespace-scoped rules and only the resources you need.
+- **Metrics scraper** — usually low (1–10 MiB transient spikes). Large custom Prometheus `/metrics` pages can add short-lived pressure.
+
+### Tuning
+
+```yaml
+# Reduce in-memory buffering (chart values → config.yaml)
+buffer:
+  maxMemoryBytes: 33554432   # 32 MiB — lower RAM, earlier disk spill
+  maxDiskBytes: 1073741824   # 1 GiB — more headroom when gateway is down
+
+# Raise pod limit for large clusters
+resources:
+  limits:
+    memory: 1Gi
+```
+
+Disable collectors you do not need (`collect.logs.enabled`, `collect.state.enabled`, `collect.metrics.enabled`).
+
+### Observability
+
+Expose agent self-metrics on `observability.metrics_addr` (default `:9090`). Useful series for capacity planning:
+
+- Queue depth and memory usage (buffer pressure)
+- Active log streams and dropped lines (log backpressure)
+- Informer cache sync / state event rates (watch scope too broad?)
+- Gateway connection state (disconnected → buffer fills)
+
 ## Development
 
 ```bash

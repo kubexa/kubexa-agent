@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/kubexa/kubexa-agent/internal/logger"
+	agentmetrics "github.com/kubexa/kubexa-agent/internal/metrics"
 	"github.com/kubexa/kubexa-agent/pkg/config"
 )
 
@@ -77,7 +77,7 @@ type inflightEntry struct {
 type bufferedQueue struct {
 	cfg     *config.BufferConfig
 	log     *logger.Logger
-	metrics *queueMetrics
+	metrics *agentmetrics.QueueMetrics
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -95,8 +95,8 @@ type bufferedQueue struct {
 	dropped atomic.Int64
 }
 
-// New constructs a ready-to-use Queue from cfg, logging through log and registering metrics on reg.
-func New(cfg *config.BufferConfig, log *logger.Logger, reg prometheus.Registerer) (Queue, error) {
+// New constructs a ready-to-use Queue from cfg, logging through log and recording metrics via m.
+func New(cfg *config.BufferConfig, log *logger.Logger, m *agentmetrics.QueueMetrics) (Queue, error) {
 	if cfg == nil {
 		return nil, errors.New("buffer config is nil")
 	}
@@ -107,27 +107,23 @@ func New(cfg *config.BufferConfig, log *logger.Logger, reg prometheus.Registerer
 		log = logger.New("queue")
 	}
 
-	metrics, err := newQueueMetrics(reg)
-	if err != nil {
-		return nil, fmt.Errorf("init queue metrics: %w", err)
-	}
-
-	slots := memorySlotCapacity(cfg.MaxMemoryBytes)
 	q := &bufferedQueue{
 		cfg:      cfg,
 		log:      log,
-		metrics:  metrics,
-		memCh:    make(chan Item, slots),
+		metrics:  m,
 		inflight: make(map[string]*inflightEntry),
 	}
 	q.cond = sync.NewCond(&q.mu)
+
+	slots := memorySlotCapacity(cfg.MaxMemoryBytes)
+	q.memCh = make(chan Item, slots)
 
 	if cfg.SpillDir != "" {
 		maxDisk := cfg.MaxDiskBytes
 		if maxDisk <= 0 {
 			maxDisk = 512 << 20
 		}
-		ds, err := newDiskStore(cfg.SpillDir, maxDisk, log, metrics)
+		ds, err := newDiskStore(cfg.SpillDir, maxDisk, log, m)
 		if err != nil {
 			return nil, fmt.Errorf("init disk spill: %w", err)
 		}
@@ -307,7 +303,7 @@ func (q *bufferedQueue) putMemoryUnlocked(item Item, size int64, countEnqueue bo
 		q.memBytes += size
 		q.memCount++
 		if countEnqueue {
-			q.metrics.enqueuedTotal.Inc()
+			q.metrics.IncEnqueued()
 		}
 		q.updateDepthMetricsLocked()
 		return nil
@@ -355,7 +351,7 @@ func (q *bufferedQueue) spillEnqueueUnlocked(item Item) error {
 	}
 	q.diskHead = append(q.diskHead, item)
 	q.diskCount++
-	q.metrics.enqueuedTotal.Inc()
+	q.metrics.IncEnqueued()
 	q.updateDepthMetricsLocked()
 	return nil
 }
@@ -378,7 +374,7 @@ func (q *bufferedQueue) dropOldestUnlocked() {
 
 func (q *bufferedQueue) dropItemUnlocked(item Item) {
 	q.dropped.Add(1)
-	q.metrics.droppedTotal.Inc()
+	q.metrics.IncDropped()
 	depth := q.memCount + q.diskCount
 	q.log.Warn("queue dropped oldest item",
 		logger.F("item_id", item.ID),
@@ -426,7 +422,7 @@ func (q *bufferedQueue) DequeueBatch(ctx context.Context, n int) ([]Item, error)
 		if len(pulledItems) > 0 {
 			for _, p := range pulledItems {
 				q.inflight[p.item.ID] = &inflightEntry{item: p.item, onDisk: p.fromDisk}
-				q.metrics.dequeuedTotal.Inc()
+				q.metrics.IncDequeued()
 			}
 			q.updateDepthMetricsLocked()
 			q.mu.Unlock()
@@ -484,7 +480,7 @@ func (q *bufferedQueue) Ack(ids []string) error {
 			continue
 		}
 		delete(q.inflight, id)
-		q.metrics.ackTotal.Inc()
+		q.metrics.IncAck()
 		if entry.onDisk && q.disk != nil {
 			if err := q.disk.appendAck(id); err != nil {
 				return fmt.Errorf("persist ack for %q: %w", id, err)
@@ -514,7 +510,7 @@ func (q *bufferedQueue) Nack(ids []string) error {
 		item := entry.item
 		item.Attempts++
 		front = append(front, item)
-		q.metrics.nackTotal.Inc()
+		q.metrics.IncNack(1)
 	}
 
 	for i := len(front) - 1; i >= 0; i-- {
@@ -640,6 +636,6 @@ func (q *bufferedQueue) updateDepthMetricsLocked() {
 	if q.metrics == nil {
 		return
 	}
-	q.metrics.setDepth("memory", q.memCount)
-	q.metrics.setDepth("disk", q.diskCount)
+	q.metrics.SetDepth("memory", float64(q.memCount))
+	q.metrics.SetDepth("disk", float64(q.diskCount))
 }

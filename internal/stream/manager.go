@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 	"github.com/kubexa/kubexa-agent/internal/logger"
+	agentmetrics "github.com/kubexa/kubexa-agent/internal/metrics"
 	"github.com/kubexa/kubexa-agent/internal/queue"
 	"github.com/kubexa/kubexa-agent/pkg/config"
 	"github.com/kubexa/kubexa-agent/pkg/protoversion"
@@ -53,10 +53,11 @@ type Manager interface {
 
 // streamManager implements Manager.
 type streamManager struct {
-	cfg    *config.Config
-	queue  queue.Queue
-	log    *logger.Logger
-	metrics *grpcMetrics
+	cfg           *config.Config
+	queue         queue.Queue
+	log           *logger.Logger
+	streamMetrics *agentmetrics.StreamMetrics
+	connMetrics   *agentmetrics.ConnectionMetrics
 
 	cb      circuitBreaker
 	rng     *rand.Rand
@@ -114,8 +115,14 @@ func (g *throttleGate) throttled() bool {
 	return now().Before(g.until)
 }
 
-// New constructs a stream Manager wired to cfg, queue, logger, and Prometheus registry.
-func New(cfg *config.Config, q queue.Queue, log *logger.Logger, reg prometheus.Registerer) (Manager, error) {
+// New constructs a stream Manager wired to cfg, queue, logger, and shared agent metrics.
+func New(
+	cfg *config.Config,
+	q queue.Queue,
+	log *logger.Logger,
+	streamMetrics *agentmetrics.StreamMetrics,
+	connMetrics *agentmetrics.ConnectionMetrics,
+) (Manager, error) {
 	if cfg == nil {
 		return nil, errors.New("config is nil")
 	}
@@ -129,24 +136,22 @@ func New(cfg *config.Config, q queue.Queue, log *logger.Logger, reg prometheus.R
 		log = logger.New("stream")
 	}
 
-	metrics, err := newGRPCMetrics(reg)
-	if err != nil {
-		return nil, fmt.Errorf("init stream metrics: %w", err)
-	}
-
 	m := &streamManager{
-		cfg:     cfg,
-		queue:   q,
-		log:     log,
-		metrics: metrics,
-		rng:     rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
-		sleep:   defaultSleeper,
-		sendCh:  make(chan *agentv1.AgentMessage, defaultSendChannelSize),
-		state:   StateIdle,
+		cfg:           cfg,
+		queue:         q,
+		log:           log,
+		streamMetrics: streamMetrics,
+		connMetrics:   connMetrics,
+		rng:           rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
+		sleep:         defaultSleeper,
+		sendCh:        make(chan *agentv1.AgentMessage, defaultSendChannelSize),
+		state:         StateIdle,
 	}
 	m.sessionID.Store("")
 	m.dial = m.defaultDial
-	metrics.setConnectionState(StateIdle)
+	if connMetrics != nil {
+		connMetrics.SetState(StateIdle.String())
+	}
 	return m, nil
 }
 
@@ -381,7 +386,9 @@ func (m *streamManager) transition(next ConnState, reason string, err error) {
 	} else {
 		m.log.Info("gRPC connection state transition", fields...)
 	}
-	m.metrics.setConnectionState(next)
+	if m.connMetrics != nil {
+		m.connMetrics.SetState(next.String())
+	}
 }
 
 func (m *streamManager) handleTransientFailure(ctx context.Context, attempt int, phase string, err error) int {
@@ -417,9 +424,9 @@ func (m *streamManager) defaultDial(ctx context.Context) (*grpc.ClientConn, agen
 	}
 
 	ic := interceptorDeps{
-		cfg:     func() *config.Config { return m.cfg },
-		log:     m.log,
-		metrics: m.metrics,
+		cfg:           func() *config.Config { return m.cfg },
+		log:           m.log,
+		streamMetrics: m.streamMetrics,
 	}
 
 	opts := []grpc.DialOption{
@@ -603,8 +610,8 @@ func (m *streamManager) recvLoop(ctx context.Context, stream agentv1.AgentServic
 				return
 			}
 			m.log.Err(err).Warn("stream recv ended")
-			if m.metrics != nil {
-				m.metrics.streamErrorsTotal.WithLabelValues("recv").Inc()
+			if m.streamMetrics != nil {
+				m.streamMetrics.IncStreamError("recv")
 			}
 			return
 		}

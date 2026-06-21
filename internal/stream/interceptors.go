@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/kubexa/kubexa-agent/internal/logger"
+	agentmetrics "github.com/kubexa/kubexa-agent/internal/metrics"
 	"github.com/kubexa/kubexa-agent/pkg/config"
 	"github.com/kubexa/kubexa-agent/pkg/protoversion"
 )
@@ -30,9 +31,9 @@ type configProvider func() *config.Config
 
 // interceptorDeps bundles dependencies for client interceptors.
 type interceptorDeps struct {
-	cfg    configProvider
-	log    *logger.Logger
-	metrics *grpcMetrics
+	cfg           configProvider
+	log           *logger.Logger
+	streamMetrics *agentmetrics.StreamMetrics
 }
 
 func (d interceptorDeps) chainUnary() []grpc.UnaryClientInterceptor {
@@ -225,13 +226,13 @@ func (d interceptorDeps) metricsUnary() grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		start := time.Now()
 		err := invoker(ctx, method, req, reply, cc, opts...)
-		if d.metrics != nil {
+		if d.streamMetrics != nil {
 			st := "ok"
 			if err != nil {
 				st = status.Code(err).String()
 			}
-			d.metrics.requestsTotal.WithLabelValues(method, st).Inc()
-			d.metrics.requestDuration.WithLabelValues(method).Observe(time.Since(start).Seconds())
+			d.streamMetrics.IncRequest(method, st)
+			d.streamMetrics.ObserveRequestDuration(method, time.Since(start).Seconds())
 		}
 		return err
 	}
@@ -241,43 +242,43 @@ func (d interceptorDeps) metricsStream() grpc.StreamClientInterceptor {
 	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
 		stream, err := streamer(ctx, desc, cc, method, opts...)
 		if err != nil {
-			if d.metrics != nil {
-				d.metrics.streamErrorsTotal.WithLabelValues("open").Inc()
+			if d.streamMetrics != nil {
+				d.streamMetrics.IncStreamError("open")
 			}
 			return nil, err
 		}
-		if d.metrics != nil {
-			d.metrics.setStreamActive(true)
+		if d.streamMetrics != nil {
+			d.streamMetrics.SetStreamActive(true)
 		}
 		return &metricsClientStream{
-			ClientStream: stream,
-			metrics:      d.metrics,
+			ClientStream:  stream,
+			streamMetrics: d.streamMetrics,
 		}, nil
 	}
 }
 
 type metricsClientStream struct {
 	grpc.ClientStream
-	metrics *grpcMetrics
-	closed  bool
+	streamMetrics *agentmetrics.StreamMetrics
+	closed        bool
 }
 
 func (s *metricsClientStream) SendMsg(m any) error {
 	err := s.ClientStream.SendMsg(m)
-	if err == nil && s.metrics != nil {
-		s.metrics.streamMessagesSent.Inc()
-	} else if err != nil && s.metrics != nil {
-		s.metrics.streamErrorsTotal.WithLabelValues("send").Inc()
+	if err == nil && s.streamMetrics != nil {
+		s.streamMetrics.IncMessagesSent()
+	} else if err != nil && s.streamMetrics != nil {
+		s.streamMetrics.IncStreamError("send")
 	}
 	return err
 }
 
 func (s *metricsClientStream) RecvMsg(m any) error {
 	err := s.ClientStream.RecvMsg(m)
-	if err == nil && s.metrics != nil {
-		s.metrics.streamMessagesReceived.Inc()
-	} else if err != nil && s.metrics != nil {
-		s.metrics.streamErrorsTotal.WithLabelValues("recv").Inc()
+	if err == nil && s.streamMetrics != nil {
+		s.streamMetrics.IncMessagesReceived()
+	} else if err != nil && s.streamMetrics != nil {
+		s.streamMetrics.IncStreamError("recv")
 	}
 	return err
 }
@@ -289,11 +290,11 @@ func (s *metricsClientStream) CloseSend() error {
 }
 
 func (s *metricsClientStream) markClosed() {
-	if s.closed || s.metrics == nil {
+	if s.closed || s.streamMetrics == nil {
 		return
 	}
 	s.closed = true
-	s.metrics.setStreamActive(false)
+	s.streamMetrics.SetStreamActive(false)
 }
 
 func outgoingMetadataForLog(ctx context.Context) metadata.MD {
