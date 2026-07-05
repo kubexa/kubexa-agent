@@ -18,6 +18,7 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	agentmetrics "github.com/kubexa/kubexa-agent/internal/metrics"
 	"github.com/kubexa/kubexa-agent/internal/queue"
+	"github.com/kubexa/kubexa-agent/pkg/buildinfo"
 	"github.com/kubexa/kubexa-agent/pkg/config"
 	"github.com/kubexa/kubexa-agent/pkg/protoversion"
 )
@@ -449,7 +450,7 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 		MessageId: uuid.NewString(),
 		Payload: &agentv1.AgentMessage_Handshake{
 			Handshake: &agentv1.HandshakeRequest{
-				AgentVersion:            AgentVersion,
+				AgentVersion:            buildinfo.Version,
 				ProtoVersion:            preferred,
 				SupportedProtoVersions:  supported,
 				ClusterId:               m.cfg.Agent.ClusterID,
