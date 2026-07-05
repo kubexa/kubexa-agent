@@ -22,6 +22,7 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	agentmetrics "github.com/kubexa/kubexa-agent/internal/metrics"
 	"github.com/kubexa/kubexa-agent/internal/queue"
+	"github.com/kubexa/kubexa-agent/pkg/buildinfo"
 	"github.com/kubexa/kubexa-agent/pkg/config"
 	"github.com/kubexa/kubexa-agent/pkg/protoversion"
 )
@@ -444,9 +445,31 @@ func TestAuthInterceptorMetadata(t *testing.T) {
 		t.Fatalf("interceptor: %v", err)
 	}
 	assertMD(t, gotMD, "x-tenant-token", "rotating-token")
-	assertMD(t, gotMD, "x-agent-version", AgentVersion)
+	assertMD(t, gotMD, "x-agent-version", buildinfo.Version)
 	assertMD(t, gotMD, "x-proto-version", protoversion.Current)
 	assertMD(t, gotMD, "x-cluster-id", "cluster-1")
+}
+
+func TestAuthInterceptorMetadataUsesBuildinfoVersion(t *testing.T) {
+	t.Parallel()
+
+	orig := buildinfo.Version
+	buildinfo.Version = "1.2.3-test"
+	t.Cleanup(func() { buildinfo.Version = orig })
+
+	var gotMD metadata.MD
+	ic := interceptorDeps{
+		cfg: func() *config.Config { return testConfig() },
+		log: logger.New("auth-test"),
+	}
+	invoker := func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, opts ...grpc.CallOption) error {
+		gotMD, _ = metadata.FromOutgoingContext(ctx)
+		return nil
+	}
+	if err := ic.authUnary()(context.Background(), "/test.Service/Method", nil, nil, nil, invoker); err != nil {
+		t.Fatalf("interceptor: %v", err)
+	}
+	assertMD(t, gotMD, "x-agent-version", "1.2.3-test")
 }
 
 func TestRecoveryInterceptorCatchesPanic(t *testing.T) {
