@@ -74,7 +74,7 @@ secret:
   tenantToken: "CHANGEME"
 
 # Optional env overrides (see pkg/config applyEnvOverrides).
-# Example: KUBEXA_GATEWAY_ADDRESS, KUBEXA_CLUSTER_ID, KUBEXA_LOG_LEVEL
+# Example: KUBEXA_GATEWAY_ADDRESS, KUBEXA_LOG_LEVEL
 env: {}
 
 extraEnv: []
@@ -87,7 +87,7 @@ agent:
   # tenant_token is injected via KUBEXA_TENANT_TOKEN from Secret — leave empty here.
   tenantToken: ""
   agentId: ""
-  clusterId: "" # auto-resolved from kube-system UID when empty
+  # cluster_id is not configurable; derived at runtime from the kube-system namespace UID.
 
 gateway:
   # Full host:port address. When set, overrides gateway.host/port.

@@ -190,7 +190,6 @@ log:
 func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("KUBEXA_TENANT_TOKEN", "env-token")
 	t.Setenv("KUBEXA_AGENT_ID", "env-agent")
-	t.Setenv("KUBEXA_CLUSTER_ID", "env-cluster")
 	t.Setenv("KUBEXA_GATEWAY_ADDRESS", "env.gateway:443")
 	t.Setenv("KUBEXA_LOG_LEVEL", "warn")
 
@@ -221,8 +220,8 @@ log:
 	if cfg.Agent.AgentID != "env-agent" {
 		t.Errorf("agent_id = %q, want env-agent", cfg.Agent.AgentID)
 	}
-	if cfg.Agent.ClusterID != "env-cluster" {
-		t.Errorf("cluster_id = %q, want env-cluster", cfg.Agent.ClusterID)
+	if cfg.Agent.ClusterID != "" {
+		t.Errorf("cluster_id = %q, want empty (resolved at runtime)", cfg.Agent.ClusterID)
 	}
 	if cfg.Gateway.Address != "env.gateway:443" {
 		t.Errorf("gateway.address = %q, want env.gateway:443", cfg.Gateway.Address)
@@ -310,7 +309,7 @@ func TestRedacted(t *testing.T) {
 
 func TestEnsureClusterID(t *testing.T) {
 	cfg := config.Default()
-	cfg.Agent.ClusterID = ""
+	cfg.Agent.ClusterID = "configured-should-be-overwritten"
 
 	getter := &stubNamespaceGetter{uid: "cluster-uid-123"}
 	if err := cfg.EnsureClusterID(context.Background(), getter); err != nil {
@@ -321,15 +320,6 @@ func TestEnsureClusterID(t *testing.T) {
 	}
 	if getter.calls != 1 || getter.lastName != "kube-system" {
 		t.Errorf("getter calls = %d name = %q", getter.calls, getter.lastName)
-	}
-
-	// No-op when already set.
-	cfg.Agent.ClusterID = "existing"
-	if err := cfg.EnsureClusterID(context.Background(), getter); err != nil {
-		t.Fatalf("EnsureClusterID() error = %v", err)
-	}
-	if cfg.Agent.ClusterID != "existing" {
-		t.Error("cluster_id was overwritten")
 	}
 }
 

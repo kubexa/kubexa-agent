@@ -48,8 +48,8 @@ type AgentConfig struct {
 	TenantToken string `yaml:"tenant_token"`
 	// AgentID uniquely identifies this agent process; generated when empty.
 	AgentID string `yaml:"agent_id"`
-	// ClusterID identifies the Kubernetes cluster; resolved from kube-system when empty.
-	ClusterID string `yaml:"cluster_id"`
+	// ClusterID identifies the Kubernetes cluster; set at runtime from the kube-system namespace UID.
+	ClusterID string `yaml:"-"`
 }
 
 // GatewayConfig controls connectivity to the Kubexa gateway.
@@ -300,16 +300,14 @@ func (c *Config) EnsureAgentID() {
 	c.Agent.AgentID = uuid.NewString()
 }
 
-// EnsureClusterID sets agent.cluster_id from the kube-system namespace UID when unset.
+// EnsureClusterID sets agent.cluster_id from the kube-system namespace UID.
+// The value is always derived from the cluster at runtime and cannot be configured at install time.
 func (c *Config) EnsureClusterID(ctx context.Context, getter NamespaceUIDGetter) error {
 	if c == nil {
 		return errors.New("config is nil")
 	}
-	if c.Agent.ClusterID != "" {
-		return nil
-	}
 	if getter == nil {
-		return errors.New("cluster_id is empty and namespace UID getter is nil")
+		return errors.New("namespace UID getter is nil")
 	}
 
 	uid, err := getter.NamespaceUID(ctx, "kube-system")
@@ -403,9 +401,6 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("KUBEXA_AGENT_ID"); v != "" {
 		cfg.Agent.AgentID = v
-	}
-	if v := os.Getenv("KUBEXA_CLUSTER_ID"); v != "" {
-		cfg.Agent.ClusterID = v
 	}
 	if v := os.Getenv("KUBEXA_GATEWAY_ADDRESS"); v != "" {
 		cfg.Gateway.Address = v
