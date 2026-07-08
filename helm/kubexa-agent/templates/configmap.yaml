@@ -11,9 +11,6 @@ data:
       {{- with .Values.agent.agentId }}
       agent_id: {{ . | quote }}
       {{- end }}
-      {{- with .Values.agent.clusterId }}
-      cluster_id: {{ . | quote }}
-      {{- end }}
 
     gateway:
       address: {{ include "kubexa-agent.gatewayAddress" . | quote }}
