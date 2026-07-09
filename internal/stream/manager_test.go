@@ -256,8 +256,8 @@ func TestHandshakeRejection(t *testing.T) {
 			return stream.Send(&agentv1.GatewayMessage{
 				Payload: &agentv1.GatewayMessage_Handshake{
 					Handshake: &agentv1.HandshakeResponse{
-						Accepted:         false,
-						RejectionReason:  "invalid tenant",
+						Accepted:        false,
+						RejectionReason: "cluster not registered",
 					},
 				},
 			})
@@ -281,6 +281,59 @@ func TestHandshakeRejection(t *testing.T) {
 	if sm.currentState() != StateShutdown {
 		t.Fatalf("state = %s, want shutdown", sm.currentState())
 	}
+}
+
+func TestHandshakeInvalidTenantTokenRetriesUntilAccepted(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := &mockGateway{
+		onConnect: func(stream grpc.BidiStreamingServer[agentv1.AgentMessage, agentv1.GatewayMessage]) error {
+			if _, err := stream.Recv(); err != nil {
+				return err
+			}
+			n := attempts.Add(1)
+			if n < 3 {
+				return stream.Send(&agentv1.GatewayMessage{
+					Payload: &agentv1.GatewayMessage_Handshake{
+						Handshake: &agentv1.HandshakeResponse{
+							Accepted:        false,
+							RejectionReason: recoverableRejectionInvalidTenantToken,
+						},
+					},
+				})
+			}
+			return stream.Send(&agentv1.GatewayMessage{
+				Payload: &agentv1.GatewayMessage_Handshake{
+					Handshake: &agentv1.HandshakeResponse{
+						Accepted:  true,
+						SessionId: "sess-token-retry",
+					},
+				},
+			})
+		},
+	}
+	_, lis := startBufGRPCServer(t, srv)
+
+	cfg := testConfig()
+	sm, _ := newTestManager(t, cfg, newTestQueue(t), lis)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- sm.Run(ctx) }()
+
+	waitFor(t, 3*time.Second, func() bool {
+		return sm.SessionID() == "sess-token-retry"
+	})
+
+	if got := attempts.Load(); got < 3 {
+		t.Fatalf("handshake attempts = %d, want >= 3", got)
+	}
+
+	cancel()
+	<-done
 }
 
 func TestCircuitBreakerPermanentGRPCError(t *testing.T) {

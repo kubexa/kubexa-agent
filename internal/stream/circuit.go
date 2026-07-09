@@ -3,6 +3,7 @@ package stream
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -10,10 +11,27 @@ import (
 
 const maxConsecutiveTransientFailures = 10
 
+// recoverableRejectionInvalidTenantToken matches agentserver auth.ErrInvalidToken when
+// the apiserver token reconciler has not yet seeded the gateway pool.
+const recoverableRejectionInvalidTenantToken = "invalid tenant token"
+
 // permanentGatewayError indicates the gateway rejected the agent in a non-recoverable way.
 type permanentGatewayError struct {
 	code    codes.Code
 	message string
+}
+
+// recoverableHandshakeError indicates a handshake rejection that may succeed after retry
+// (e.g. gateway token pool not yet synced from apiserver).
+type recoverableHandshakeError struct {
+	reason string
+}
+
+func (e *recoverableHandshakeError) Error() string {
+	if e == nil || e.reason == "" {
+		return "gateway rejected handshake (recoverable)"
+	}
+	return fmt.Sprintf("gateway rejected handshake: %s", e.reason)
 }
 
 func (e *permanentGatewayError) Error() string {
@@ -54,6 +72,10 @@ func classifyGRPCError(err error) (permanent bool, transient bool) {
 	if err == nil {
 		return false, false
 	}
+	var recoverable *recoverableHandshakeError
+	if errors.As(err, &recoverable) {
+		return false, true
+	}
 	var perm *permanentGatewayError
 	if errors.As(err, &perm) {
 		return true, false
@@ -72,7 +94,14 @@ func classifyGRPCError(err error) (permanent bool, transient bool) {
 	}
 }
 
+func isRecoverableHandshakeRejection(reason string) bool {
+	return strings.EqualFold(strings.TrimSpace(reason), recoverableRejectionInvalidTenantToken)
+}
+
 func handshakeRejected(reason string) error {
+	if isRecoverableHandshakeRejection(reason) {
+		return &recoverableHandshakeError{reason: reason}
+	}
 	msg := "gateway rejected handshake"
 	if reason != "" {
 		msg = fmt.Sprintf("%s: %s", msg, reason)
