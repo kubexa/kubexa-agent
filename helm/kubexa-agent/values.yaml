@@ -97,8 +97,8 @@ gateway:
   tls: true
   insecureSkipVerify: false
   caCertPath: ""
-  reconnectInitialDelay: 2s
-  reconnectMaxDelay: 60s
+  reconnectInitialDelay: 1s
+  reconnectMaxDelay: 15s
   dialTimeout: 10s
   handshakeTimeout: 10s
 
