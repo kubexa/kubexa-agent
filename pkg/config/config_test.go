@@ -22,11 +22,11 @@ func TestDefault(t *testing.T) {
 	if cfg.Gateway.InsecureSkipVerify != false {
 		t.Errorf("gateway.insecure_skip_verify = %v, want false", cfg.Gateway.InsecureSkipVerify)
 	}
-	if cfg.Gateway.ReconnectInitialDelay != 2*time.Second {
-		t.Errorf("gateway.reconnect_initial_delay = %v, want 2s", cfg.Gateway.ReconnectInitialDelay)
+	if cfg.Gateway.ReconnectInitialDelay != 1*time.Second {
+		t.Errorf("gateway.reconnect_initial_delay = %v, want 1s", cfg.Gateway.ReconnectInitialDelay)
 	}
-	if cfg.Gateway.ReconnectMaxDelay != 60*time.Second {
-		t.Errorf("gateway.reconnect_max_delay = %v, want 60s", cfg.Gateway.ReconnectMaxDelay)
+	if cfg.Gateway.ReconnectMaxDelay != 15*time.Second {
+		t.Errorf("gateway.reconnect_max_delay = %v, want 15s", cfg.Gateway.ReconnectMaxDelay)
 	}
 	if cfg.Gateway.DialTimeout != 10*time.Second {
 		t.Errorf("gateway.dial_timeout = %v, want 10s", cfg.Gateway.DialTimeout)
