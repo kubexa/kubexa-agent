@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	defaultReconnectInitialDelay = 2 * time.Second
-	defaultReconnectMaxDelay     = 60 * time.Second
+	defaultReconnectInitialDelay = 1 * time.Second
+	defaultReconnectMaxDelay     = 15 * time.Second
 	defaultDialTimeout           = 10 * time.Second
 	defaultHandshakeTimeout      = 10 * time.Second
 	defaultTailLines             = int64(100)
