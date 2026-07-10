@@ -244,7 +244,7 @@ func (m *streamManager) Run(ctx context.Context) error {
 
 		m.startSessionWorkers(sessionCtx, stream)
 
-		err = m.waitSession(sessionCtx)
+		err = m.waitSession(ctx)
 		m.endSession()
 		m.ready.Store(false)
 		m.sessionID.Store("")
@@ -537,7 +537,10 @@ func (m *streamManager) startSessionWorkers(ctx context.Context, stream agentv1.
 	}()
 }
 
-func (m *streamManager) waitSession(ctx context.Context) error {
+// waitSession blocks until all session workers exit or the process context is cancelled.
+// Session workers may exit early when abortSession cancels the session context; that
+// is not a process shutdown and returns nil so Run can reconnect.
+func (m *streamManager) waitSession(parentCtx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		m.sessionWG.Wait()
@@ -545,10 +548,22 @@ func (m *streamManager) waitSession(ctx context.Context) error {
 	}()
 
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-parentCtx.Done():
+		return parentCtx.Err()
 	case <-done:
 		return nil
+	}
+}
+
+// abortSession cancels the active session context so all session workers unblock.
+// It is safe to call multiple times and is invoked when any worker detects a
+// broken stream (e.g. gateway restart) before endSession runs.
+func (m *streamManager) abortSession() {
+	m.sessionMu.Lock()
+	cancel := m.sessionCancel
+	m.sessionMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -594,6 +609,7 @@ func (m *streamManager) sendLoop(ctx context.Context, stream agentv1.AgentServic
 			}
 			if err := stream.Send(msg); err != nil {
 				m.log.Err(err).Warn("stream send failed")
+				m.abortSession()
 				return
 			}
 		}
@@ -614,6 +630,7 @@ func (m *streamManager) recvLoop(ctx context.Context, stream agentv1.AgentServic
 			if m.streamMetrics != nil {
 				m.streamMetrics.IncStreamError("recv")
 			}
+			m.abortSession()
 			return
 		}
 		m.handleGatewayMessage(msg)
@@ -671,6 +688,7 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				return
 			}
 			m.log.Err(err).Warn("drain queue batch failed")
+			m.abortSession()
 			return
 		}
 		if len(items) == 0 {
@@ -693,6 +711,7 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 			if err := stream.Send(&msg); err != nil {
 				_ = m.queue.Nack([]string{item.ID})
 				m.log.Err(err).Warn("failed to send buffered message")
+				m.abortSession()
 				return
 			}
 			ackIDs = append(ackIDs, item.ID)

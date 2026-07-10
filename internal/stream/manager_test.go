@@ -3,6 +3,7 @@ package stream
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net"
 	"sync"
@@ -153,11 +154,14 @@ func TestStateMachineTransitions(t *testing.T) {
 			if _, err := stream.Recv(); err != nil {
 				return err
 			}
-			return stream.Send(&agentv1.GatewayMessage{
+			if err := stream.Send(&agentv1.GatewayMessage{
 				Payload: &agentv1.GatewayMessage_Handshake{
 					Handshake: &agentv1.HandshakeResponse{Accepted: true, SessionId: "sess-1"},
 				},
-			})
+			}); err != nil {
+				return err
+			}
+			return holdGatewayStream(stream)
 		},
 	}
 	_, lis := startBufGRPCServer(t, srv)
@@ -192,6 +196,57 @@ func TestStateMachineTransitions(t *testing.T) {
 	}
 }
 
+// TestReconnectAfterGatewayStreamDrop verifies the agent reconnects when the
+// gateway closes the stream (e.g. process restart) while sendLoop is idle.
+func TestReconnectAfterGatewayStreamDrop(t *testing.T) {
+	t.Parallel()
+
+	var connects atomic.Int32
+	srv := &mockGateway{
+		onConnect: func(stream grpc.BidiStreamingServer[agentv1.AgentMessage, agentv1.GatewayMessage]) error {
+			if _, err := stream.Recv(); err != nil {
+				return err
+			}
+			n := connects.Add(1)
+			if err := stream.Send(&agentv1.GatewayMessage{
+				Payload: &agentv1.GatewayMessage_Handshake{
+					Handshake: &agentv1.HandshakeResponse{
+						Accepted:  true,
+						SessionId: fmt.Sprintf("sess-%d", n),
+					},
+				},
+			}); err != nil {
+				return err
+			}
+			if n == 1 {
+				return nil
+			}
+			<-stream.Context().Done()
+			return stream.Context().Err()
+		},
+	}
+	_, lis := startBufGRPCServer(t, srv)
+
+	cfg := testConfig()
+	sm, _ := newTestManager(t, cfg, newTestQueue(t), lis)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { _ = sm.Run(ctx) }()
+
+	waitFor(t, 3*time.Second, func() bool {
+		return connects.Load() >= 2 && sm.Connected()
+	})
+	if got := connects.Load(); got < 2 {
+		t.Fatalf("gateway connect attempts = %d, want >= 2", got)
+	}
+	if got := sm.SessionID(); got != "sess-2" {
+		t.Fatalf("SessionID() after reconnect = %q, want sess-2", got)
+	}
+
+	cancel()
+}
+
 type mockGateway struct {
 	agentv1.UnimplementedAgentServiceServer
 	onConnect func(grpc.BidiStreamingServer[agentv1.AgentMessage, agentv1.GatewayMessage]) error
@@ -202,6 +257,12 @@ func (m *mockGateway) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessa
 		return m.onConnect(stream)
 	}
 	return status.Error(codes.Unimplemented, "not configured")
+}
+
+// holdGatewayStream keeps a mock gateway session open until the client disconnects.
+func holdGatewayStream(stream grpc.BidiStreamingServer[agentv1.AgentMessage, agentv1.GatewayMessage]) error {
+	<-stream.Context().Done()
+	return stream.Context().Err()
 }
 
 func TestHandshakeSuccess(t *testing.T) {
@@ -217,7 +278,7 @@ func TestHandshakeSuccess(t *testing.T) {
 			if hs == nil {
 				return status.Error(codes.InvalidArgument, "expected handshake")
 			}
-			return stream.Send(&agentv1.GatewayMessage{
+			if err := stream.Send(&agentv1.GatewayMessage{
 				Payload: &agentv1.GatewayMessage_Handshake{
 					Handshake: &agentv1.HandshakeResponse{
 						Accepted:      true,
@@ -226,7 +287,10 @@ func TestHandshakeSuccess(t *testing.T) {
 						Config:        &agentv1.ConfigSnapshot{BatchSize: 50},
 					},
 				},
-			})
+			}); err != nil {
+				return err
+			}
+			return holdGatewayStream(stream)
 		},
 	}
 	_, lis := startBufGRPCServer(t, srv)
@@ -303,14 +367,17 @@ func TestHandshakeInvalidTenantTokenRetriesUntilAccepted(t *testing.T) {
 					},
 				})
 			}
-			return stream.Send(&agentv1.GatewayMessage{
+			if err := stream.Send(&agentv1.GatewayMessage{
 				Payload: &agentv1.GatewayMessage_Handshake{
 					Handshake: &agentv1.HandshakeResponse{
 						Accepted:  true,
 						SessionId: "sess-token-retry",
 					},
 				},
-			})
+			}); err != nil {
+				return err
+			}
+			return holdGatewayStream(stream)
 		},
 	}
 	_, lis := startBufGRPCServer(t, srv)
@@ -425,11 +492,14 @@ func TestReconnectBackoffJitter(t *testing.T) {
 			if _, err := stream.Recv(); err != nil {
 				return err
 			}
-			return stream.Send(&agentv1.GatewayMessage{
+			if err := stream.Send(&agentv1.GatewayMessage{
 				Payload: &agentv1.GatewayMessage_Handshake{
 					Handshake: &agentv1.HandshakeResponse{Accepted: true, SessionId: "ok"},
 				},
-			})
+			}); err != nil {
+				return err
+			}
+			return holdGatewayStream(stream)
 		},
 	}
 	_, lis := startBufGRPCServer(t, srv)
