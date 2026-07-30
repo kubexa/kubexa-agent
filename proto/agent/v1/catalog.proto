@@ -1,0 +1,33 @@
+syntax = "proto3";
+package agent.v1;
+
+option go_package = "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1";
+
+// ResourceCatalog is a full snapshot of every API resource the agent can see
+// in its cluster, with the agent's own read permission for each. It replaces
+// the previous snapshot wholesale; there is no delta encoding.
+//
+// The catalog deliberately speaks in GVR strings rather than the ResourceKind
+// enum: that enum is a closed set and cannot represent a CRD, which is the
+// case this whole message exists to serve.
+message ResourceCatalog {
+  string fingerprint = 1;             // hash of the sorted GVR set
+  int64  collected_at = 2;            // unix milliseconds
+  repeated ResourceCapability entries = 3;
+  repeated string failed_groups = 4;  // API groups discovery could not reach
+}
+
+message ResourceCapability {
+  string group = 1;      // "" for the core group
+  string version = 2;
+  string resource = 3;   // plural, e.g. "deployments"
+  string kind = 4;       // "Deployment"
+  bool namespaced = 5;
+  bool can_list = 6;
+  bool can_watch = 7;
+  // probe_failed means the SelfSubjectAccessReview itself errored, so can_list
+  // and can_watch carry no information. It is NOT the same as being denied: a
+  // wrong "denied" hides a resource and sends the operator hunting through
+  // their own RBAC, while an honest "unknown" lets the UI say so.
+  bool probe_failed = 8;
+}
