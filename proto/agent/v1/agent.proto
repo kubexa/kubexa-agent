@@ -1,6 +1,7 @@
 syntax = "proto3";
 package agent.v1;
 
+import "proto/agent/v1/catalog.proto";
 import "proto/agent/v1/log.proto";
 import "proto/agent/v1/state.proto";
 import "proto/agent/v1/metric.proto";
@@ -35,6 +36,7 @@ message AgentMessage {
     Heartbeat              heartbeat          = 7;
     MetricsEvent           kube_metrics       = 8;
     PrometheusMetricsEvent prometheus_metrics = 9;
+    ResourceCatalog        catalog            = 10;
   }
 }
 
