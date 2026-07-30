@@ -39,6 +39,13 @@ type queueWriter struct {
 	timeout time.Duration
 }
 
+// NewQueueWriter adapts the agent's outbound queue to the Writer interface so
+// components outside this package (the capability reporter) can publish
+// through the same durable path.
+func NewQueueWriter(q queue.Queue, timeout time.Duration) Writer {
+	return &queueWriter{q: q, timeout: timeout}
+}
+
 func (w *queueWriter) Write(ctx context.Context, msg *agentv1.AgentMessage) error {
 	if msg == nil {
 		return errors.New("agent message is nil")
