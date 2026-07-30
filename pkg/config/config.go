@@ -111,6 +111,17 @@ type StateCollectConfig struct {
 	Enabled      bool                 `yaml:"enabled"`
 	ResyncPeriod time.Duration        `yaml:"resync_period"`
 	Rules        []StateNamespaceRule `yaml:"rules"`
+	// RedactSecrets controls whether Secret payloads (data/stringData) are stripped from
+	// state events before they leave the cluster. Defaults to false: this is the project
+	// owner's explicit choice so the Kubexa platform can serve Secret values to cluster
+	// admins/owners in the resource explorer. Set to true for an installation that does not
+	// want Secret values leaving the cluster at all.
+	//
+	// This flag never affects metadata scrubbing: managedFields and the
+	// kubectl.kubernetes.io/last-applied-configuration annotation are always removed,
+	// regardless of RedactSecrets, because that annotation on a kubectl-applied Secret is a
+	// second copy of the full base64-encoded payload.
+	RedactSecrets bool `yaml:"redact_secrets"`
 }
 
 // StateNamespaceRule defines state collection settings scoped to a namespace.
@@ -229,6 +240,7 @@ func Default() *Config {
 				Rules: []StateNamespaceRule{
 					{Resources: resources},
 				},
+				RedactSecrets: false,
 			},
 			Metrics: MetricsCollectConfig{
 				Enabled: true,

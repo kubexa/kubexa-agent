@@ -68,6 +68,7 @@ Chart values map directly to `pkg/config.Config`. Key sections:
 | `gateway.*` | `gateway.*` | Gateway address, TLS, reconnect |
 | `collect.logs.*` | `collect.logs.*` | Log tail/follow, rules |
 | `collect.state.*` | `collect.state.*` | Resource watch rules |
+| `collect.state.redactSecrets` | `collect.state.redact_secrets` | Whether Secret `data`/`stringData` are stripped before leaving the cluster; default `false` |
 | `collect.metrics.*` | `collect.metrics.*` | K8s metrics + custom endpoints |
 | `buffer.*` | `buffer.*` | Memory/disk queue |
 | `observability.*` | `observability.*` | Health and metrics ports |
@@ -100,6 +101,22 @@ helm install kubexa-agent ./helm/kubexa-agent \
   --set secret.create=false \
   --set secret.existingSecret=kubexa-agent-token
 ```
+
+### Secret handling
+
+`collect.state.redact_secrets` (chart: `collect.state.redactSecrets`) controls whether watched
+Secret objects have their `data`/`stringData` payloads stripped before the agent sends state
+events to the gateway. **Default: `false` — Secret values are NOT stripped.** This is a
+deliberate choice: with stripping off, Secret values leave the cluster over the agent's
+existing gRPC stream and are persisted by the Kubexa platform, which is the trade-off required
+to let cluster admins and owners view Secret values in the resource explorer. Set
+`redactSecrets: true` for an installation that must keep Secret values inside the cluster and
+never send them to the gateway.
+
+Regardless of this setting, `managedFields` and the
+`kubectl.kubernetes.io/last-applied-configuration` annotation are always stripped from every
+object, Secret or not — for a Secret applied with `kubectl apply`, that annotation is a second,
+independent copy of the full manifest including every base64-encoded value.
 
 ## Memory and resource sizing
 

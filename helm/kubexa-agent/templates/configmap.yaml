@@ -44,6 +44,7 @@ data:
       state:
         enabled: {{ .Values.collect.state.enabled }}
         resync_period: {{ .Values.collect.state.resyncPeriod | quote }}
+        redact_secrets: {{ .Values.collect.state.redactSecrets }}
         {{- with .Values.collect.state.rules }}
         rules:
           {{- toYaml . | nindent 10 }}

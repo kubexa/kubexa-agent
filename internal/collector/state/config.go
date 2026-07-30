@@ -25,6 +25,11 @@ type Config struct {
 	Rules []pkgconfig.StateNamespaceRule
 	// WriteTimeout bounds non-blocking queue writes.
 	WriteTimeout time.Duration
+	// RedactSecrets mirrors pkgconfig.StateCollectConfig.RedactSecrets: whether Secret
+	// data/stringData payloads are stripped before being sent to the gateway. Defaults to
+	// false (Secret values are NOT stripped). Metadata scrubbing is unconditional regardless
+	// of this setting; see sanitize.go.
+	RedactSecrets bool
 }
 
 // DefaultConfig returns documented defaults for the state watcher.
@@ -38,6 +43,7 @@ func DefaultConfig() Config {
 		Rules: []pkgconfig.StateNamespaceRule{
 			{Resources: []string{"pods", "services", "deployments", "secrets"}},
 		},
+		RedactSecrets: false,
 	}
 }
 
@@ -48,10 +54,11 @@ func ConfigFromRoot(root *pkgconfig.Config) Config {
 	}
 	sc := root.Collect.State
 	cfg := Config{
-		Enabled:      sc.Enabled,
-		ResyncPeriod: sc.ResyncPeriod,
-		Rules:        append([]pkgconfig.StateNamespaceRule(nil), sc.Rules...),
-		WriteTimeout: defaultWriteTimeout,
+		Enabled:       sc.Enabled,
+		ResyncPeriod:  sc.ResyncPeriod,
+		Rules:         append([]pkgconfig.StateNamespaceRule(nil), sc.Rules...),
+		WriteTimeout:  defaultWriteTimeout,
+		RedactSecrets: sc.RedactSecrets,
 	}
 	cfg.Namespaces = namespacesFromRules(sc.Rules)
 	cfg.ApplyDefaults()
