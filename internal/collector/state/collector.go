@@ -355,7 +355,7 @@ func (c *Collector) processItem(ctx context.Context, item workItem) error {
 		return errors.New("work item object is nil")
 	}
 
-	objectJSON, err := MarshalObjectJSON(item.object, item.desc.GVR.Resource)
+	objectJSON, err := MarshalObjectJSON(item.object, item.desc.GVR.Resource, c.cfg.RedactSecrets)
 	if err != nil {
 		return fmt.Errorf("marshal object: %w", err)
 	}

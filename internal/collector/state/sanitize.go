@@ -21,6 +21,16 @@ var jsonBufPool = sync.Pool{
 }
 
 // SanitizeObjectMeta strips verbose or sensitive metadata fields.
+//
+// This scrubbing is unconditional -- it does NOT depend on the RedactSecrets setting, and
+// it must stay that way. managedFields is pure noise on every object. The
+// kubectl.kubernetes.io/last-applied-configuration annotation is more than noise: for a
+// Secret created or updated with `kubectl apply`, that annotation holds a JSON copy of the
+// full original manifest, including every base64-encoded value under .data/.stringData. So
+// it is a second, independent copy of the secret payload that lives in metadata rather than
+// in the Secret's data fields. If this were ever made conditional on RedactSecrets, an
+// operator who turned stripping back on (RedactSecrets=true) would still leak every secret
+// value through this annotation, defeating the setting entirely. Do not "simplify" this away.
 func SanitizeObjectMeta(meta *metav1.ObjectMeta) {
 	if meta == nil {
 		return
@@ -34,23 +44,34 @@ func SanitizeObjectMeta(meta *metav1.ObjectMeta) {
 	}
 }
 
-// SanitizeSecret clears secret payload fields; metadata and type are retained.
-func SanitizeSecret(secret *corev1.Secret) {
+// SanitizeSecret sanitizes a typed Secret object. Metadata scrubbing (managedFields, the
+// last-applied-configuration annotation) always happens via SanitizeObjectMeta, regardless
+// of redactSecrets -- see the comment on SanitizeObjectMeta for why that must never become
+// conditional. The Secret payload (Data/StringData) is only cleared when redactSecrets is
+// true; by default (redactSecrets=false) values are left intact so the platform can serve
+// them for cluster management purposes.
+func SanitizeSecret(secret *corev1.Secret, redactSecrets bool) {
 	if secret == nil {
 		return
 	}
 	SanitizeObjectMeta(&secret.ObjectMeta)
+	if !redactSecrets {
+		return
+	}
 	secret.Data = nil
 	secret.StringData = nil
 }
 
-// SanitizeUnstructured applies sanitization to a generic API object.
-func SanitizeUnstructured(obj *unstructured.Unstructured, pluralResource string) {
+// SanitizeUnstructured applies sanitization to a generic API object. Metadata scrubbing via
+// sanitizeUnstructuredMetadata always happens, regardless of redactSecrets -- see the
+// comment on SanitizeObjectMeta for why. The secrets-specific data/stringData removal below
+// is only applied when redactSecrets is true.
+func SanitizeUnstructured(obj *unstructured.Unstructured, pluralResource string, redactSecrets bool) {
 	if obj == nil {
 		return
 	}
 	sanitizeUnstructuredMetadata(obj)
-	if pluralResource == "secrets" {
+	if redactSecrets && pluralResource == "secrets" {
 		unstructured.RemoveNestedField(obj.Object, "data")
 		unstructured.RemoveNestedField(obj.Object, "stringData")
 	}
@@ -74,32 +95,37 @@ func sanitizeUnstructuredMetadata(obj *unstructured.Unstructured) {
 }
 
 // SanitizeRuntimeObject applies resource-specific sanitization to a deep-copied object.
-func SanitizeRuntimeObject(obj runtime.Object, pluralResource string) {
+// redactSecrets controls only the Secret payload (data/stringData); metadata scrubbing
+// (managedFields, last-applied-configuration) always happens in both branches below,
+// regardless of redactSecrets -- see the comment on SanitizeObjectMeta for why.
+func SanitizeRuntimeObject(obj runtime.Object, pluralResource string, redactSecrets bool) {
 	if obj == nil {
 		return
 	}
 	switch o := obj.(type) {
 	case *unstructured.Unstructured:
-		SanitizeUnstructured(o, pluralResource)
+		SanitizeUnstructured(o, pluralResource, redactSecrets)
 	case *corev1.Secret:
-		SanitizeSecret(o)
+		SanitizeSecret(o, redactSecrets)
 	default:
 		u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
 		if err != nil {
 			return
 		}
 		uns := &unstructured.Unstructured{Object: u}
-		SanitizeUnstructured(uns, pluralResource)
+		SanitizeUnstructured(uns, pluralResource, redactSecrets)
 		_ = runtime.DefaultUnstructuredConverter.FromUnstructured(u, obj)
 	}
 }
 
-// MarshalObjectJSON sanitizes obj and encodes it as JSON.
-func MarshalObjectJSON(obj runtime.Object, pluralResource string) ([]byte, error) {
+// MarshalObjectJSON sanitizes obj and encodes it as JSON. redactSecrets controls whether a
+// Secret's data/stringData payload survives into the JSON; when false (the default), Secret
+// values are preserved end to end so the platform can serve them for cluster management.
+func MarshalObjectJSON(obj runtime.Object, pluralResource string, redactSecrets bool) ([]byte, error) {
 	if obj == nil {
 		return nil, nil
 	}
-	SanitizeRuntimeObject(obj, pluralResource)
+	SanitizeRuntimeObject(obj, pluralResource, redactSecrets)
 	enc, err := json.Marshal(obj)
 	if err != nil {
 		return nil, err

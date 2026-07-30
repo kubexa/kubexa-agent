@@ -125,6 +125,13 @@ collect:
   state:
     enabled: true
     resyncPeriod: 5m
+    # redactSecrets: when false (the default), Secret values (data/stringData) are sent to
+    # the gateway as-is and persisted by the Kubexa platform, so cluster admins/owners can
+    # view them in the resource explorer. Set to true if this installation must never let
+    # Secret values leave the cluster; managedFields and the
+    # kubectl.kubernetes.io/last-applied-configuration annotation are always stripped from
+    # every object regardless of this setting.
+    redactSecrets: false
     rules:
       - id: cluster-core
         namespace: ""
