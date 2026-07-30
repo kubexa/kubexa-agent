@@ -9,7 +9,7 @@ message StateEvent {
   string              name         = 3;
   string              namespace    = 4;
   bytes               object       = 5; // JSON encoded kubernetes object
-  int64               timestamp    = 6;
+  int64               timestamp    = 6; // unix milliseconds
   map<string, string> labels       = 7;
   string              api_version  = 8; // group/version, e.g. "batch/v1"
   string              resource     = 9; // plural API resource, e.g. "jobs"
