@@ -50,16 +50,37 @@ func Probe(
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			canList, listErr := allowed(ctx, authz, g, "list")
-			canWatch, watchErr := allowed(ctx, authz, g, "watch")
-
 			c := Capability{GVR: g}
-			if listErr != nil || watchErr != nil {
+
+			canList, listErr := allowed(ctx, authz, g, "list")
+			if listErr != nil {
 				c.ProbeFailed = true
-			} else {
-				c.CanList = canList
-				c.CanWatch = canWatch
+				out[i] = c
+				return
 			}
+			c.CanList = canList
+
+			// Only ask about watch when list is allowed. Watch without list is
+			// unusable anyway — there is no first page to render — and the
+			// backend collapses that case to "unavailable" without consulting
+			// canWatch. Since the agent's RBAC is an operator-chosen allowlist,
+			// most of a cluster's GVRs are denied, so skipping the second
+			// review there roughly halves a sweep that would otherwise issue
+			// two API calls for every resource type in the cluster.
+			if !canList {
+				out[i] = c
+				return
+			}
+
+			canWatch, watchErr := allowed(ctx, authz, g, "watch")
+			if watchErr != nil {
+				// The list answer is real, but reporting it alongside a
+				// defaulted canWatch=false would silently downgrade a
+				// watchable type to polling. Unknown is the honest state.
+				out[i] = Capability{GVR: g, ProbeFailed: true}
+				return
+			}
+			c.CanWatch = canWatch
 			out[i] = c
 		}(i, g)
 	}
