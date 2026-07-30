@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"k8s.io/client-go/rest"
 
+	"github.com/kubexa/kubexa-agent/internal/capability"
 	"github.com/kubexa/kubexa-agent/internal/collector/logs"
 	metricscollector "github.com/kubexa/kubexa-agent/internal/collector/metrics"
 	"github.com/kubexa/kubexa-agent/internal/collector/state"
@@ -294,6 +295,26 @@ func buildCollectors(
 			return nil, err
 		}
 		collectors = append(collectors, stateColl)
+	}
+
+	if cfg.Collect.State.Enabled {
+		probeCS, err := k8s.NewProbeClientset(&k8sconfig.Config{}, 5, 10)
+		if err != nil {
+			return nil, err
+		}
+		capReporter, err := capability.NewReporter(capability.Options{
+			Clientset: probeCS,
+			Writer:    state.NewQueueWriter(q, state.ConfigFromRoot(cfg).WriteTimeout),
+			AgentMeta: &commonv1.AgentMetadata{
+				ClusterId: cfg.Agent.ClusterID,
+				AgentId:   cfg.Agent.AgentID,
+			},
+			Logger: logger.New("capability-reporter", logger.WithAgentID(cfg.Agent.AgentID)),
+		})
+		if err != nil {
+			return nil, err
+		}
+		collectors = append(collectors, capReporter)
 	}
 
 	if cfg.Collect.Metrics.Enabled {

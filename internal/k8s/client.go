@@ -99,6 +99,33 @@ func New(cfg *k8sconfig.Config, log *logger.Logger) (Client, error) {
 	return newClient(kube, dynamicClient, metricsClient, log, apiMetrics), nil
 }
 
+// NewProbeClientset builds a second clientset from the same resolved REST
+// config but with its own QPS/burst budget.
+//
+// It exists so a several-hundred-GVR capability sweep cannot drain the token
+// bucket that the informers share — starving live data collection with our own
+// bookkeeping would be a poor trade.
+func NewProbeClientset(cfg *k8sconfig.Config, qps float32, burst int) (kubernetes.Interface, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("k8s probe client: config is required")
+	}
+	restCfg, err := resolveRESTConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("k8s probe client: resolve rest config: %w", err)
+	}
+	if qps > 0 {
+		restCfg.QPS = qps
+	}
+	if burst > 0 {
+		restCfg.Burst = burst
+	}
+	cs, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("k8s probe client: create clientset: %w", err)
+	}
+	return cs, nil
+}
+
 // EnableMetrics attaches Prometheus recorders for Kubernetes API calls.
 func (c *client) EnableMetrics(rec MetricsRecorder) {
 	if c == nil {
