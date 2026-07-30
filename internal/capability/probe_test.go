@@ -3,6 +3,7 @@ package capability
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	authv1 "k8s.io/api/authorization/v1"
@@ -124,5 +125,56 @@ func TestProbeReturnsOneCapabilityPerGVR(t *testing.T) {
 	cs := authzClient(map[string]bool{}, nil)
 	if got := Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 8); len(got) != 2 {
 		t.Fatalf("got %d capabilities, want 2", len(got))
+	}
+}
+
+// Watch is only worth asking about when list is allowed: without a first page
+// there is nothing to watch, and the backend collapses that case to
+// "unavailable" without consulting canWatch. Since the agent's RBAC is an
+// operator-chosen allowlist, most GVRs in a cluster are denied, so skipping
+// the second review there roughly halves the sweep. A ~400-review sweep
+// against a rate-limited client is what produced client-side throttling
+// warnings in production.
+func TestProbeSkipsWatchWhenListIsDenied(t *testing.T) {
+	var verbs []string
+	var mu sync.Mutex
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("create", "selfsubjectaccessreviews",
+		func(action k8stesting.Action) (bool, runtime.Object, error) {
+			ssar := action.(k8stesting.CreateAction).GetObject().(*authv1.SelfSubjectAccessReview)
+			mu.Lock()
+			verbs = append(verbs, ssar.Spec.ResourceAttributes.Verb)
+			mu.Unlock()
+			return true, &authv1.SelfSubjectAccessReview{
+				Status: authv1.SubjectAccessReviewStatus{Allowed: false},
+			}, nil
+		})
+
+	got := Probe(context.Background(), cs.AuthorizationV1(), gvrs()[:1], 1)
+
+	if len(verbs) != 1 || verbs[0] != "list" {
+		t.Fatalf("issued reviews for %v, want exactly [list] — watch must not be asked once list is denied", verbs)
+	}
+	if got[0].CanList || got[0].CanWatch || got[0].ProbeFailed {
+		t.Fatalf("capability = %+v, want a plain deny with no probe failure", got[0])
+	}
+}
+
+// A watch review that errors must not leave the resource looking merely
+// poll-only: that would silently downgrade a watchable type on a transient
+// API hiccup. Unknown is the honest state.
+func TestProbeMarksUnknownWhenOnlyTheWatchReviewFails(t *testing.T) {
+	cs := authzClient(
+		map[string]bool{"deployments:list": true},
+		map[string]bool{"deployments:watch": true},
+	)
+
+	got := Probe(context.Background(), cs.AuthorizationV1(), gvrs()[:1], 1)
+
+	if !got[0].ProbeFailed {
+		t.Fatalf("capability = %+v, want ProbeFailed after the watch review errored", got[0])
+	}
+	if got[0].CanList || got[0].CanWatch {
+		t.Fatalf("capability = %+v, want no permission claims alongside ProbeFailed", got[0])
 	}
 }

@@ -296,7 +296,14 @@ func buildCollectors(
 		}
 		collectors = append(collectors, stateColl)
 
-		probeCS, err := k8s.NewProbeClientset(&k8sconfig.Config{}, 5, 10)
+		// Zero QPS/burst means "take the same budget as the main client"
+		// (k8sconfig.DefaultQPS/DefaultBurst) while still getting a SEPARATE
+		// rate limiter — which is the whole point of a second clientset here:
+		// a several-hundred-GVR sweep must not drain the token bucket the
+		// informers share. Throttling the sweep itself buys nothing. An
+		// earlier 5 QPS / 10 burst made a ~400-review sweep take over a
+		// minute and filled the log with client-side throttling warnings.
+		probeCS, err := k8s.NewProbeClientset(&k8sconfig.Config{}, 0, 0)
 		if err != nil {
 			return nil, err
 		}
