@@ -68,6 +68,20 @@ rules:
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["get", "list", "watch"]
+
+  # Capability discovery: enumerate every API resource in the cluster and ask
+  # the API server whether this agent may read each one.
+  #
+  # Both are granted to system:authenticated by default (system:discovery and
+  # system:basic-user), so this block changes nothing on a stock cluster. It
+  # exists for hardened clusters that drop those bindings, where the agent
+  # would otherwise report every resource as unreadable and the UI would
+  # disable the entire catalog.
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["selfsubjectaccessreviews"]
+    verbs: ["create"]
+  - nonResourceURLs: ["/api", "/api/*", "/apis", "/apis/*"]
+    verbs: ["get"]
   {{- end }}
 
   {{- if .Values.collect.metrics.enabled }}
