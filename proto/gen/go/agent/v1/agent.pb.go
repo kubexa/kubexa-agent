@@ -35,6 +35,7 @@ type AgentMessage struct {
 	//	*AgentMessage_Heartbeat
 	//	*AgentMessage_KubeMetrics
 	//	*AgentMessage_PrometheusMetrics
+	//	*AgentMessage_Catalog
 	Payload       isAgentMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -155,6 +156,15 @@ func (x *AgentMessage) GetPrometheusMetrics() *PrometheusMetricsEvent {
 	return nil
 }
 
+func (x *AgentMessage) GetCatalog() *ResourceCatalog {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentMessage_Catalog); ok {
+			return x.Catalog
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Payload interface {
 	isAgentMessage_Payload()
 }
@@ -188,6 +198,10 @@ type AgentMessage_PrometheusMetrics struct {
 	PrometheusMetrics *PrometheusMetricsEvent `protobuf:"bytes,9,opt,name=prometheus_metrics,json=prometheusMetrics,proto3,oneof"`
 }
 
+type AgentMessage_Catalog struct {
+	Catalog *ResourceCatalog `protobuf:"bytes,10,opt,name=catalog,proto3,oneof"`
+}
+
 func (*AgentMessage_Handshake) isAgentMessage_Payload() {}
 
 func (*AgentMessage_Logs) isAgentMessage_Payload() {}
@@ -201,6 +215,8 @@ func (*AgentMessage_Heartbeat) isAgentMessage_Payload() {}
 func (*AgentMessage_KubeMetrics) isAgentMessage_Payload() {}
 
 func (*AgentMessage_PrometheusMetrics) isAgentMessage_Payload() {}
+
+func (*AgentMessage_Catalog) isAgentMessage_Payload() {}
 
 type HandshakeRequest struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
@@ -1188,7 +1204,7 @@ var File_proto_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x1aproto/agent/v1/agent.proto\x12\bagent.v1\x1a\x18proto/agent/v1/log.proto\x1a\x1aproto/agent/v1/state.proto\x1a\x1bproto/agent/v1/metric.proto\x1a\x1eproto/common/v1/metadata.proto\"\xf6\x03\n" +
+	"\x1aproto/agent/v1/agent.proto\x12\bagent.v1\x1a\x1cproto/agent/v1/catalog.proto\x1a\x18proto/agent/v1/log.proto\x1a\x1aproto/agent/v1/state.proto\x1a\x1bproto/agent/v1/metric.proto\x1a\x1eproto/common/v1/metadata.proto\"\xad\x04\n" +
 	"\fAgentMessage\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x12,\n" +
@@ -1199,7 +1215,9 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\ametrics\x18\x06 \x01(\v2\x15.agent.v1.MetricBatchB\x02\x18\x01H\x00R\ametrics\x123\n" +
 	"\theartbeat\x18\a \x01(\v2\x13.agent.v1.HeartbeatH\x00R\theartbeat\x12;\n" +
 	"\fkube_metrics\x18\b \x01(\v2\x16.agent.v1.MetricsEventH\x00R\vkubeMetrics\x12Q\n" +
-	"\x12prometheus_metrics\x18\t \x01(\v2 .agent.v1.PrometheusMetricsEventH\x00R\x11prometheusMetricsB\t\n" +
+	"\x12prometheus_metrics\x18\t \x01(\v2 .agent.v1.PrometheusMetricsEventH\x00R\x11prometheusMetrics\x125\n" +
+	"\acatalog\x18\n" +
+	" \x01(\v2\x19.agent.v1.ResourceCatalogH\x00R\acatalogB\t\n" +
 	"\apayload\"\x89\x02\n" +
 	"\x10HandshakeRequest\x12#\n" +
 	"\ragent_version\x18\x01 \x01(\tR\fagentVersion\x12#\n" +
@@ -1321,7 +1339,8 @@ var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*MetricBatch)(nil),            // 19: agent.v1.MetricBatch
 	(*MetricsEvent)(nil),           // 20: agent.v1.MetricsEvent
 	(*PrometheusMetricsEvent)(nil), // 21: agent.v1.PrometheusMetricsEvent
-	(ResourceKind)(0),              // 22: agent.v1.ResourceKind
+	(*ResourceCatalog)(nil),        // 22: agent.v1.ResourceCatalog
+	(ResourceKind)(0),              // 23: agent.v1.ResourceKind
 }
 var file_proto_agent_v1_agent_proto_depIdxs = []int32{
 	16, // 0: agent.v1.AgentMessage.meta:type_name -> common.v1.AgentMetadata
@@ -1332,27 +1351,28 @@ var file_proto_agent_v1_agent_proto_depIdxs = []int32{
 	3,  // 5: agent.v1.AgentMessage.heartbeat:type_name -> agent.v1.Heartbeat
 	20, // 6: agent.v1.AgentMessage.kube_metrics:type_name -> agent.v1.MetricsEvent
 	21, // 7: agent.v1.AgentMessage.prometheus_metrics:type_name -> agent.v1.PrometheusMetricsEvent
-	2,  // 8: agent.v1.HandshakeRequest.caps:type_name -> agent.v1.AgentCapabilities
-	4,  // 9: agent.v1.Heartbeat.health:type_name -> agent.v1.AgentHealth
-	6,  // 10: agent.v1.GatewayMessage.handshake:type_name -> agent.v1.HandshakeResponse
-	7,  // 11: agent.v1.GatewayMessage.ack:type_name -> agent.v1.Ack
-	10, // 12: agent.v1.GatewayMessage.config:type_name -> agent.v1.ConfigUpdate
-	8,  // 13: agent.v1.GatewayMessage.backpressure:type_name -> agent.v1.BackpressureSignal
-	9,  // 14: agent.v1.GatewayMessage.shutdown:type_name -> agent.v1.Shutdown
-	11, // 15: agent.v1.HandshakeResponse.config:type_name -> agent.v1.ConfigSnapshot
-	11, // 16: agent.v1.ConfigUpdate.config:type_name -> agent.v1.ConfigSnapshot
-	12, // 17: agent.v1.ConfigSnapshot.log_collectors:type_name -> agent.v1.LogCollectorConfig
-	13, // 18: agent.v1.ConfigSnapshot.watchers:type_name -> agent.v1.WatcherConfig
-	14, // 19: agent.v1.ConfigSnapshot.metric_scrapers:type_name -> agent.v1.MetricScrapeConfig
-	22, // 20: agent.v1.WatcherConfig.kinds:type_name -> agent.v1.ResourceKind
-	15, // 21: agent.v1.MetricScrapeConfig.extra_labels:type_name -> agent.v1.MetricScrapeConfig.ExtraLabelsEntry
-	0,  // 22: agent.v1.AgentService.Connect:input_type -> agent.v1.AgentMessage
-	5,  // 23: agent.v1.AgentService.Connect:output_type -> agent.v1.GatewayMessage
-	23, // [23:24] is the sub-list for method output_type
-	22, // [22:23] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	22, // 8: agent.v1.AgentMessage.catalog:type_name -> agent.v1.ResourceCatalog
+	2,  // 9: agent.v1.HandshakeRequest.caps:type_name -> agent.v1.AgentCapabilities
+	4,  // 10: agent.v1.Heartbeat.health:type_name -> agent.v1.AgentHealth
+	6,  // 11: agent.v1.GatewayMessage.handshake:type_name -> agent.v1.HandshakeResponse
+	7,  // 12: agent.v1.GatewayMessage.ack:type_name -> agent.v1.Ack
+	10, // 13: agent.v1.GatewayMessage.config:type_name -> agent.v1.ConfigUpdate
+	8,  // 14: agent.v1.GatewayMessage.backpressure:type_name -> agent.v1.BackpressureSignal
+	9,  // 15: agent.v1.GatewayMessage.shutdown:type_name -> agent.v1.Shutdown
+	11, // 16: agent.v1.HandshakeResponse.config:type_name -> agent.v1.ConfigSnapshot
+	11, // 17: agent.v1.ConfigUpdate.config:type_name -> agent.v1.ConfigSnapshot
+	12, // 18: agent.v1.ConfigSnapshot.log_collectors:type_name -> agent.v1.LogCollectorConfig
+	13, // 19: agent.v1.ConfigSnapshot.watchers:type_name -> agent.v1.WatcherConfig
+	14, // 20: agent.v1.ConfigSnapshot.metric_scrapers:type_name -> agent.v1.MetricScrapeConfig
+	23, // 21: agent.v1.WatcherConfig.kinds:type_name -> agent.v1.ResourceKind
+	15, // 22: agent.v1.MetricScrapeConfig.extra_labels:type_name -> agent.v1.MetricScrapeConfig.ExtraLabelsEntry
+	0,  // 23: agent.v1.AgentService.Connect:input_type -> agent.v1.AgentMessage
+	5,  // 24: agent.v1.AgentService.Connect:output_type -> agent.v1.GatewayMessage
+	24, // [24:25] is the sub-list for method output_type
+	23, // [23:24] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_agent_proto_init() }
@@ -1360,6 +1380,7 @@ func file_proto_agent_v1_agent_proto_init() {
 	if File_proto_agent_v1_agent_proto != nil {
 		return
 	}
+	file_proto_agent_v1_catalog_proto_init()
 	file_proto_agent_v1_log_proto_init()
 	file_proto_agent_v1_state_proto_init()
 	file_proto_agent_v1_metric_proto_init()
@@ -1371,6 +1392,7 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*AgentMessage_Heartbeat)(nil),
 		(*AgentMessage_KubeMetrics)(nil),
 		(*AgentMessage_PrometheusMetrics)(nil),
+		(*AgentMessage_Catalog)(nil),
 	}
 	file_proto_agent_v1_agent_proto_msgTypes[5].OneofWrappers = []any{
 		(*GatewayMessage_Handshake)(nil),
