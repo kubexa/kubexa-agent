@@ -118,6 +118,9 @@ func (r *Reporter) Name() string { return componentName }
 
 // Start runs an immediate refresh, then one every discovery interval.
 func (r *Reporter) Start(ctx context.Context) error {
+	if r.cancel != nil {
+		return errors.New("capability reporter already started")
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	r.cancel = cancel
 
@@ -143,13 +146,31 @@ func (r *Reporter) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop cancels the refresh loop and waits for it to finish.
-func (r *Reporter) Stop(_ context.Context) error {
-	if r.cancel != nil {
-		r.cancel()
+// Stop cancels the refresh loop and waits for it to finish, but not past ctx.
+// Discover calls discovery.ServerPreferredResources, which takes no context
+// and can stall on an unhealthy aggregated APIService; cancelling the refresh
+// loop's context does nothing to abort a call already in flight. Bounding the
+// wait on ctx keeps a stuck discovery call from holding up the rest of the
+// agent's shutdown sequence past its SLA.
+func (r *Reporter) Stop(ctx context.Context) error {
+	if r.cancel == nil {
+		return nil
 	}
-	r.wg.Wait()
-	return nil
+	r.cancel()
+
+	done := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		r.cancel = nil
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (r *Reporter) refresh(ctx context.Context) {

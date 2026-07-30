@@ -295,9 +295,7 @@ func buildCollectors(
 			return nil, err
 		}
 		collectors = append(collectors, stateColl)
-	}
 
-	if cfg.Collect.State.Enabled {
 		probeCS, err := k8s.NewProbeClientset(&k8sconfig.Config{}, 5, 10)
 		if err != nil {
 			return nil, err

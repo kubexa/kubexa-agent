@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/client-go/kubernetes/fake"
+
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
 
@@ -130,4 +132,65 @@ func TestFailedPublishLeavesSweepStateUnset(t *testing.T) {
 	if !r.state.needsSweep("sha256:a", time.Now(), time.Hour) {
 		t.Fatal("needsSweep = false after a failed publish; the catalog would be stuck until the safety sweep")
 	}
+}
+
+// Both sibling collectors (state, metrics) reject a second Start rather than
+// silently overwriting their cancel func -- an overwrite orphans the first
+// goroutine's cancel reference, and Stop's wg.Wait can then block on a
+// goroutine nothing can ever cancel. Reporter must match.
+func TestStartTwiceReturnsError(t *testing.T) {
+	r, err := NewReporter(Options{
+		Clientset: fake.NewSimpleClientset(),
+		Writer:    &captureWriter{},
+	})
+	if err != nil {
+		t.Fatalf("NewReporter: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("first Start: unexpected error: %v", err)
+	}
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+		defer stopCancel()
+		_ = r.Stop(stopCtx)
+	}()
+
+	if err := r.Start(ctx); err == nil {
+		t.Fatal("second Start: expected error, got nil")
+	}
+}
+
+// Discover calls discovery.ServerPreferredResources, which takes no context
+// and can stall on an unhealthy aggregated APIService. Cancelling the refresh
+// loop's context does not abort a call already in flight, so Stop must bound
+// its wait on the context it is handed rather than blocking on wg.Wait
+// indefinitely -- otherwise a stuck discovery call holds up the agent's whole
+// shutdown sequence past its SLA.
+func TestStopReturnsContextErrorInsteadOfBlocking(t *testing.T) {
+	r := &Reporter{}
+	_, cancel := context.WithCancel(context.Background())
+	r.cancel = cancel
+
+	// Stand in for a refresh goroutine stuck in an uncancellable API call.
+	block := make(chan struct{})
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		<-block
+	}()
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stopCancel()
+
+	err := r.Stop(stopCtx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Stop err = %v, want context.DeadlineExceeded", err)
+	}
+
+	close(block)
+	r.wg.Wait()
 }
