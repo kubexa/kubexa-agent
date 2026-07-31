@@ -128,6 +128,14 @@ current state of a specific object or list, answered synchronously, as opposed t
 entirely; set individual fields (e.g. only `redactSecrets`) to override just those and inherit
 the rest — see the commented block in `values.yaml` for the per-field inheritance rules.
 
+The chart ships with `query.enabled: true`, `query.rules: []` (which inherits
+`collect.state.rules`'s cluster-wide `cluster-core` rule, covering `secrets` with no `verbs`
+restriction), and `redactSecrets: false` — so a plain `helm upgrade` permits live reads of
+Secret values through this path. This is not a new exposure: the same `cluster-core` rule
+already streams those Secret values to the platform continuously via `collect.state` (see
+[Secret handling](#secret-handling)); live query just adds a second, on-demand path to data the
+platform already receives.
+
 This policy is a **second gate stacked on top of Kubernetes RBAC**, not a replacement for it.
 Both must allow a read before the agent returns data: RBAC answers "may this ServiceAccount read
 this object", and `query` answers "did the cluster owner agree the Kubexa platform may read it".
@@ -137,9 +145,15 @@ the two is actually blocking a given resource.
 `enabled: false` refuses every live query with `POLICY_DENIED` — an explicit, diagnosable
 refusal, not silence. A gateway or UI waiting on a query gets an answer either way.
 
-Scoping a rule's `verbs` to `[list]` on `secrets` is a way to expose Secret **names** — useful for
-letting an operator find the right Secret — without ever exposing their contents; `get` is what
-opens an individual object's data, so leaving it out keeps values unreadable through this path.
+`verbs` controls which *operations* a rule permits, not how much of an object comes back.
+Restricting a rule to `[list]` on `secrets` prevents fetching an individual Secret by name via
+`get`; it does **not** redact anything — a full-view `list` still returns every matched Secret's
+`data`/`stringData`, exactly as `kubectl get secrets -o json` does against the Kubernetes API
+itself. The knob that actually keeps Secret **values** inside the cluster is `redactSecrets:
+true` (`query.redactSecrets`, which when unset inherits `collect.state.redactSecrets` — see
+[Secret handling](#secret-handling)). To expose Secret **names** without values, either use the
+TABLE view (`QUERY_VIEW_TABLE`), which returns printed columns and `PartialObjectMetadata` and
+never includes `data`/`stringData`, or set `redactSecrets: true`.
 
 The per-GVR verdict published in the capability catalog is deliberately coarser than the real
 enforcement: a policy scoped to a namespace or a name prefix cannot be reduced to a single
