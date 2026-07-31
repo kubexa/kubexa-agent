@@ -39,6 +39,11 @@ type Decision struct {
 	// ANDed with whatever the request carried.
 	LabelSelector string
 	FieldSelector string
+	// NamePatterns are the authorizing rule's name patterns. The executor
+	// filters LIST rows against these via MatchesName, so row filtering uses
+	// the same rule that permitted the query -- see MatchesName's comment for
+	// why re-consulting the policy per row would be a data-exposure bug.
+	NamePatterns []string
 	// Reason explains a denial in terms the operator can act on. Empty when
 	// allowed.
 	Reason string
@@ -54,7 +59,6 @@ type Policy struct {
 }
 
 type compiledRule struct {
-	id            string
 	namespace     string
 	namespaceSet  bool
 	resources     []Ref
@@ -116,7 +120,6 @@ func Compile(root *pkgconfig.Config) (*Policy, error) {
 		}
 
 		compiled = append(compiled, compiledRule{
-			id:            label,
 			namespace:     r.Namespace,
 			namespaceSet:  r.Namespace != "",
 			resources:     refs,
@@ -175,6 +178,7 @@ func (p *Policy) Decide(ref Ref, verb Verb, namespace, name string) Decision {
 			RedactSecrets: p.redactSecrets,
 			LabelSelector: r.labelSelector,
 			FieldSelector: r.fieldSelector,
+			NamePatterns:  r.names,
 		}
 	}
 	return Decision{Reason: fmt.Sprintf(
@@ -270,21 +274,17 @@ func refString(ref Ref) string {
 	return ref.Group + "/" + ref.Version + "/" + ref.Resource
 }
 
-// MatchesName reports whether an object name satisfies a rule's name
-// patterns. The executor calls it to filter LIST rows, which Decide cannot do
-// because a LIST carries no name.
-func (p *Policy) MatchesName(ref Ref, namespace, name string) bool {
-	if p == nil || !p.enabled {
-		return false
-	}
-	for _, r := range p.rules {
-		if !r.matchesResource(ref) || !r.matchesNamespace(namespace) {
-			continue
-		}
-		if !r.allowList {
-			continue
-		}
-		return matchesPattern(name, r.names)
-	}
-	return false
+// MatchesName reports whether an object name satisfies the name patterns a
+// Decision carried out. The executor calls it once per LIST row, because a
+// LIST carries no name at decision time.
+//
+// It is a package function over patterns rather than a Policy method taking a
+// namespace, and that is the whole point. A method would walk the rule list a
+// second time, and when the namespace it received differed from the one Decide
+// was evaluated against it could select a MORE PERMISSIVE rule than the one
+// that authorized the query -- admitting a row a direct get is denied. Passing
+// the authorizing rule's patterns through the Decision makes one rule
+// selection per query, so there is no second selection to diverge.
+func MatchesName(name string, patterns []string) bool {
+	return matchesPattern(name, patterns)
 }

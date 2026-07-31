@@ -263,52 +263,125 @@ query:
 	}
 }
 
-// MatchesName is what the executor uses to filter LIST rows, because Decide
-// cannot: a LIST carries no name. These two must agree, or a row the policy
-// forbids leaves the cluster.
-func TestMatchesNameFiltersListRows(t *testing.T) {
+func TestDecideCarriesTheAuthorizingRuleNamePatterns(t *testing.T) {
 	p := compile(t, `
 query:
   rules:
     - namespace: stage
       resources: [pods]
-      names: ["be-*"]
+      names: ["be-*", "worker-*"]
 `)
-	if !p.MatchesName(podsRef, "stage", "be-1") {
-		t.Error("be-1 must match")
+	d := p.Decide(podsRef, VerbList, "stage", "")
+	if !d.Allowed {
+		t.Fatal("the list must be allowed")
 	}
-	if p.MatchesName(podsRef, "stage", "fe-1") {
-		t.Error("fe-1 must not match")
-	}
-	if p.MatchesName(podsRef, "prod", "be-1") {
-		t.Error("a row outside the rule's namespace must not match")
-	}
-	if p.MatchesName(secretsRef, "stage", "be-1") {
-		t.Error("a row of an ungranted resource must not match")
+	if strings.Join(d.NamePatterns, ",") != "be-*,worker-*" {
+		t.Errorf("NamePatterns = %v, want [be-* worker-*]", d.NamePatterns)
 	}
 }
 
-func TestMatchesNameAllowsEverythingWithNoPatterns(t *testing.T) {
+func TestDecideCarriesNoPatternsWhenTheRuleHasNone(t *testing.T) {
 	p := compile(t, `
 query:
   rules:
     - namespace: stage
       resources: [pods]
 `)
-	if !p.MatchesName(podsRef, "stage", "anything-at-all") {
-		t.Error("a rule with no name patterns must match every name")
+	if got := p.Decide(podsRef, VerbList, "stage", "").NamePatterns; len(got) != 0 {
+		t.Errorf("NamePatterns = %v, want empty (rule restricts no names)", got)
 	}
 }
 
-func TestMatchesNameIsFalseWhenQueryIsDisabled(t *testing.T) {
+// MatchesName is a pure function over the patterns Decide handed back. It has
+// no access to the rule list, which is what makes it impossible for row
+// filtering to land on a different rule than the one that authorized the query.
+func TestMatchesNameIsPureOverPatterns(t *testing.T) {
+	tests := []struct {
+		name     string
+		patterns []string
+		object   string
+		want     bool
+	}{
+		{"prefix hit", []string{"be-*"}, "be-1", true},
+		{"prefix miss", []string{"be-*"}, "fe-1", false},
+		{"exact hit", []string{"be-1"}, "be-1", true},
+		{"exact miss", []string{"be-1"}, "be-2", false},
+		{"second pattern hits", []string{"be-*", "worker-*"}, "worker-9", true},
+		{"no patterns matches everything", nil, "anything-at-all", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := MatchesName(tc.object, tc.patterns); got != tc.want {
+				t.Errorf("MatchesName(%q, %v) = %v, want %v", tc.object, tc.patterns, got, tc.want)
+			}
+		})
+	}
+}
+
+// A regression test for the divergence a second rule-walking filter would
+// reintroduce. An all-namespaces LIST can only be authorized by the
+// namespaceless rule, so every returned row must be filtered by THAT rule's
+// "safe-*" restriction -- including rows from the prod namespace, which the
+// first rule would have admitted unrestricted had filtering re-selected a rule
+// per row.
+func TestAllNamespacesListFiltersByTheAuthorizingRuleOnly(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - namespace: prod
+      resources: [secrets]
+      verbs: [list]
+    - resources: [secrets]
+      names: ["safe-*"]
+      verbs: [list]
+`)
+	d := p.Decide(secretsRef, VerbList, "", "")
+	if !d.Allowed {
+		t.Fatal("the namespaceless rule must authorize an all-namespaces list")
+	}
+	if MatchesName("db-password", d.NamePatterns) {
+		t.Error("prod/db-password must be filtered out: the authorizing rule restricts names to safe-*, " +
+			"and a direct Decide(get) for the same object is denied")
+	}
+	if !MatchesName("safe-token", d.NamePatterns) {
+		t.Error("safe-token matches the authorizing rule's pattern and must survive filtering")
+	}
+	if p.Decide(secretsRef, VerbGet, "prod", "db-password").Allowed {
+		t.Error("a direct get of prod/db-password must be denied, which is why the list must not leak it")
+	}
+}
+
+func TestDecideIsDeniedWhenQueryIsDisabled(t *testing.T) {
 	p := compile(t, `
 query:
   enabled: false
   rules:
     - resources: [pods]
 `)
-	if p.MatchesName(podsRef, "stage", "be-1") {
-		t.Error("a disabled policy must filter out every row")
+	d := p.Decide(podsRef, VerbList, "stage", "")
+	if d.Allowed {
+		t.Error("a disabled policy must deny, leaving nothing to filter")
+	}
+	if len(d.NamePatterns) != 0 {
+		t.Error("a denied decision must carry no name patterns")
+	}
+}
+
+func TestDecideAcceptsUppercaseVerbsFromConfig(t *testing.T) {
+	// Verbs are validated upstream but stored unnormalized, so a config may
+	// legitimately contain "LIST".
+	p := compile(t, `
+query:
+  rules:
+    - namespace: stage
+      resources: [pods]
+      verbs: [LIST]
+`)
+	if !p.Decide(podsRef, VerbList, "stage", "").Allowed {
+		t.Error("an uppercase verb in config must still grant list")
+	}
+	if p.Decide(podsRef, VerbGet, "stage", "x").Allowed {
+		t.Error("verbs: [LIST] must not grant get")
 	}
 }
 
