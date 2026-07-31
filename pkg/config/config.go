@@ -37,6 +37,7 @@ type Config struct {
 	Agent         AgentConfig         `yaml:"agent"`
 	Gateway       GatewayConfig       `yaml:"gateway"`
 	Collect       CollectConfig       `yaml:"collect"`
+	Query         QueryConfig         `yaml:"query"`
 	Buffer        BufferConfig        `yaml:"buffer"`
 	Observability ObservabilityConfig `yaml:"observability"`
 	Log           LogConfig           `yaml:"log"`
@@ -366,6 +367,10 @@ func (c *Config) Validate() error {
 	violations = append(violations, c.Collect.Logs.validate()...)
 	violations = append(violations, c.Collect.State.validate()...)
 	violations = append(violations, c.Collect.Metrics.validate()...)
+
+	if err := c.ValidateQuery(); err != nil {
+		return err
+	}
 
 	if len(violations) == 0 {
 		return nil
