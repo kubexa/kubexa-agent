@@ -1602,13 +1602,21 @@ func (x *ResourceQuery) GetTimeoutMs() int32 {
 // ResourceQueryResult is always sent, success or failure. A gateway that has
 // forgotten the query_id drops the reply; the agent never withholds one.
 type ResourceQueryResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	QueryId       string                 `protobuf:"bytes,1,opt,name=query_id,json=queryId,proto3" json:"query_id,omitempty"`
-	Error         *QueryError            `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`     // when set, payload is empty
-	Payload       []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"` // JSON: a meta.k8s.io/v1 Table, or an object array
-	ContinueToken string                 `protobuf:"bytes,4,opt,name=continue_token,json=continueToken,proto3" json:"continue_token,omitempty"`
-	Remaining     int32                  `protobuf:"varint,5,opt,name=remaining,proto3" json:"remaining,omitempty"`
-	Truncated     bool                   `protobuf:"varint,6,opt,name=truncated,proto3" json:"truncated,omitempty"` // response size cap was reached
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	QueryId string                 `protobuf:"bytes,1,opt,name=query_id,json=queryId,proto3" json:"query_id,omitempty"`
+	Error   *QueryError            `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`     // when set, payload is empty
+	Payload []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"` // JSON: a meta.k8s.io/v1 Table, or an object array
+	// continue_token and remaining are populated for QUERY_VIEW_FULL only.
+	//
+	// On QUERY_VIEW_TABLE they are always empty/zero even mid-pagination: the
+	// API server carries that state inside the Table body itself, and lifting
+	// it out would mean decoding and re-encoding every response. A TABLE
+	// consumer must read metadata.continue and metadata.remainingItemCount
+	// from the payload JSON. Reading an empty continue_token here as "no more
+	// pages" truncates every TABLE listing at its first page.
+	ContinueToken string `protobuf:"bytes,4,opt,name=continue_token,json=continueToken,proto3" json:"continue_token,omitempty"`
+	Remaining     int32  `protobuf:"varint,5,opt,name=remaining,proto3" json:"remaining,omitempty"`
+	Truncated     bool   `protobuf:"varint,6,opt,name=truncated,proto3" json:"truncated,omitempty"` // response size cap was reached
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
