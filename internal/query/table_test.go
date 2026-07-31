@@ -326,3 +326,30 @@ query:
 		t.Errorf("the row itself must survive sanitization, got %s", body)
 	}
 }
+
+// TestTableViewPreservesLargeNumbersInCells pins the round trip through
+// filterTable against a CRD printer column holding an integer too large for a
+// float64 mantissa -- a nanosecond timestamp is ~1.7e18, well past 2^53.
+// TableRow.Cells is []any, so decoding without UseNumber would land the value
+// in a float64 and re-encode it altered, silently corrupting a printed cell
+// that the verbatim path used to pass through untouched.
+func TestTableViewPreservesLargeNumbersInCells(t *testing.T) {
+	const nanos = "1753900000123456789"
+	body := `{"kind":"Table","apiVersion":"meta.k8s.io/v1",
+		"columnDefinitions":[{"name":"Name","type":"string"},{"name":"Nanos","type":"integer"}],
+		"rows":[{"cells":["be-1",` + nanos + `],
+			"object":{"kind":"PartialObjectMetadata","apiVersion":"meta.k8s.io/v1",
+				"metadata":{"name":"be-1","namespace":"stage"}}}]}`
+
+	var got http.Request
+	_, clients := tableServerBody(t, &got, body)
+	e := tableExecutor(t, clients)
+
+	res := e.Execute(context.Background(), tableQuery())
+	if res.GetError() != nil {
+		t.Fatalf("error = %+v, want nil", res.GetError())
+	}
+	if !strings.Contains(string(res.GetPayload()), nanos) {
+		t.Errorf("cell value %s did not survive the round trip, got %s", nanos, res.GetPayload())
+	}
+}
