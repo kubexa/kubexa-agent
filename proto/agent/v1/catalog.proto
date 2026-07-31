@@ -30,4 +30,15 @@ message ResourceCapability {
   // wrong "denied" hides a resource and sends the operator hunting through
   // their own RBAC, while an honest "unknown" lets the UI say so.
   bool probe_failed = 8;
+
+  // The agent's own configuration policy, independent of can_list/can_watch
+  // which report the API server's RBAC answer. RBAC may permit what the
+  // cluster owner's config refuses, and the UI needs to tell the two apart.
+  //
+  // These are per-GVR, so they answer "could any query for this type
+  // succeed" -- a policy scoped to a namespace or a name prefix cannot be
+  // reduced to one boolean. The agent still checks every request, so a query
+  // outside the policy's namespace is refused even when policy_list is true.
+  bool policy_list = 9;
+  bool policy_get  = 10;
 }
