@@ -135,12 +135,39 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	}
 	log.Info("queue initialized", logger.F("spill_dir", cfg.Buffer.SpillDir))
 
+	log.Info("collection settings",
+		logger.F("logs_enabled", cfg.Collect.Logs.Enabled),
+		logger.F("state_enabled", cfg.Collect.State.Enabled),
+		logger.F("metrics_enabled", cfg.Collect.Metrics.Enabled),
+	)
+
+	collectors, err := buildCollectors(cfg, kube, q, mainReg, log)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("collectors: %w", err)
+	}
+
+	// The state collector, if enabled, also satisfies stream.WatchReconciler
+	// (its Reconcile method converges demand-driven informers on the
+	// gateway's watch config). Found by type assertion rather than a second
+	// return value from buildCollectors so that "which collector applies
+	// gateway config" stays a property of the collector's own type, not
+	// something the caller has to track separately.
+	var reconciler stream.WatchReconciler
+	for _, coll := range collectors {
+		if r, ok := coll.(stream.WatchReconciler); ok {
+			reconciler = r
+			break
+		}
+	}
+
 	streamMgr, err := stream.New(
 		cfg,
 		q,
 		logger.New("stream", logger.WithAgentID(cfg.Agent.AgentID)),
 		agentMetrics.Stream(),
 		agentMetrics.Connection(),
+		reconciler,
 	)
 	if err != nil {
 		_ = q.Close()
@@ -159,25 +186,13 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	healthSrv.Register(health.NewK8sChecker(kube))
 	healthSrv.Register(health.NewQueueChecker(q, 0))
 	healthSrv.Register(health.NewStreamChecker(streamMgr))
-
-	metricsSrv := metrics.NewServer(metricsAddr, mainReg, logger.New("metrics"))
-
-	log.Info("collection settings",
-		logger.F("logs_enabled", cfg.Collect.Logs.Enabled),
-		logger.F("state_enabled", cfg.Collect.State.Enabled),
-		logger.F("metrics_enabled", cfg.Collect.Metrics.Enabled),
-	)
-
-	collectors, err := buildCollectors(cfg, kube, q, mainReg, log)
-	if err != nil {
-		_ = q.Close()
-		return fmt.Errorf("collectors: %w", err)
-	}
 	for _, coll := range collectors {
 		if ready, ok := coll.(health.StateWatcherReady); ok {
 			healthSrv.Register(health.NewStateWatcherChecker(ready))
 		}
 	}
+
+	metricsSrv := metrics.NewServer(metricsAddr, mainReg, logger.New("metrics"))
 
 	g, ctx := errgroup.WithContext(parentCtx)
 

@@ -99,7 +99,7 @@ func newTestManager(t *testing.T, cfg *config.Config, q queue.Queue, lis *bufcon
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	_, streamMetrics, connMetrics := newTestAgentMetrics(t, reg)
-	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics)
+	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
