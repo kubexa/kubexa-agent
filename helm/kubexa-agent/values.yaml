@@ -182,7 +182,12 @@ collect:
 #   resources:     built-in kinds by plural name (pods, services, ...); CRDs
 #                  must be given as the full group/version/resource, e.g.
 #                  monitoring.coreos.com/v1/prometheusrules.
-#   verbs:         omit for both list and get.
+#   verbs:         omit for both list and get. This restricts which
+#                  OPERATIONS are permitted, not how much of an object comes
+#                  back — e.g. verbs: [list] on secrets still returns full
+#                  Secret data/stringData on a full-view list, it only blocks
+#                  fetching a single Secret by name via get. redactSecrets is
+#                  the only setting that strips Secret data/stringData.
 query:
   enabled: true
   # redactSecrets: false   # unset inherits collect.state.redactSecrets
