@@ -17,7 +17,7 @@ import (
 type QueryConfig struct {
 	// Enabled false refuses every query. Unset means true.
 	Enabled *bool `yaml:"enabled,omitempty"`
-	// RedactSecrets strips Secret data/stringdata from live responses. Unset
+	// RedactSecrets strips Secret data/stringData from live responses. Unset
 	// inherits collect.state.redact_secrets.
 	//
 	// It is separate from that flag because the two answer different
@@ -99,42 +99,57 @@ func (c *Config) QueryRules() []QueryRule {
 	return out
 }
 
-// ValidateQuery checks the query section for input that would otherwise fail
-// silently at request time.
-func (c *Config) ValidateQuery() error {
+// validateQuery returns one violation string per problem, matching the
+// aggregation the other collect sections use so Validate can report every
+// config error in one pass.
+func (c *Config) validateQuery() []string {
 	if c == nil {
 		return nil
 	}
+	var violations []string
 	for i, rule := range c.Query.Rules {
 		label := rule.ID
 		if label == "" {
 			label = fmt.Sprintf("#%d", i)
 		}
 		if len(rule.Resources) == 0 {
-			return fmt.Errorf("query rule %s: at least one resource is required", label)
+			violations = append(violations, fmt.Sprintf("query rule %s: at least one resource is required", label))
+			continue
 		}
 		for _, name := range rule.Resources {
 			if _, err := k8sresource.Parse(name); err != nil {
-				return fmt.Errorf("query rule %s: %w", label, err)
+				violations = append(violations, fmt.Sprintf("query rule %s: %v", label, err))
 			}
 		}
 		if err := validatePattern(rule.Namespace); err != nil {
-			return fmt.Errorf("query rule %s: namespace %q: %w", label, rule.Namespace, err)
+			violations = append(violations, fmt.Sprintf("query rule %s: namespace %q: %v", label, rule.Namespace, err))
 		}
 		for _, n := range rule.Names {
 			if err := validatePattern(n); err != nil {
-				return fmt.Errorf("query rule %s: name %q: %w", label, n, err)
+				violations = append(violations, fmt.Sprintf("query rule %s: name %q: %v", label, n, err))
 			}
 		}
 		for _, v := range rule.Verbs {
 			switch strings.ToLower(strings.TrimSpace(v)) {
 			case "list", "get":
 			default:
-				return fmt.Errorf("query rule %s: unsupported verb %q (want list or get)", label, v)
+				violations = append(violations, fmt.Sprintf("query rule %s: unsupported verb %q (want list or get)", label, v))
 			}
 		}
 	}
-	return nil
+	return violations
+}
+
+// ValidateQuery reports the query section's problems as a single error.
+// Callers that only need a yes/no answer use this; Config.Validate uses
+// validateQuery directly so query violations join the same aggregated
+// *ValidationError as every other section's.
+func (c *Config) ValidateQuery() error {
+	violations := c.validateQuery()
+	if len(violations) == 0 {
+		return nil
+	}
+	return &ValidationError{Violations: violations}
 }
 
 // validatePattern enforces trailing-"*" prefix matching, the same shape
