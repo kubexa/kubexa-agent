@@ -20,6 +20,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/flowcontrol"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
 
@@ -475,6 +476,33 @@ func NewQueryClients(cfg *k8sconfig.Config, qps float32, burst int) (*QueryClien
 // newQueryClientsFromRest is the seam tests use to supply a REST config
 // without a cluster.
 func newQueryClientsFromRest(restCfg *rest.Config) (*QueryClients, error) {
+	// One rate limiter, shared by the dynamic client and every per-GroupVersion
+	// REST client built below. Setting it explicitly is the whole budget.
+	//
+	// rest.RESTClientFor builds its OWN token bucket whenever
+	// config.RateLimiter is nil (client-go rest/config.go:370-383), so leaving
+	// it unset gives every GroupVersion an independent full-strength budget:
+	// a query sweep touching N resource kinds would get N buckets and multiply
+	// the ceiling by N, defeating the only reason this constructor exists.
+	// kubernetes.NewForConfig avoids this by setting the limiter once
+	// (clientset.go:498-502), which is what makes NewProbeClientset's separate
+	// budget real rather than nominal.
+	//
+	// Copy first: the limiter must not be attached to the caller's config.
+	restCfg = rest.CopyConfig(restCfg)
+	if restCfg.RateLimiter == nil {
+		qps, burst := restCfg.QPS, restCfg.Burst
+		if qps == 0 {
+			qps = rest.DefaultQPS
+		}
+		if burst == 0 {
+			burst = rest.DefaultBurst
+		}
+		if qps > 0 {
+			restCfg.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(qps, burst)
+		}
+	}
+
 	dyn, err := dynamic.NewForConfig(restCfg)
 	if err != nil {
 		return nil, fmt.Errorf("k8s query client: create dynamic client: %w", err)
