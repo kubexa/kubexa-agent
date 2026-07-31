@@ -709,6 +709,14 @@ func (m *streamManager) handleGatewayMessage(ctx context.Context, msg *agentv1.G
 // backpressure and shutdown -- for as long as the query takes, which the
 // executor allows to be 30 seconds. The executor's own concurrency gate is
 // what bounds how many of these goroutines can be doing real work at once.
+//
+// This goroutine carries the session ctx but is deliberately not registered
+// with sessionWG, so endSession's sessionWG.Wait() does not wait for it to
+// finish. A query reply is session-scoped: once the session ends the
+// gateway's stream is gone, so a result that arrives after reconnect has
+// nowhere useful to go. Draining it on shutdown would only delay teardown
+// for no benefit; ctx cancellation (and Send's own failure once the stream
+// is torn down) is what stops it from doing pointless work.
 func (m *streamManager) handleResourceQuery(ctx context.Context, q *agentv1.ResourceQuery) {
 	if m.responder == nil || q == nil {
 		return
