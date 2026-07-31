@@ -367,10 +367,7 @@ func (c *Config) Validate() error {
 	violations = append(violations, c.Collect.Logs.validate()...)
 	violations = append(violations, c.Collect.State.validate()...)
 	violations = append(violations, c.Collect.Metrics.validate()...)
-
-	if err := c.ValidateQuery(); err != nil {
-		return err
-	}
+	violations = append(violations, c.validateQuery()...)
 
 	if len(violations) == 0 {
 		return nil
