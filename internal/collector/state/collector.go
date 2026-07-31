@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/protobuf/proto"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
@@ -89,6 +89,20 @@ type Collector struct {
 	runCtx context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// watchMu guards watches: Reconcile is driven by the gateway stream
+	// while Stop may run concurrently.
+	watchMu sync.Mutex
+	// watches holds the demand-driven informer set, keyed by gvrKey. This is
+	// disjoint from the static-rule factories above: each entry here owns
+	// its own factory and cancel func so it can be stopped independently.
+	watches map[string]*demandWatch
+
+	// newDemandInformer overrides how a demand-driven GVR's factory and
+	// informer are built. Nil in production, where defaultNewDemandInformer
+	// is used; tests substitute this to inject a start failure for one GVR
+	// deterministically.
+	newDemandInformer func(desc k8sresource.Descriptor) (dynamicinformer.DynamicSharedInformerFactory, cache.SharedIndexInformer, error)
 }
 
 // Options configures a Collector instance.
@@ -220,6 +234,14 @@ func (c *Collector) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Reconcile converges the demand-driven informer set on desired. Static rules
+// from configuration are unaffected — they are started once at Start and are
+// not part of this set, so an operator's baseline never depends on anyone
+// having a tab open.
+func (c *Collector) Reconcile(ctx context.Context, desired []k8sresource.Descriptor) error {
+	return c.reconcile(ctx, desired)
 }
 
 func (c *Collector) startInformers(ctx context.Context) error {
@@ -372,15 +394,15 @@ func (c *Collector) processItem(ctx context.Context, item workItem) error {
 	labels := ObjectLabels(item.object)
 
 	event := &agentv1.StateEvent{
-		Type:        eventType,
-		Kind:        item.desc.ProtoKind,
-		Name:        name,
-		Namespace:   namespace,
-		Object:      objectJSON,
-		Timestamp:   time.Now().UTC().UnixMilli(),
-		Labels:      labels,
-		ApiVersion:  item.desc.APIVersion(),
-		Resource:    item.desc.GVR.Resource,
+		Type:       eventType,
+		Kind:       item.desc.ProtoKind,
+		Name:       name,
+		Namespace:  namespace,
+		Object:     objectJSON,
+		Timestamp:  time.Now().UTC().UnixMilli(),
+		Labels:     labels,
+		ApiVersion: item.desc.APIVersion(),
+		Resource:   item.desc.GVR.Resource,
 	}
 
 	msg := &agentv1.AgentMessage{
