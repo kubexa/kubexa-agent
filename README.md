@@ -70,6 +70,8 @@ Chart values map directly to `pkg/config.Config`. Key sections:
 | `collect.state.*` | `collect.state.*` | Resource watch rules |
 | `collect.state.redactSecrets` | `collect.state.redact_secrets` | Whether Secret `data`/`stringData` are stripped before leaving the cluster; default `false` |
 | `collect.metrics.*` | `collect.metrics.*` | K8s metrics + custom endpoints |
+| `query.*` | `query.*` | Live, on-demand resource reads; omit to inherit `collect.state` |
+| `query.redactSecrets` | `query.redact_secrets` | Strips Secret `data`/`stringData` from live query responses; unset inherits `collect.state.redactSecrets` |
 | `buffer.*` | `buffer.*` | Memory/disk queue |
 | `observability.*` | `observability.*` | Health and metrics ports |
 | `log.*` | `log.*` | Agent logger level/format |
@@ -117,6 +119,32 @@ Regardless of this setting, `managedFields` and the
 `kubectl.kubernetes.io/last-applied-configuration` annotation are always stripped from every
 object, Secret or not — for a Secret applied with `kubectl apply`, that annotation is a second,
 independent copy of the full manifest including every base64-encoded value.
+
+### Live resource query
+
+`query.*` configures live, on-demand resource reads: a request from the Kubexa platform for the
+current state of a specific object or list, answered synchronously, as opposed to
+`collect.state`'s continuous watch-and-push feed. Omit the section to inherit `collect.state`
+entirely; set individual fields (e.g. only `redactSecrets`) to override just those and inherit
+the rest — see the commented block in `values.yaml` for the per-field inheritance rules.
+
+This policy is a **second gate stacked on top of Kubernetes RBAC**, not a replacement for it.
+Both must allow a read before the agent returns data: RBAC answers "may this ServiceAccount read
+this object", and `query` answers "did the cluster owner agree the Kubexa platform may read it".
+The two are reported separately in the capability catalog so the UI can tell a viewer which of
+the two is actually blocking a given resource.
+
+`enabled: false` refuses every live query with `POLICY_DENIED` — an explicit, diagnosable
+refusal, not silence. A gateway or UI waiting on a query gets an answer either way.
+
+Scoping a rule's `verbs` to `[list]` on `secrets` is a way to expose Secret **names** — useful for
+letting an operator find the right Secret — without ever exposing their contents; `get` is what
+opens an individual object's data, so leaving it out keeps values unreadable through this path.
+
+The per-GVR verdict published in the capability catalog is deliberately coarser than the real
+enforcement: a policy scoped to a namespace or a name prefix cannot be reduced to a single
+boolean for the whole GVR, so that verdict is only a hint for the UI. The full rule evaluation
+still runs against every individual request, regardless of what the catalog reported.
 
 ## Memory and resource sizing
 
