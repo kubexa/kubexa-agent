@@ -137,7 +137,15 @@ func (e *Executor) filterTable(
 	decision policy.Decision,
 ) ([]byte, *agentv1.QueryError) {
 	var table metav1.Table
-	if err := json.Unmarshal(raw, &table); err != nil {
+	// UseNumber, not a plain Unmarshal: TableRow.Cells is []any, so a bare
+	// decode turns every printed number into a float64 and re-encodes it from
+	// there. That is lossy above 2^53 and reformats large values -- a CRD
+	// additionalPrinterColumns cell holding a nanosecond timestamp (~1.7e18)
+	// would come back altered. json.Number keeps the server's own digits, so
+	// the decode-filter-re-encode round trip leaves cells byte-identical.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&table); err != nil {
 		return nil, queryError(agentv1.QueryErrorCode_QUERY_ERROR_INTERNAL,
 			"the API server's table response could not be decoded: "+err.Error())
 	}
