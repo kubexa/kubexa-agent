@@ -20,6 +20,7 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/queue"
 	"github.com/kubexa/kubexa-agent/pkg/buildinfo"
 	"github.com/kubexa/kubexa-agent/pkg/config"
+	"github.com/kubexa/kubexa-agent/pkg/config/k8sresource"
 	"github.com/kubexa/kubexa-agent/pkg/protoversion"
 )
 
@@ -30,6 +31,15 @@ const (
 
 // ErrSendQueueFull is returned when the internal send buffer is saturated.
 var ErrSendQueueFull = errors.New("stream send queue full")
+
+// WatchReconciler converges the agent's demand-driven informers on a desired
+// set of Kubernetes resources. It is declared here, narrowed to just the one
+// method this package needs, so that stream does not import the collector
+// package. Satisfied by *state.Collector; the concrete type is wired in by
+// cmd/agent/main.go.
+type WatchReconciler interface {
+	Reconcile(ctx context.Context, desired []k8sresource.Descriptor) error
+}
 
 // Manager manages the outbound gRPC stream to the Kubexa Gateway.
 type Manager interface {
@@ -71,6 +81,12 @@ type streamManager struct {
 	sessionID     atomic.Value // string
 	ready         atomic.Bool
 	configSnap    atomic.Pointer[agentv1.ConfigSnapshot]
+
+	// reconciler applies gateway watch config to the demand-driven informer
+	// set. Set once at construction and read-only afterward, so it needs no
+	// synchronization of its own. Nil is valid (e.g. state collection
+	// disabled) — config updates are logged but no reconcile is attempted.
+	reconciler WatchReconciler
 
 	sendCh   chan *agentv1.AgentMessage
 	throttle throttleGate
@@ -116,13 +132,16 @@ func (g *throttleGate) throttled() bool {
 	return now().Before(g.until)
 }
 
-// New constructs a stream Manager wired to cfg, queue, logger, and shared agent metrics.
+// New constructs a stream Manager wired to cfg, queue, logger, and shared
+// agent metrics. reconciler receives every gateway watch config update; pass
+// nil if this agent does not run demand-driven state collection.
 func New(
 	cfg *config.Config,
 	q queue.Queue,
 	log *logger.Logger,
 	streamMetrics *agentmetrics.StreamMetrics,
 	connMetrics *agentmetrics.ConnectionMetrics,
+	reconciler WatchReconciler,
 ) (Manager, error) {
 	if cfg == nil {
 		return nil, errors.New("config is nil")
@@ -143,6 +162,7 @@ func New(
 		log:           log,
 		streamMetrics: streamMetrics,
 		connMetrics:   connMetrics,
+		reconciler:    reconciler,
 		rng:           rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
 		sleep:         defaultSleeper,
 		sendCh:        make(chan *agentv1.AgentMessage, defaultSendChannelSize),
@@ -633,11 +653,11 @@ func (m *streamManager) recvLoop(ctx context.Context, stream agentv1.AgentServic
 			m.abortSession()
 			return
 		}
-		m.handleGatewayMessage(msg)
+		m.handleGatewayMessage(ctx, msg)
 	}
 }
 
-func (m *streamManager) handleGatewayMessage(msg *agentv1.GatewayMessage) {
+func (m *streamManager) handleGatewayMessage(ctx context.Context, msg *agentv1.GatewayMessage) {
 	if msg == nil {
 		return
 	}
@@ -654,6 +674,7 @@ func (m *streamManager) handleGatewayMessage(msg *agentv1.GatewayMessage) {
 		m.log.Info("received gateway config update",
 			logger.F("version", p.Config.GetConfigVersion()),
 		)
+		m.reconcileWatchConfig(ctx, p.Config.GetConfig())
 	case *agentv1.GatewayMessage_Shutdown:
 		m.log.Warn("gateway requested shutdown",
 			logger.F("reason", p.Shutdown.GetReason()),
@@ -662,6 +683,72 @@ func (m *streamManager) handleGatewayMessage(msg *agentv1.GatewayMessage) {
 		// delivery acks handled by higher layers when wired
 	default:
 	}
+}
+
+// reconcileWatchConfig maps every WatcherConfig.Resources entry across every
+// watcher in snapshot into a Descriptor and reconciles the demand-driven
+// informer set on their union in a single call. Reconciling per watcher
+// instead would have each call stop what the previous one just started,
+// since Reconcile always converges the whole set to exactly what it is
+// given — it has no notion of "add to" or "remove from".
+//
+// A snapshot with no watchers (or watchers with no resources) is not treated
+// as "ignore this message": it is reconciled to an empty desired set like
+// any other, which is what actually stops informers once the last viewer's
+// tab closes. Skipping it here would leak every demand-driven watch forever.
+//
+// ctx is whatever the caller (the gateway recv loop) naturally has for this
+// message; it scopes the reconcile call only. The reconciler is responsible
+// for parenting any informers it starts on its own lifetime, not on ctx.
+func (m *streamManager) reconcileWatchConfig(ctx context.Context, snapshot *agentv1.ConfigSnapshot) {
+	if m.reconciler == nil {
+		return
+	}
+
+	var desired []k8sresource.Descriptor
+	for _, watcher := range snapshot.GetWatchers() {
+		for _, ref := range watcher.GetResources() {
+			name := resourceRefName(ref)
+			desc, err := k8sresource.Parse(name)
+			// resourceRefName always contains a "/" (even for a ref with
+			// every field blank, it joins down to "/"), so Parse's own
+			// no-slash and empty-name error paths can never trigger here —
+			// every ResourceRef routes into parseGVR. A ref missing Version
+			// or Resource still returns a nil error there: descriptorForGVR
+			// answers a blank GVR with a zero-value Descriptor instead of an
+			// error. Treat that zero value (Resource == "") as unparsable
+			// too, or a malformed ref would silently reach Reconcile as a
+			// no-op descriptor instead of being logged and skipped.
+			if err != nil || desc.GVR.Resource == "" {
+				m.log.Err(err).Warn("skip unparsable watch resource",
+					logger.F("resource", name),
+				)
+				continue
+			}
+			desired = append(desired, desc)
+		}
+	}
+
+	if err := m.reconciler.Reconcile(ctx, desired); err != nil {
+		m.log.Err(err).Warn("reconcile watch config failed")
+	}
+}
+
+// resourceRefName renders a ResourceRef the way k8sresource.Parse expects:
+// "group/version/resource", or bare "version/resource" for the core group.
+// Joining unconditionally would put a leading "/" on every core-group ref
+// (e.g. "/v1/pods"); parseGVR happens to parse that the same as "v1/pods"
+// today (an empty first segment still yields Group ""), but nothing pins
+// that equivalence, so this builds the canonical two-part form directly
+// instead of relying on it.
+func resourceRefName(ref *agentv1.ResourceRef) string {
+	group := ref.GetGroup()
+	version := ref.GetVersion()
+	resource := ref.GetResource()
+	if group == "" {
+		return version + "/" + resource
+	}
+	return group + "/" + version + "/" + resource
 }
 
 // shouldDeliverQueuedMessage reports whether a recovered queue item may be sent on the stream.

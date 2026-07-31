@@ -1065,11 +1065,15 @@ func (x *LogCollectorConfig) GetTailLines() int32 {
 }
 
 type WatcherConfig struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Namespace     string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"` // boş ise tüm namespace
-	Kinds         []ResourceKind         `protobuf:"varint,3,rep,packed,name=kinds,proto3,enum=agent.v1.ResourceKind" json:"kinds,omitempty"`
-	ResyncSec     int32                  `protobuf:"varint,4,opt,name=resync_sec,json=resyncSec,proto3" json:"resync_sec,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Id        string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Namespace string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"` // boş ise tüm namespace
+	Kinds     []ResourceKind         `protobuf:"varint,3,rep,packed,name=kinds,proto3,enum=agent.v1.ResourceKind" json:"kinds,omitempty"`
+	ResyncSec int32                  `protobuf:"varint,4,opt,name=resync_sec,json=resyncSec,proto3" json:"resync_sec,omitempty"`
+	// GVRs to watch, including CRDs. `kinds` cannot express a CRD (it is a
+	// closed enum), so this is the field demand-driven watches use. An agent
+	// that understands both treats them as a union.
+	Resources     []*ResourceRef `protobuf:"bytes,5,rep,name=resources,proto3" json:"resources,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1132,6 +1136,74 @@ func (x *WatcherConfig) GetResyncSec() int32 {
 	return 0
 }
 
+func (x *WatcherConfig) GetResources() []*ResourceRef {
+	if x != nil {
+		return x.Resources
+	}
+	return nil
+}
+
+// ResourceRef names one API resource the way the dynamic client addresses it.
+type ResourceRef struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"` // "" for the core group
+	Version       string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	Resource      string                 `protobuf:"bytes,3,opt,name=resource,proto3" json:"resource,omitempty"` // plural, e.g. "cronjobs"
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResourceRef) Reset() {
+	*x = ResourceRef{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResourceRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResourceRef) ProtoMessage() {}
+
+func (x *ResourceRef) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResourceRef.ProtoReflect.Descriptor instead.
+func (*ResourceRef) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ResourceRef) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
+func (x *ResourceRef) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *ResourceRef) GetResource() string {
+	if x != nil {
+		return x.Resource
+	}
+	return ""
+}
+
 type MetricScrapeConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -1144,7 +1216,7 @@ type MetricScrapeConfig struct {
 
 func (x *MetricScrapeConfig) Reset() {
 	*x = MetricScrapeConfig{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1156,7 +1228,7 @@ func (x *MetricScrapeConfig) String() string {
 func (*MetricScrapeConfig) ProtoMessage() {}
 
 func (x *MetricScrapeConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1169,7 +1241,7 @@ func (x *MetricScrapeConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricScrapeConfig.ProtoReflect.Descriptor instead.
 func (*MetricScrapeConfig) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *MetricScrapeConfig) GetId() string {
@@ -1285,13 +1357,18 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"containers\x12\x16\n" +
 	"\x06follow\x18\x05 \x01(\bR\x06follow\x12\x1d\n" +
 	"\n" +
-	"tail_lines\x18\x06 \x01(\x05R\ttailLines\"\x8a\x01\n" +
+	"tail_lines\x18\x06 \x01(\x05R\ttailLines\"\xbf\x01\n" +
 	"\rWatcherConfig\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12,\n" +
 	"\x05kinds\x18\x03 \x03(\x0e2\x16.agent.v1.ResourceKindR\x05kinds\x12\x1d\n" +
 	"\n" +
-	"resync_sec\x18\x04 \x01(\x05R\tresyncSec\"\xf5\x01\n" +
+	"resync_sec\x18\x04 \x01(\x05R\tresyncSec\x123\n" +
+	"\tresources\x18\x05 \x03(\v2\x15.agent.v1.ResourceRefR\tresources\"Y\n" +
+	"\vResourceRef\x12\x14\n" +
+	"\x05group\x18\x01 \x01(\tR\x05group\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\x12\x1a\n" +
+	"\bresource\x18\x03 \x01(\tR\bresource\"\xf5\x01\n" +
 	"\x12MetricScrapeConfig\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x12!\n" +
@@ -1315,7 +1392,7 @@ func file_proto_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_proto_agent_v1_agent_proto_rawDescData
 }
 
-var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*AgentMessage)(nil),           // 0: agent.v1.AgentMessage
 	(*HandshakeRequest)(nil),       // 1: agent.v1.HandshakeRequest
@@ -1331,27 +1408,28 @@ var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*ConfigSnapshot)(nil),         // 11: agent.v1.ConfigSnapshot
 	(*LogCollectorConfig)(nil),     // 12: agent.v1.LogCollectorConfig
 	(*WatcherConfig)(nil),          // 13: agent.v1.WatcherConfig
-	(*MetricScrapeConfig)(nil),     // 14: agent.v1.MetricScrapeConfig
-	nil,                            // 15: agent.v1.MetricScrapeConfig.ExtraLabelsEntry
-	(*v1.AgentMetadata)(nil),       // 16: common.v1.AgentMetadata
-	(*LogBatch)(nil),               // 17: agent.v1.LogBatch
-	(*StateEvent)(nil),             // 18: agent.v1.StateEvent
-	(*MetricBatch)(nil),            // 19: agent.v1.MetricBatch
-	(*MetricsEvent)(nil),           // 20: agent.v1.MetricsEvent
-	(*PrometheusMetricsEvent)(nil), // 21: agent.v1.PrometheusMetricsEvent
-	(*ResourceCatalog)(nil),        // 22: agent.v1.ResourceCatalog
-	(ResourceKind)(0),              // 23: agent.v1.ResourceKind
+	(*ResourceRef)(nil),            // 14: agent.v1.ResourceRef
+	(*MetricScrapeConfig)(nil),     // 15: agent.v1.MetricScrapeConfig
+	nil,                            // 16: agent.v1.MetricScrapeConfig.ExtraLabelsEntry
+	(*v1.AgentMetadata)(nil),       // 17: common.v1.AgentMetadata
+	(*LogBatch)(nil),               // 18: agent.v1.LogBatch
+	(*StateEvent)(nil),             // 19: agent.v1.StateEvent
+	(*MetricBatch)(nil),            // 20: agent.v1.MetricBatch
+	(*MetricsEvent)(nil),           // 21: agent.v1.MetricsEvent
+	(*PrometheusMetricsEvent)(nil), // 22: agent.v1.PrometheusMetricsEvent
+	(*ResourceCatalog)(nil),        // 23: agent.v1.ResourceCatalog
+	(ResourceKind)(0),              // 24: agent.v1.ResourceKind
 }
 var file_proto_agent_v1_agent_proto_depIdxs = []int32{
-	16, // 0: agent.v1.AgentMessage.meta:type_name -> common.v1.AgentMetadata
+	17, // 0: agent.v1.AgentMessage.meta:type_name -> common.v1.AgentMetadata
 	1,  // 1: agent.v1.AgentMessage.handshake:type_name -> agent.v1.HandshakeRequest
-	17, // 2: agent.v1.AgentMessage.logs:type_name -> agent.v1.LogBatch
-	18, // 3: agent.v1.AgentMessage.state:type_name -> agent.v1.StateEvent
-	19, // 4: agent.v1.AgentMessage.metrics:type_name -> agent.v1.MetricBatch
+	18, // 2: agent.v1.AgentMessage.logs:type_name -> agent.v1.LogBatch
+	19, // 3: agent.v1.AgentMessage.state:type_name -> agent.v1.StateEvent
+	20, // 4: agent.v1.AgentMessage.metrics:type_name -> agent.v1.MetricBatch
 	3,  // 5: agent.v1.AgentMessage.heartbeat:type_name -> agent.v1.Heartbeat
-	20, // 6: agent.v1.AgentMessage.kube_metrics:type_name -> agent.v1.MetricsEvent
-	21, // 7: agent.v1.AgentMessage.prometheus_metrics:type_name -> agent.v1.PrometheusMetricsEvent
-	22, // 8: agent.v1.AgentMessage.catalog:type_name -> agent.v1.ResourceCatalog
+	21, // 6: agent.v1.AgentMessage.kube_metrics:type_name -> agent.v1.MetricsEvent
+	22, // 7: agent.v1.AgentMessage.prometheus_metrics:type_name -> agent.v1.PrometheusMetricsEvent
+	23, // 8: agent.v1.AgentMessage.catalog:type_name -> agent.v1.ResourceCatalog
 	2,  // 9: agent.v1.HandshakeRequest.caps:type_name -> agent.v1.AgentCapabilities
 	4,  // 10: agent.v1.Heartbeat.health:type_name -> agent.v1.AgentHealth
 	6,  // 11: agent.v1.GatewayMessage.handshake:type_name -> agent.v1.HandshakeResponse
@@ -1363,16 +1441,17 @@ var file_proto_agent_v1_agent_proto_depIdxs = []int32{
 	11, // 17: agent.v1.ConfigUpdate.config:type_name -> agent.v1.ConfigSnapshot
 	12, // 18: agent.v1.ConfigSnapshot.log_collectors:type_name -> agent.v1.LogCollectorConfig
 	13, // 19: agent.v1.ConfigSnapshot.watchers:type_name -> agent.v1.WatcherConfig
-	14, // 20: agent.v1.ConfigSnapshot.metric_scrapers:type_name -> agent.v1.MetricScrapeConfig
-	23, // 21: agent.v1.WatcherConfig.kinds:type_name -> agent.v1.ResourceKind
-	15, // 22: agent.v1.MetricScrapeConfig.extra_labels:type_name -> agent.v1.MetricScrapeConfig.ExtraLabelsEntry
-	0,  // 23: agent.v1.AgentService.Connect:input_type -> agent.v1.AgentMessage
-	5,  // 24: agent.v1.AgentService.Connect:output_type -> agent.v1.GatewayMessage
-	24, // [24:25] is the sub-list for method output_type
-	23, // [23:24] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	15, // 20: agent.v1.ConfigSnapshot.metric_scrapers:type_name -> agent.v1.MetricScrapeConfig
+	24, // 21: agent.v1.WatcherConfig.kinds:type_name -> agent.v1.ResourceKind
+	14, // 22: agent.v1.WatcherConfig.resources:type_name -> agent.v1.ResourceRef
+	16, // 23: agent.v1.MetricScrapeConfig.extra_labels:type_name -> agent.v1.MetricScrapeConfig.ExtraLabelsEntry
+	0,  // 24: agent.v1.AgentService.Connect:input_type -> agent.v1.AgentMessage
+	5,  // 25: agent.v1.AgentService.Connect:output_type -> agent.v1.GatewayMessage
+	25, // [25:26] is the sub-list for method output_type
+	24, // [24:25] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_agent_proto_init() }
@@ -1407,7 +1486,7 @@ func file_proto_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_v1_agent_proto_rawDesc), len(file_proto_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
