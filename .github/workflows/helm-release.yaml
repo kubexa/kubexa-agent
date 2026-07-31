@@ -34,10 +34,13 @@ jobs:
 
       - name: Package chart
         run: |
-          mkdir -p dist
+          rm -rf dist && mkdir -p dist
+          NAME=$(grep '^name:' helm/kubexa-agent/Chart.yaml | awk '{print $2}')
+          VERSION=$(grep '^version:' helm/kubexa-agent/Chart.yaml | awk '{print $2}')
           helm package helm/kubexa-agent \
             --destination dist \
-            --version $(grep '^version:' helm/kubexa-agent/Chart.yaml | awk '{print $2}')
+            --version "$VERSION"
+          echo "CHART_TGZ=dist/$NAME-$VERSION.tgz" >> $GITHUB_ENV
 
       - name: Checkout helm-charts repo
         uses: actions/checkout@v4
@@ -46,8 +49,10 @@ jobs:
           token: ${{ secrets.HELM_CHARTS_TOKEN }}
           path: helm-charts-repo
 
+      # Glob değil, sadece bu koşuda paketlenen sürüm: dist/ içindeki eski bir
+      # tarball, aksi halde `helm repo index` tarafından yayınlanır.
       - name: Copy chart package
-        run: cp dist/*.tgz helm-charts-repo/
+        run: cp "$CHART_TGZ" helm-charts-repo/
 
       - name: Update helm repo index
         run: |

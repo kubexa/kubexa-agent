@@ -38,5 +38,9 @@ go.work.sum
 # Helm: local overrides (copy from my-values.example.yaml; may contain tokens)
 temp/
 /bin
+# Packaged charts. Build output, never committed: a stale .tgz here makes
+# `dist/*.tgz` match more than one file, and `helm push` reads its second
+# argument as the remote, so the release fails with "scheme prefix missing".
+/dist/
 # subagent-driven-development scratch (ledger, briefs, review packages)
 .superpowers/
