@@ -182,3 +182,32 @@ query:
 		t.Fatalf("ValidateQuery() = %v, want nil", err)
 	}
 }
+
+func TestValidateAggregatesQueryViolationsWithOtherSections(t *testing.T) {
+	// Verify that query violations aggregate with other config sections
+	// in a single *ValidationError, not short-circuiting on query errors.
+	var cfg Config
+	src := `
+gateway:
+  address: ""
+query:
+  rules:
+    - resources: [pods]
+      verbs: [delete]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatalf("Validate() = nil, want error")
+	}
+	errMsg := err.Error()
+	// Both violations must be in the error message
+	if !strings.Contains(errMsg, "gateway.address") {
+		t.Errorf("Validate() error should contain gateway.address violation: %v", err)
+	}
+	if !strings.Contains(errMsg, "unsupported verb") {
+		t.Errorf("Validate() error should contain query verb violation: %v", err)
+	}
+}
