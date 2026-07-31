@@ -2,8 +2,8 @@ apiVersion: v2
 name: kubexa-agent
 description: Kubexa agent — collects Kubernetes logs, state, and metrics and streams them to the Kubexa gateway.
 type: application
-version: 0.3.1
-appVersion: "0.2.1"
+version: 0.4.0
+appVersion: "0.3.0"
 keywords:
   - kubexa
   - observability
