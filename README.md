@@ -70,6 +70,8 @@ Chart values map directly to `pkg/config.Config`. Key sections:
 | `collect.state.*` | `collect.state.*` | Resource watch rules |
 | `collect.state.redactSecrets` | `collect.state.redact_secrets` | Whether Secret `data`/`stringData` are stripped before leaving the cluster; default `false` |
 | `collect.metrics.*` | `collect.metrics.*` | K8s metrics + custom endpoints |
+| `query.*` | `query.*` | Live, on-demand resource reads; omit to inherit `collect.state` |
+| `query.redactSecrets` | `query.redact_secrets` | Strips Secret `data`/`stringData` from live query responses; unset inherits `collect.state.redactSecrets` |
 | `buffer.*` | `buffer.*` | Memory/disk queue |
 | `observability.*` | `observability.*` | Health and metrics ports |
 | `log.*` | `log.*` | Agent logger level/format |
@@ -117,6 +119,58 @@ Regardless of this setting, `managedFields` and the
 `kubectl.kubernetes.io/last-applied-configuration` annotation are always stripped from every
 object, Secret or not — for a Secret applied with `kubectl apply`, that annotation is a second,
 independent copy of the full manifest including every base64-encoded value.
+
+### Live resource query
+
+`query.*` configures live, on-demand resource reads: a request from the Kubexa platform for the
+current state of a specific object or list, answered synchronously, as opposed to
+`collect.state`'s continuous watch-and-push feed. Omit the section to inherit `collect.state`
+entirely; set individual fields (e.g. only `redactSecrets`) to override just those and inherit
+the rest — see the commented block in `values.yaml` for the per-field inheritance rules.
+
+The chart ships with `query.enabled: true`, `query.rules: []` (which inherits
+`collect.state.rules`'s cluster-wide `cluster-core` rule, covering `secrets` with no `verbs`
+restriction), and `redactSecrets: false` — so a plain `helm upgrade` permits live reads of
+Secret values through this path. This is not a new exposure: the same `cluster-core` rule
+already streams those Secret values to the platform continuously via `collect.state` (see
+[Secret handling](#secret-handling)); live query just adds a second, on-demand path to data the
+platform already receives.
+
+This policy is a **second gate stacked on top of Kubernetes RBAC**, not a replacement for it.
+Both must allow a read before the agent returns data: RBAC answers "may this ServiceAccount read
+this object", and `query` answers "did the cluster owner agree the Kubexa platform may read it".
+The two are reported separately in the capability catalog so the UI can tell a viewer which of
+the two is actually blocking a given resource.
+
+`enabled: false` refuses every live query with `POLICY_DENIED` — an explicit, diagnosable
+refusal, not silence. A gateway or UI waiting on a query gets an answer either way.
+
+`verbs` controls which *operations* a rule permits, not how much of an object comes back.
+Restricting a rule to `[list]` on `secrets` prevents fetching an individual Secret by name via
+`get`; it does **not** redact anything — a full-view `list` still returns every matched Secret's
+`data`/`stringData`, exactly as `kubectl get secrets -o json` does against the Kubernetes API
+itself. The knob that actually keeps Secret **values** inside the cluster is `redactSecrets:
+true` (`query.redactSecrets`, which when unset inherits `collect.state.redactSecrets` — see
+[Secret handling](#secret-handling)). To expose Secret **names** without values, either use the
+TABLE view (`QUERY_VIEW_TABLE`), which returns printed columns and `PartialObjectMetadata` and
+never includes `data`/`stringData`, or set `redactSecrets: true`.
+
+The TABLE view is not a pass-through of the API server's response. Every row's object goes
+through the same sanitization as the full view before the payload leaves the agent, which
+matters more than it sounds: `PartialObjectMetadata` copies annotations verbatim, and for a
+Secret written with `kubectl apply` the `kubectl.kubernetes.io/last-applied-configuration`
+annotation is a second complete copy of the manifest — base64 values included. That annotation
+and `managedFields` are stripped unconditionally, independent of `redactSecrets`. Rows are
+also filtered against the rule's `names` patterns, so a TABLE listing shows exactly the objects
+the equivalent full-view `list` shows. Printed **cells** are left as the API server rendered
+them; a CRD's `additionalPrinterColumns` can aim a cell at any field its author chose, so cells
+reflect definitions that already exist in the cluster and show what `kubectl get` shows.
+Kubernetes' built-in Secret columns are NAME/TYPE/DATA/AGE, where DATA is a key count.
+
+The per-GVR verdict published in the capability catalog is deliberately coarser than the real
+enforcement: a policy scoped to a namespace or a name prefix cannot be reduced to a single
+boolean for the whole GVR, so that verdict is only a hint for the UI. The full rule evaluation
+still runs against every individual request, regardless of what the catalog reported.
 
 ## Memory and resource sizing
 

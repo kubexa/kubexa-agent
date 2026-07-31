@@ -22,6 +22,174 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type QueryVerb int32
+
+const (
+	QueryVerb_QUERY_VERB_UNSPECIFIED QueryVerb = 0
+	QueryVerb_QUERY_VERB_LIST        QueryVerb = 1
+	QueryVerb_QUERY_VERB_GET         QueryVerb = 2
+)
+
+// Enum value maps for QueryVerb.
+var (
+	QueryVerb_name = map[int32]string{
+		0: "QUERY_VERB_UNSPECIFIED",
+		1: "QUERY_VERB_LIST",
+		2: "QUERY_VERB_GET",
+	}
+	QueryVerb_value = map[string]int32{
+		"QUERY_VERB_UNSPECIFIED": 0,
+		"QUERY_VERB_LIST":        1,
+		"QUERY_VERB_GET":         2,
+	}
+)
+
+func (x QueryVerb) Enum() *QueryVerb {
+	p := new(QueryVerb)
+	*p = x
+	return p
+}
+
+func (x QueryVerb) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (QueryVerb) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_agent_v1_agent_proto_enumTypes[0].Descriptor()
+}
+
+func (QueryVerb) Type() protoreflect.EnumType {
+	return &file_proto_agent_v1_agent_proto_enumTypes[0]
+}
+
+func (x QueryVerb) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use QueryVerb.Descriptor instead.
+func (QueryVerb) EnumDescriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{0}
+}
+
+// QueryView selects the response shape. TABLE uses the API server's own
+// server-side printing, which yields kubectl's columns -- including the
+// additionalPrinterColumns a CRD defines -- at a fraction of the payload size.
+type QueryView int32
+
+const (
+	QueryView_QUERY_VIEW_UNSPECIFIED QueryView = 0
+	QueryView_QUERY_VIEW_TABLE       QueryView = 1
+	QueryView_QUERY_VIEW_FULL        QueryView = 2
+)
+
+// Enum value maps for QueryView.
+var (
+	QueryView_name = map[int32]string{
+		0: "QUERY_VIEW_UNSPECIFIED",
+		1: "QUERY_VIEW_TABLE",
+		2: "QUERY_VIEW_FULL",
+	}
+	QueryView_value = map[string]int32{
+		"QUERY_VIEW_UNSPECIFIED": 0,
+		"QUERY_VIEW_TABLE":       1,
+		"QUERY_VIEW_FULL":        2,
+	}
+)
+
+func (x QueryView) Enum() *QueryView {
+	p := new(QueryView)
+	*p = x
+	return p
+}
+
+func (x QueryView) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (QueryView) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_agent_v1_agent_proto_enumTypes[1].Descriptor()
+}
+
+func (QueryView) Type() protoreflect.EnumType {
+	return &file_proto_agent_v1_agent_proto_enumTypes[1]
+}
+
+func (x QueryView) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use QueryView.Descriptor instead.
+func (QueryView) EnumDescriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{1}
+}
+
+// POLICY_DENIED and RBAC_DENIED are separate on purpose: they send the
+// operator to two different files -- the agent's own config versus the
+// ClusterRole -- and one merged code sends half of them to the wrong one.
+type QueryErrorCode int32
+
+const (
+	QueryErrorCode_QUERY_ERROR_UNSPECIFIED        QueryErrorCode = 0
+	QueryErrorCode_QUERY_ERROR_POLICY_DENIED      QueryErrorCode = 1
+	QueryErrorCode_QUERY_ERROR_RBAC_DENIED        QueryErrorCode = 2
+	QueryErrorCode_QUERY_ERROR_NOT_FOUND          QueryErrorCode = 3
+	QueryErrorCode_QUERY_ERROR_TIMEOUT            QueryErrorCode = 4
+	QueryErrorCode_QUERY_ERROR_TOO_LARGE          QueryErrorCode = 5
+	QueryErrorCode_QUERY_ERROR_RESOURCE_EXHAUSTED QueryErrorCode = 6
+	QueryErrorCode_QUERY_ERROR_INTERNAL           QueryErrorCode = 7
+)
+
+// Enum value maps for QueryErrorCode.
+var (
+	QueryErrorCode_name = map[int32]string{
+		0: "QUERY_ERROR_UNSPECIFIED",
+		1: "QUERY_ERROR_POLICY_DENIED",
+		2: "QUERY_ERROR_RBAC_DENIED",
+		3: "QUERY_ERROR_NOT_FOUND",
+		4: "QUERY_ERROR_TIMEOUT",
+		5: "QUERY_ERROR_TOO_LARGE",
+		6: "QUERY_ERROR_RESOURCE_EXHAUSTED",
+		7: "QUERY_ERROR_INTERNAL",
+	}
+	QueryErrorCode_value = map[string]int32{
+		"QUERY_ERROR_UNSPECIFIED":        0,
+		"QUERY_ERROR_POLICY_DENIED":      1,
+		"QUERY_ERROR_RBAC_DENIED":        2,
+		"QUERY_ERROR_NOT_FOUND":          3,
+		"QUERY_ERROR_TIMEOUT":            4,
+		"QUERY_ERROR_TOO_LARGE":          5,
+		"QUERY_ERROR_RESOURCE_EXHAUSTED": 6,
+		"QUERY_ERROR_INTERNAL":           7,
+	}
+)
+
+func (x QueryErrorCode) Enum() *QueryErrorCode {
+	p := new(QueryErrorCode)
+	*p = x
+	return p
+}
+
+func (x QueryErrorCode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (QueryErrorCode) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_agent_v1_agent_proto_enumTypes[2].Descriptor()
+}
+
+func (QueryErrorCode) Type() protoreflect.EnumType {
+	return &file_proto_agent_v1_agent_proto_enumTypes[2]
+}
+
+func (x QueryErrorCode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use QueryErrorCode.Descriptor instead.
+func (QueryErrorCode) EnumDescriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{2}
+}
+
 type AgentMessage struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	MessageId string                 `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"` // idempotency key (uuid)
@@ -36,6 +204,7 @@ type AgentMessage struct {
 	//	*AgentMessage_KubeMetrics
 	//	*AgentMessage_PrometheusMetrics
 	//	*AgentMessage_Catalog
+	//	*AgentMessage_ResourceQueryResult
 	Payload       isAgentMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -165,6 +334,15 @@ func (x *AgentMessage) GetCatalog() *ResourceCatalog {
 	return nil
 }
 
+func (x *AgentMessage) GetResourceQueryResult() *ResourceQueryResult {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentMessage_ResourceQueryResult); ok {
+			return x.ResourceQueryResult
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Payload interface {
 	isAgentMessage_Payload()
 }
@@ -202,6 +380,10 @@ type AgentMessage_Catalog struct {
 	Catalog *ResourceCatalog `protobuf:"bytes,10,opt,name=catalog,proto3,oneof"`
 }
 
+type AgentMessage_ResourceQueryResult struct {
+	ResourceQueryResult *ResourceQueryResult `protobuf:"bytes,11,opt,name=resource_query_result,json=resourceQueryResult,proto3,oneof"`
+}
+
 func (*AgentMessage_Handshake) isAgentMessage_Payload() {}
 
 func (*AgentMessage_Logs) isAgentMessage_Payload() {}
@@ -217,6 +399,8 @@ func (*AgentMessage_KubeMetrics) isAgentMessage_Payload() {}
 func (*AgentMessage_PrometheusMetrics) isAgentMessage_Payload() {}
 
 func (*AgentMessage_Catalog) isAgentMessage_Payload() {}
+
+func (*AgentMessage_ResourceQueryResult) isAgentMessage_Payload() {}
 
 type HandshakeRequest struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
@@ -484,6 +668,7 @@ type GatewayMessage struct {
 	//	*GatewayMessage_Config
 	//	*GatewayMessage_Backpressure
 	//	*GatewayMessage_Shutdown
+	//	*GatewayMessage_ResourceQuery
 	Payload       isGatewayMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -578,6 +763,15 @@ func (x *GatewayMessage) GetShutdown() *Shutdown {
 	return nil
 }
 
+func (x *GatewayMessage) GetResourceQuery() *ResourceQuery {
+	if x != nil {
+		if x, ok := x.Payload.(*GatewayMessage_ResourceQuery); ok {
+			return x.ResourceQuery
+		}
+	}
+	return nil
+}
+
 type isGatewayMessage_Payload interface {
 	isGatewayMessage_Payload()
 }
@@ -602,6 +796,10 @@ type GatewayMessage_Shutdown struct {
 	Shutdown *Shutdown `protobuf:"bytes,6,opt,name=shutdown,proto3,oneof"`
 }
 
+type GatewayMessage_ResourceQuery struct {
+	ResourceQuery *ResourceQuery `protobuf:"bytes,7,opt,name=resource_query,json=resourceQuery,proto3,oneof"`
+}
+
 func (*GatewayMessage_Handshake) isGatewayMessage_Payload() {}
 
 func (*GatewayMessage_Ack) isGatewayMessage_Payload() {}
@@ -611,6 +809,8 @@ func (*GatewayMessage_Config) isGatewayMessage_Payload() {}
 func (*GatewayMessage_Backpressure) isGatewayMessage_Payload() {}
 
 func (*GatewayMessage_Shutdown) isGatewayMessage_Payload() {}
+
+func (*GatewayMessage_ResourceQuery) isGatewayMessage_Payload() {}
 
 type HandshakeResponse struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
@@ -1272,11 +1472,289 @@ func (x *MetricScrapeConfig) GetExtraLabels() map[string]string {
 	return nil
 }
 
+// ResourceQuery asks the agent to read one resource type right now and reply.
+// It is the pull counterpart to WatcherConfig: nothing is started, nothing is
+// remembered, and the agent holds no state between queries.
+type ResourceQuery struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	QueryId       string                 `protobuf:"bytes,1,opt,name=query_id,json=queryId,proto3" json:"query_id,omitempty"` // correlates the reply; opaque to the agent
+	Ref           *ResourceRef           `protobuf:"bytes,2,opt,name=ref,proto3" json:"ref,omitempty"`
+	Verb          QueryVerb              `protobuf:"varint,3,opt,name=verb,proto3,enum=agent.v1.QueryVerb" json:"verb,omitempty"`
+	View          QueryView              `protobuf:"varint,4,opt,name=view,proto3,enum=agent.v1.QueryView" json:"view,omitempty"`
+	Namespace     string                 `protobuf:"bytes,5,opt,name=namespace,proto3" json:"namespace,omitempty"` // "" = all namespaces / cluster-scoped
+	Name          string                 `protobuf:"bytes,6,opt,name=name,proto3" json:"name,omitempty"`           // required for GET, ignored for LIST
+	LabelSelector string                 `protobuf:"bytes,7,opt,name=label_selector,json=labelSelector,proto3" json:"label_selector,omitempty"`
+	FieldSelector string                 `protobuf:"bytes,8,opt,name=field_selector,json=fieldSelector,proto3" json:"field_selector,omitempty"`
+	Limit         int32                  `protobuf:"varint,9,opt,name=limit,proto3" json:"limit,omitempty"`                                      // page size; 0 uses the agent default
+	ContinueToken string                 `protobuf:"bytes,10,opt,name=continue_token,json=continueToken,proto3" json:"continue_token,omitempty"` // opaque Kubernetes continue token
+	TimeoutMs     int32                  `protobuf:"varint,11,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`            // clamped by the agent to [1s, 30s]
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResourceQuery) Reset() {
+	*x = ResourceQuery{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResourceQuery) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResourceQuery) ProtoMessage() {}
+
+func (x *ResourceQuery) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResourceQuery.ProtoReflect.Descriptor instead.
+func (*ResourceQuery) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ResourceQuery) GetQueryId() string {
+	if x != nil {
+		return x.QueryId
+	}
+	return ""
+}
+
+func (x *ResourceQuery) GetRef() *ResourceRef {
+	if x != nil {
+		return x.Ref
+	}
+	return nil
+}
+
+func (x *ResourceQuery) GetVerb() QueryVerb {
+	if x != nil {
+		return x.Verb
+	}
+	return QueryVerb_QUERY_VERB_UNSPECIFIED
+}
+
+func (x *ResourceQuery) GetView() QueryView {
+	if x != nil {
+		return x.View
+	}
+	return QueryView_QUERY_VIEW_UNSPECIFIED
+}
+
+func (x *ResourceQuery) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *ResourceQuery) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ResourceQuery) GetLabelSelector() string {
+	if x != nil {
+		return x.LabelSelector
+	}
+	return ""
+}
+
+func (x *ResourceQuery) GetFieldSelector() string {
+	if x != nil {
+		return x.FieldSelector
+	}
+	return ""
+}
+
+func (x *ResourceQuery) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ResourceQuery) GetContinueToken() string {
+	if x != nil {
+		return x.ContinueToken
+	}
+	return ""
+}
+
+func (x *ResourceQuery) GetTimeoutMs() int32 {
+	if x != nil {
+		return x.TimeoutMs
+	}
+	return 0
+}
+
+// ResourceQueryResult is always sent, success or failure. A gateway that has
+// forgotten the query_id drops the reply; the agent never withholds one.
+type ResourceQueryResult struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	QueryId string                 `protobuf:"bytes,1,opt,name=query_id,json=queryId,proto3" json:"query_id,omitempty"`
+	Error   *QueryError            `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`     // when set, payload is empty
+	Payload []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"` // JSON: a meta.k8s.io/v1 Table, or an object array
+	// continue_token and remaining are populated for QUERY_VIEW_FULL only.
+	//
+	// On QUERY_VIEW_TABLE they are always empty/zero even mid-pagination: the
+	// API server carries that state inside the Table body itself, and it is
+	// left there. A TABLE consumer must read metadata.continue and
+	// metadata.remainingItemCount from the payload JSON. Reading an empty
+	// continue_token here as "no more pages" truncates every TABLE listing at
+	// its first page.
+	//
+	// metadata.remainingItemCount is an upper bound, not an exact count: the
+	// agent drops rows the config policy's name patterns exclude, and that
+	// filtering happens after the API server has already paged and counted.
+	// QUERY_VIEW_FULL's remaining field carries the same caveat.
+	ContinueToken string `protobuf:"bytes,4,opt,name=continue_token,json=continueToken,proto3" json:"continue_token,omitempty"`
+	Remaining     int32  `protobuf:"varint,5,opt,name=remaining,proto3" json:"remaining,omitempty"`
+	Truncated     bool   `protobuf:"varint,6,opt,name=truncated,proto3" json:"truncated,omitempty"` // response size cap was reached
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResourceQueryResult) Reset() {
+	*x = ResourceQueryResult{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResourceQueryResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResourceQueryResult) ProtoMessage() {}
+
+func (x *ResourceQueryResult) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResourceQueryResult.ProtoReflect.Descriptor instead.
+func (*ResourceQueryResult) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ResourceQueryResult) GetQueryId() string {
+	if x != nil {
+		return x.QueryId
+	}
+	return ""
+}
+
+func (x *ResourceQueryResult) GetError() *QueryError {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
+func (x *ResourceQueryResult) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *ResourceQueryResult) GetContinueToken() string {
+	if x != nil {
+		return x.ContinueToken
+	}
+	return ""
+}
+
+func (x *ResourceQueryResult) GetRemaining() int32 {
+	if x != nil {
+		return x.Remaining
+	}
+	return 0
+}
+
+func (x *ResourceQueryResult) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+type QueryError struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          QueryErrorCode         `protobuf:"varint,1,opt,name=code,proto3,enum=agent.v1.QueryErrorCode" json:"code,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QueryError) Reset() {
+	*x = QueryError{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueryError) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueryError) ProtoMessage() {}
+
+func (x *QueryError) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueryError.ProtoReflect.Descriptor instead.
+func (*QueryError) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *QueryError) GetCode() QueryErrorCode {
+	if x != nil {
+		return x.Code
+	}
+	return QueryErrorCode_QUERY_ERROR_UNSPECIFIED
+}
+
+func (x *QueryError) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 var File_proto_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x1aproto/agent/v1/agent.proto\x12\bagent.v1\x1a\x1cproto/agent/v1/catalog.proto\x1a\x18proto/agent/v1/log.proto\x1a\x1aproto/agent/v1/state.proto\x1a\x1bproto/agent/v1/metric.proto\x1a\x1eproto/common/v1/metadata.proto\"\xad\x04\n" +
+	"\x1aproto/agent/v1/agent.proto\x12\bagent.v1\x1a\x1cproto/agent/v1/catalog.proto\x1a\x18proto/agent/v1/log.proto\x1a\x1aproto/agent/v1/state.proto\x1a\x1bproto/agent/v1/metric.proto\x1a\x1eproto/common/v1/metadata.proto\"\x82\x05\n" +
 	"\fAgentMessage\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x12,\n" +
@@ -1289,7 +1767,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\fkube_metrics\x18\b \x01(\v2\x16.agent.v1.MetricsEventH\x00R\vkubeMetrics\x12Q\n" +
 	"\x12prometheus_metrics\x18\t \x01(\v2 .agent.v1.PrometheusMetricsEventH\x00R\x11prometheusMetrics\x125\n" +
 	"\acatalog\x18\n" +
-	" \x01(\v2\x19.agent.v1.ResourceCatalogH\x00R\acatalogB\t\n" +
+	" \x01(\v2\x19.agent.v1.ResourceCatalogH\x00R\acatalog\x12S\n" +
+	"\x15resource_query_result\x18\v \x01(\v2\x1d.agent.v1.ResourceQueryResultH\x00R\x13resourceQueryResultB\t\n" +
 	"\apayload\"\x89\x02\n" +
 	"\x10HandshakeRequest\x12#\n" +
 	"\ragent_version\x18\x01 \x01(\tR\fagentVersion\x12#\n" +
@@ -1310,7 +1789,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\vqueue_depth\x18\x01 \x01(\x03R\n" +
 	"queueDepth\x12)\n" +
 	"\x10dropped_messages\x18\x02 \x01(\x03R\x0fdroppedMessages\x12\x16\n" +
-	"\x06status\x18\x03 \x01(\tR\x06status\"\xc2\x02\n" +
+	"\x06status\x18\x03 \x01(\tR\x06status\"\x84\x03\n" +
 	"\x0eGatewayMessage\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x12;\n" +
@@ -1318,7 +1797,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x03ack\x18\x03 \x01(\v2\r.agent.v1.AckH\x00R\x03ack\x120\n" +
 	"\x06config\x18\x04 \x01(\v2\x16.agent.v1.ConfigUpdateH\x00R\x06config\x12B\n" +
 	"\fbackpressure\x18\x05 \x01(\v2\x1c.agent.v1.BackpressureSignalH\x00R\fbackpressure\x120\n" +
-	"\bshutdown\x18\x06 \x01(\v2\x12.agent.v1.ShutdownH\x00R\bshutdownB\t\n" +
+	"\bshutdown\x18\x06 \x01(\v2\x12.agent.v1.ShutdownH\x00R\bshutdown\x12@\n" +
+	"\x0eresource_query\x18\a \x01(\v2\x17.agent.v1.ResourceQueryH\x00R\rresourceQueryB\t\n" +
 	"\apayload\"\xb1\x02\n" +
 	"\x11HandshakeResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x1d\n" +
@@ -1376,7 +1856,49 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\fextra_labels\x18\x04 \x03(\v2-.agent.v1.MetricScrapeConfig.ExtraLabelsEntryR\vextraLabels\x1a>\n" +
 	"\x10ExtraLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012O\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x81\x03\n" +
+	"\rResourceQuery\x12\x19\n" +
+	"\bquery_id\x18\x01 \x01(\tR\aqueryId\x12'\n" +
+	"\x03ref\x18\x02 \x01(\v2\x15.agent.v1.ResourceRefR\x03ref\x12'\n" +
+	"\x04verb\x18\x03 \x01(\x0e2\x13.agent.v1.QueryVerbR\x04verb\x12'\n" +
+	"\x04view\x18\x04 \x01(\x0e2\x13.agent.v1.QueryViewR\x04view\x12\x1c\n" +
+	"\tnamespace\x18\x05 \x01(\tR\tnamespace\x12\x12\n" +
+	"\x04name\x18\x06 \x01(\tR\x04name\x12%\n" +
+	"\x0elabel_selector\x18\a \x01(\tR\rlabelSelector\x12%\n" +
+	"\x0efield_selector\x18\b \x01(\tR\rfieldSelector\x12\x14\n" +
+	"\x05limit\x18\t \x01(\x05R\x05limit\x12%\n" +
+	"\x0econtinue_token\x18\n" +
+	" \x01(\tR\rcontinueToken\x12\x1d\n" +
+	"\n" +
+	"timeout_ms\x18\v \x01(\x05R\ttimeoutMs\"\xd9\x01\n" +
+	"\x13ResourceQueryResult\x12\x19\n" +
+	"\bquery_id\x18\x01 \x01(\tR\aqueryId\x12*\n" +
+	"\x05error\x18\x02 \x01(\v2\x14.agent.v1.QueryErrorR\x05error\x12\x18\n" +
+	"\apayload\x18\x03 \x01(\fR\apayload\x12%\n" +
+	"\x0econtinue_token\x18\x04 \x01(\tR\rcontinueToken\x12\x1c\n" +
+	"\tremaining\x18\x05 \x01(\x05R\tremaining\x12\x1c\n" +
+	"\ttruncated\x18\x06 \x01(\bR\ttruncated\"T\n" +
+	"\n" +
+	"QueryError\x12,\n" +
+	"\x04code\x18\x01 \x01(\x0e2\x18.agent.v1.QueryErrorCodeR\x04code\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage*P\n" +
+	"\tQueryVerb\x12\x1a\n" +
+	"\x16QUERY_VERB_UNSPECIFIED\x10\x00\x12\x13\n" +
+	"\x0fQUERY_VERB_LIST\x10\x01\x12\x12\n" +
+	"\x0eQUERY_VERB_GET\x10\x02*R\n" +
+	"\tQueryView\x12\x1a\n" +
+	"\x16QUERY_VIEW_UNSPECIFIED\x10\x00\x12\x14\n" +
+	"\x10QUERY_VIEW_TABLE\x10\x01\x12\x13\n" +
+	"\x0fQUERY_VIEW_FULL\x10\x02*\xf6\x01\n" +
+	"\x0eQueryErrorCode\x12\x1b\n" +
+	"\x17QUERY_ERROR_UNSPECIFIED\x10\x00\x12\x1d\n" +
+	"\x19QUERY_ERROR_POLICY_DENIED\x10\x01\x12\x1b\n" +
+	"\x17QUERY_ERROR_RBAC_DENIED\x10\x02\x12\x19\n" +
+	"\x15QUERY_ERROR_NOT_FOUND\x10\x03\x12\x17\n" +
+	"\x13QUERY_ERROR_TIMEOUT\x10\x04\x12\x19\n" +
+	"\x15QUERY_ERROR_TOO_LARGE\x10\x05\x12\"\n" +
+	"\x1eQUERY_ERROR_RESOURCE_EXHAUSTED\x10\x06\x12\x18\n" +
+	"\x14QUERY_ERROR_INTERNAL\x10\a2O\n" +
 	"\fAgentService\x12?\n" +
 	"\aConnect\x12\x16.agent.v1.AgentMessage\x1a\x18.agent.v1.GatewayMessage(\x010\x01B>Z<github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1b\x06proto3"
 
@@ -1392,66 +1914,80 @@ func file_proto_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_proto_agent_v1_agent_proto_rawDescData
 }
 
-var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_proto_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_proto_agent_v1_agent_proto_goTypes = []any{
-	(*AgentMessage)(nil),           // 0: agent.v1.AgentMessage
-	(*HandshakeRequest)(nil),       // 1: agent.v1.HandshakeRequest
-	(*AgentCapabilities)(nil),      // 2: agent.v1.AgentCapabilities
-	(*Heartbeat)(nil),              // 3: agent.v1.Heartbeat
-	(*AgentHealth)(nil),            // 4: agent.v1.AgentHealth
-	(*GatewayMessage)(nil),         // 5: agent.v1.GatewayMessage
-	(*HandshakeResponse)(nil),      // 6: agent.v1.HandshakeResponse
-	(*Ack)(nil),                    // 7: agent.v1.Ack
-	(*BackpressureSignal)(nil),     // 8: agent.v1.BackpressureSignal
-	(*Shutdown)(nil),               // 9: agent.v1.Shutdown
-	(*ConfigUpdate)(nil),           // 10: agent.v1.ConfigUpdate
-	(*ConfigSnapshot)(nil),         // 11: agent.v1.ConfigSnapshot
-	(*LogCollectorConfig)(nil),     // 12: agent.v1.LogCollectorConfig
-	(*WatcherConfig)(nil),          // 13: agent.v1.WatcherConfig
-	(*ResourceRef)(nil),            // 14: agent.v1.ResourceRef
-	(*MetricScrapeConfig)(nil),     // 15: agent.v1.MetricScrapeConfig
-	nil,                            // 16: agent.v1.MetricScrapeConfig.ExtraLabelsEntry
-	(*v1.AgentMetadata)(nil),       // 17: common.v1.AgentMetadata
-	(*LogBatch)(nil),               // 18: agent.v1.LogBatch
-	(*StateEvent)(nil),             // 19: agent.v1.StateEvent
-	(*MetricBatch)(nil),            // 20: agent.v1.MetricBatch
-	(*MetricsEvent)(nil),           // 21: agent.v1.MetricsEvent
-	(*PrometheusMetricsEvent)(nil), // 22: agent.v1.PrometheusMetricsEvent
-	(*ResourceCatalog)(nil),        // 23: agent.v1.ResourceCatalog
-	(ResourceKind)(0),              // 24: agent.v1.ResourceKind
+	(QueryVerb)(0),                 // 0: agent.v1.QueryVerb
+	(QueryView)(0),                 // 1: agent.v1.QueryView
+	(QueryErrorCode)(0),            // 2: agent.v1.QueryErrorCode
+	(*AgentMessage)(nil),           // 3: agent.v1.AgentMessage
+	(*HandshakeRequest)(nil),       // 4: agent.v1.HandshakeRequest
+	(*AgentCapabilities)(nil),      // 5: agent.v1.AgentCapabilities
+	(*Heartbeat)(nil),              // 6: agent.v1.Heartbeat
+	(*AgentHealth)(nil),            // 7: agent.v1.AgentHealth
+	(*GatewayMessage)(nil),         // 8: agent.v1.GatewayMessage
+	(*HandshakeResponse)(nil),      // 9: agent.v1.HandshakeResponse
+	(*Ack)(nil),                    // 10: agent.v1.Ack
+	(*BackpressureSignal)(nil),     // 11: agent.v1.BackpressureSignal
+	(*Shutdown)(nil),               // 12: agent.v1.Shutdown
+	(*ConfigUpdate)(nil),           // 13: agent.v1.ConfigUpdate
+	(*ConfigSnapshot)(nil),         // 14: agent.v1.ConfigSnapshot
+	(*LogCollectorConfig)(nil),     // 15: agent.v1.LogCollectorConfig
+	(*WatcherConfig)(nil),          // 16: agent.v1.WatcherConfig
+	(*ResourceRef)(nil),            // 17: agent.v1.ResourceRef
+	(*MetricScrapeConfig)(nil),     // 18: agent.v1.MetricScrapeConfig
+	(*ResourceQuery)(nil),          // 19: agent.v1.ResourceQuery
+	(*ResourceQueryResult)(nil),    // 20: agent.v1.ResourceQueryResult
+	(*QueryError)(nil),             // 21: agent.v1.QueryError
+	nil,                            // 22: agent.v1.MetricScrapeConfig.ExtraLabelsEntry
+	(*v1.AgentMetadata)(nil),       // 23: common.v1.AgentMetadata
+	(*LogBatch)(nil),               // 24: agent.v1.LogBatch
+	(*StateEvent)(nil),             // 25: agent.v1.StateEvent
+	(*MetricBatch)(nil),            // 26: agent.v1.MetricBatch
+	(*MetricsEvent)(nil),           // 27: agent.v1.MetricsEvent
+	(*PrometheusMetricsEvent)(nil), // 28: agent.v1.PrometheusMetricsEvent
+	(*ResourceCatalog)(nil),        // 29: agent.v1.ResourceCatalog
+	(ResourceKind)(0),              // 30: agent.v1.ResourceKind
 }
 var file_proto_agent_v1_agent_proto_depIdxs = []int32{
-	17, // 0: agent.v1.AgentMessage.meta:type_name -> common.v1.AgentMetadata
-	1,  // 1: agent.v1.AgentMessage.handshake:type_name -> agent.v1.HandshakeRequest
-	18, // 2: agent.v1.AgentMessage.logs:type_name -> agent.v1.LogBatch
-	19, // 3: agent.v1.AgentMessage.state:type_name -> agent.v1.StateEvent
-	20, // 4: agent.v1.AgentMessage.metrics:type_name -> agent.v1.MetricBatch
-	3,  // 5: agent.v1.AgentMessage.heartbeat:type_name -> agent.v1.Heartbeat
-	21, // 6: agent.v1.AgentMessage.kube_metrics:type_name -> agent.v1.MetricsEvent
-	22, // 7: agent.v1.AgentMessage.prometheus_metrics:type_name -> agent.v1.PrometheusMetricsEvent
-	23, // 8: agent.v1.AgentMessage.catalog:type_name -> agent.v1.ResourceCatalog
-	2,  // 9: agent.v1.HandshakeRequest.caps:type_name -> agent.v1.AgentCapabilities
-	4,  // 10: agent.v1.Heartbeat.health:type_name -> agent.v1.AgentHealth
-	6,  // 11: agent.v1.GatewayMessage.handshake:type_name -> agent.v1.HandshakeResponse
-	7,  // 12: agent.v1.GatewayMessage.ack:type_name -> agent.v1.Ack
-	10, // 13: agent.v1.GatewayMessage.config:type_name -> agent.v1.ConfigUpdate
-	8,  // 14: agent.v1.GatewayMessage.backpressure:type_name -> agent.v1.BackpressureSignal
-	9,  // 15: agent.v1.GatewayMessage.shutdown:type_name -> agent.v1.Shutdown
-	11, // 16: agent.v1.HandshakeResponse.config:type_name -> agent.v1.ConfigSnapshot
-	11, // 17: agent.v1.ConfigUpdate.config:type_name -> agent.v1.ConfigSnapshot
-	12, // 18: agent.v1.ConfigSnapshot.log_collectors:type_name -> agent.v1.LogCollectorConfig
-	13, // 19: agent.v1.ConfigSnapshot.watchers:type_name -> agent.v1.WatcherConfig
-	15, // 20: agent.v1.ConfigSnapshot.metric_scrapers:type_name -> agent.v1.MetricScrapeConfig
-	24, // 21: agent.v1.WatcherConfig.kinds:type_name -> agent.v1.ResourceKind
-	14, // 22: agent.v1.WatcherConfig.resources:type_name -> agent.v1.ResourceRef
-	16, // 23: agent.v1.MetricScrapeConfig.extra_labels:type_name -> agent.v1.MetricScrapeConfig.ExtraLabelsEntry
-	0,  // 24: agent.v1.AgentService.Connect:input_type -> agent.v1.AgentMessage
-	5,  // 25: agent.v1.AgentService.Connect:output_type -> agent.v1.GatewayMessage
-	25, // [25:26] is the sub-list for method output_type
-	24, // [24:25] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	23, // 0: agent.v1.AgentMessage.meta:type_name -> common.v1.AgentMetadata
+	4,  // 1: agent.v1.AgentMessage.handshake:type_name -> agent.v1.HandshakeRequest
+	24, // 2: agent.v1.AgentMessage.logs:type_name -> agent.v1.LogBatch
+	25, // 3: agent.v1.AgentMessage.state:type_name -> agent.v1.StateEvent
+	26, // 4: agent.v1.AgentMessage.metrics:type_name -> agent.v1.MetricBatch
+	6,  // 5: agent.v1.AgentMessage.heartbeat:type_name -> agent.v1.Heartbeat
+	27, // 6: agent.v1.AgentMessage.kube_metrics:type_name -> agent.v1.MetricsEvent
+	28, // 7: agent.v1.AgentMessage.prometheus_metrics:type_name -> agent.v1.PrometheusMetricsEvent
+	29, // 8: agent.v1.AgentMessage.catalog:type_name -> agent.v1.ResourceCatalog
+	20, // 9: agent.v1.AgentMessage.resource_query_result:type_name -> agent.v1.ResourceQueryResult
+	5,  // 10: agent.v1.HandshakeRequest.caps:type_name -> agent.v1.AgentCapabilities
+	7,  // 11: agent.v1.Heartbeat.health:type_name -> agent.v1.AgentHealth
+	9,  // 12: agent.v1.GatewayMessage.handshake:type_name -> agent.v1.HandshakeResponse
+	10, // 13: agent.v1.GatewayMessage.ack:type_name -> agent.v1.Ack
+	13, // 14: agent.v1.GatewayMessage.config:type_name -> agent.v1.ConfigUpdate
+	11, // 15: agent.v1.GatewayMessage.backpressure:type_name -> agent.v1.BackpressureSignal
+	12, // 16: agent.v1.GatewayMessage.shutdown:type_name -> agent.v1.Shutdown
+	19, // 17: agent.v1.GatewayMessage.resource_query:type_name -> agent.v1.ResourceQuery
+	14, // 18: agent.v1.HandshakeResponse.config:type_name -> agent.v1.ConfigSnapshot
+	14, // 19: agent.v1.ConfigUpdate.config:type_name -> agent.v1.ConfigSnapshot
+	15, // 20: agent.v1.ConfigSnapshot.log_collectors:type_name -> agent.v1.LogCollectorConfig
+	16, // 21: agent.v1.ConfigSnapshot.watchers:type_name -> agent.v1.WatcherConfig
+	18, // 22: agent.v1.ConfigSnapshot.metric_scrapers:type_name -> agent.v1.MetricScrapeConfig
+	30, // 23: agent.v1.WatcherConfig.kinds:type_name -> agent.v1.ResourceKind
+	17, // 24: agent.v1.WatcherConfig.resources:type_name -> agent.v1.ResourceRef
+	22, // 25: agent.v1.MetricScrapeConfig.extra_labels:type_name -> agent.v1.MetricScrapeConfig.ExtraLabelsEntry
+	17, // 26: agent.v1.ResourceQuery.ref:type_name -> agent.v1.ResourceRef
+	0,  // 27: agent.v1.ResourceQuery.verb:type_name -> agent.v1.QueryVerb
+	1,  // 28: agent.v1.ResourceQuery.view:type_name -> agent.v1.QueryView
+	21, // 29: agent.v1.ResourceQueryResult.error:type_name -> agent.v1.QueryError
+	2,  // 30: agent.v1.QueryError.code:type_name -> agent.v1.QueryErrorCode
+	3,  // 31: agent.v1.AgentService.Connect:input_type -> agent.v1.AgentMessage
+	8,  // 32: agent.v1.AgentService.Connect:output_type -> agent.v1.GatewayMessage
+	32, // [32:33] is the sub-list for method output_type
+	31, // [31:32] is the sub-list for method input_type
+	31, // [31:31] is the sub-list for extension type_name
+	31, // [31:31] is the sub-list for extension extendee
+	0,  // [0:31] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_agent_proto_init() }
@@ -1472,6 +2008,7 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*AgentMessage_KubeMetrics)(nil),
 		(*AgentMessage_PrometheusMetrics)(nil),
 		(*AgentMessage_Catalog)(nil),
+		(*AgentMessage_ResourceQueryResult)(nil),
 	}
 	file_proto_agent_v1_agent_proto_msgTypes[5].OneofWrappers = []any{
 		(*GatewayMessage_Handshake)(nil),
@@ -1479,19 +2016,21 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*GatewayMessage_Config)(nil),
 		(*GatewayMessage_Backpressure)(nil),
 		(*GatewayMessage_Shutdown)(nil),
+		(*GatewayMessage_ResourceQuery)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_v1_agent_proto_rawDesc), len(file_proto_agent_v1_agent_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   17,
+			NumEnums:      3,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_proto_agent_v1_agent_proto_goTypes,
 		DependencyIndexes: file_proto_agent_v1_agent_proto_depIdxs,
+		EnumInfos:         file_proto_agent_v1_agent_proto_enumTypes,
 		MessageInfos:      file_proto_agent_v1_agent_proto_msgTypes,
 	}.Build()
 	File_proto_agent_v1_agent_proto = out.File
