@@ -155,6 +155,18 @@ true` (`query.redactSecrets`, which when unset inherits `collect.state.redactSec
 TABLE view (`QUERY_VIEW_TABLE`), which returns printed columns and `PartialObjectMetadata` and
 never includes `data`/`stringData`, or set `redactSecrets: true`.
 
+The TABLE view is not a pass-through of the API server's response. Every row's object goes
+through the same sanitization as the full view before the payload leaves the agent, which
+matters more than it sounds: `PartialObjectMetadata` copies annotations verbatim, and for a
+Secret written with `kubectl apply` the `kubectl.kubernetes.io/last-applied-configuration`
+annotation is a second complete copy of the manifest — base64 values included. That annotation
+and `managedFields` are stripped unconditionally, independent of `redactSecrets`. Rows are
+also filtered against the rule's `names` patterns, so a TABLE listing shows exactly the objects
+the equivalent full-view `list` shows. Printed **cells** are left as the API server rendered
+them; a CRD's `additionalPrinterColumns` can aim a cell at any field its author chose, so cells
+reflect definitions that already exist in the cluster and show what `kubectl get` shows.
+Kubernetes' built-in Secret columns are NAME/TYPE/DATA/AGE, where DATA is a key count.
+
 The per-GVR verdict published in the capability catalog is deliberately coarser than the real
 enforcement: a policy scoped to a namespace or a name prefix cannot be reduced to a single
 boolean for the whole GVR, so that verdict is only a hint for the UI. The full rule evaluation

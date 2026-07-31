@@ -20,6 +20,10 @@ rbac:
   create: true
   # Extra ClusterRole rules appended to the generated role.
   extraRules: []
+  # The generated ClusterRole grants read access to the resource block below
+  # when EITHER collect.state.enabled OR query.enabled is true -- the state
+  # collector and live resource query are independent features that read the
+  # same objects, and gating on one alone left the other with RBAC_DENIED.
 
 podAnnotations: {}
 podLabels: {}

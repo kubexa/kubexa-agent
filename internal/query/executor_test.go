@@ -4,18 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
-	"gopkg.in/yaml.v3"
 
 	"github.com/kubexa/kubexa-agent/internal/k8s"
 	"github.com/kubexa/kubexa-agent/internal/query/policy"
@@ -296,6 +300,50 @@ func TestTimeoutIsClamped(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := clampTimeout(tc.ms); got != tc.want {
 				t.Errorf("clampTimeout(%d) = %v, want %v", tc.ms, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestListClampsTheRequestedLimit uses a real dynamic client against an
+// httptest server rather than the fake one: k8stesting.ListRestrictions
+// records only the selectors, so the fake client cannot observe the page size
+// -- and the page size is the entire point of this test.
+func TestListClampsTheRequestedLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		ask  int32
+		want string
+	}{
+		{"unset falls back to the default", 0, strconv.Itoa(int(defaultLimit))},
+		{"a sane page size is honoured", 50, "50"},
+		{"an absurd page size is clamped", 2_000_000, strconv.Itoa(int(maxLimit))},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got http.Request
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = *r.Clone(r.Context())
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"PodList","items":[]}`))
+			}))
+			t.Cleanup(srv.Close)
+			dyn, err := dynamic.NewForConfig(&rest.Config{Host: srv.URL})
+			if err != nil {
+				t.Fatalf("dynamic client: %v", err)
+			}
+			e := newExecutor(t, allowPodsInStage, dyn)
+
+			q := listQuery("stage")
+			q.Limit = tc.ask
+			if res := e.Execute(context.Background(), q); res.GetError() != nil {
+				t.Fatalf("error = %+v, want nil", res.GetError())
+			}
+
+			if seen := got.URL.Query().Get("limit"); seen != tc.want {
+				t.Errorf("limit = %q, want %q -- an unclamped page size has the agent "+
+					"decode and buffer the whole cluster before maxBytes is consulted",
+					seen, tc.want)
 			}
 		})
 	}
