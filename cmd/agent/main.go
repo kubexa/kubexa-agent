@@ -168,6 +168,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		agentMetrics.Stream(),
 		agentMetrics.Connection(),
 		reconciler,
+		nil, // TODO(task 9): wire the query executor as the QueryResponder
 	)
 	if err != nil {
 		_ = q.Close()
