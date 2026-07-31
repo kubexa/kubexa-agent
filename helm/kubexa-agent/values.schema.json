@@ -27,6 +27,34 @@
         "state": { "type": "object" },
         "metrics": { "type": "object" }
       }
+    },
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "redactSecrets": { "type": "boolean" },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "namespace": { "type": "string" },
+              "resources": { "type": "array", "items": { "type": "string" } },
+              "names": { "type": "array", "items": { "type": "string" } },
+              "verbs": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["list", "get"] }
+              },
+              "label_selector": { "type": "string" },
+              "field_selector": { "type": "string" }
+            },
+            "required": ["resources"]
+          }
+        }
+      }
     }
   }
 }

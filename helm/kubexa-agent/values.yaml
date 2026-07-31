@@ -161,6 +161,16 @@ collect:
     #     extraLabels:
     #       service: my-app
 
+# Live, on-demand resource reads. Omit to inherit collect.state.
+query:
+  enabled: true
+  # redactSecrets: false   # unset inherits collect.state.redactSecrets
+  rules: []
+  #  - namespace: stage
+  #    resources: [pods]
+  #    names: ["be-*"]
+  #    verbs: [list, get]
+
 buffer:
   maxMemoryBytes: 67108864 # 64 MiB
   spillDir: /var/lib/kubexa/spill
