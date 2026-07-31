@@ -54,10 +54,24 @@ jobs:
       - name: Copy chart package
         run: cp "$CHART_TGZ" helm-charts-repo/
 
+      # --merge mevcut girdileri olduğu gibi taşır; yalnızca yeni sürüm eklenir.
+      # Onsuz index her koşuda sıfırdan üretilir ve yayınlanmış tüm sürümlerin
+      # `created` damgası o koşunun saatine eziliyordu — 0.1.0 dün çıkmış gibi
+      # görünüyordu.
+      #
+      # Dikkat: bir sürüm bilerek yayından kaldırıldığında --merge onu eski
+      # index'ten geri getirir. Öyle bir durumda index'i elle, --merge'süz
+      # yeniden üretip commit'leyin; sonraki koşular kaldırılmış hâli taşır.
       - name: Update helm repo index
         run: |
           cd helm-charts-repo
-          helm repo index . --url https://kubexa.github.io/helm-charts
+          if [ -f index.yaml ]; then
+            helm repo index . \
+              --url https://kubexa.github.io/helm-charts \
+              --merge index.yaml
+          else
+            helm repo index . --url https://kubexa.github.io/helm-charts
+          fi
 
       - name: Push to helm-charts repo
         run: |
