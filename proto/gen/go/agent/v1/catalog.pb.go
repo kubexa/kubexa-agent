@@ -109,7 +109,17 @@ type ResourceCapability struct {
 	// and can_watch carry no information. It is NOT the same as being denied: a
 	// wrong "denied" hides a resource and sends the operator hunting through
 	// their own RBAC, while an honest "unknown" lets the UI say so.
-	ProbeFailed   bool `protobuf:"varint,8,opt,name=probe_failed,json=probeFailed,proto3" json:"probe_failed,omitempty"`
+	ProbeFailed bool `protobuf:"varint,8,opt,name=probe_failed,json=probeFailed,proto3" json:"probe_failed,omitempty"`
+	// The agent's own configuration policy, independent of can_list/can_watch
+	// which report the API server's RBAC answer. RBAC may permit what the
+	// cluster owner's config refuses, and the UI needs to tell the two apart.
+	//
+	// These are per-GVR, so they answer "could any query for this type
+	// succeed" -- a policy scoped to a namespace or a name prefix cannot be
+	// reduced to one boolean. The agent still checks every request, so a query
+	// outside the policy's namespace is refused even when policy_list is true.
+	PolicyList    bool `protobuf:"varint,9,opt,name=policy_list,json=policyList,proto3" json:"policy_list,omitempty"`
+	PolicyGet     bool `protobuf:"varint,10,opt,name=policy_get,json=policyGet,proto3" json:"policy_get,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -200,6 +210,20 @@ func (x *ResourceCapability) GetProbeFailed() bool {
 	return false
 }
 
+func (x *ResourceCapability) GetPolicyList() bool {
+	if x != nil {
+		return x.PolicyList
+	}
+	return false
+}
+
+func (x *ResourceCapability) GetPolicyGet() bool {
+	if x != nil {
+		return x.PolicyGet
+	}
+	return false
+}
+
 var File_proto_agent_v1_catalog_proto protoreflect.FileDescriptor
 
 const file_proto_agent_v1_catalog_proto_rawDesc = "" +
@@ -209,7 +233,7 @@ const file_proto_agent_v1_catalog_proto_rawDesc = "" +
 	"\vfingerprint\x18\x01 \x01(\tR\vfingerprint\x12!\n" +
 	"\fcollected_at\x18\x02 \x01(\x03R\vcollectedAt\x126\n" +
 	"\aentries\x18\x03 \x03(\v2\x1c.agent.v1.ResourceCapabilityR\aentries\x12#\n" +
-	"\rfailed_groups\x18\x04 \x03(\tR\ffailedGroups\"\xef\x01\n" +
+	"\rfailed_groups\x18\x04 \x03(\tR\ffailedGroups\"\xaf\x02\n" +
 	"\x12ResourceCapability\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x1a\n" +
@@ -220,7 +244,12 @@ const file_proto_agent_v1_catalog_proto_rawDesc = "" +
 	"namespaced\x12\x19\n" +
 	"\bcan_list\x18\x06 \x01(\bR\acanList\x12\x1b\n" +
 	"\tcan_watch\x18\a \x01(\bR\bcanWatch\x12!\n" +
-	"\fprobe_failed\x18\b \x01(\bR\vprobeFailedB>Z<github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1b\x06proto3"
+	"\fprobe_failed\x18\b \x01(\bR\vprobeFailed\x12\x1f\n" +
+	"\vpolicy_list\x18\t \x01(\bR\n" +
+	"policyList\x12\x1d\n" +
+	"\n" +
+	"policy_get\x18\n" +
+	" \x01(\bR\tpolicyGetB>Z<github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1b\x06proto3"
 
 var (
 	file_proto_agent_v1_catalog_proto_rawDescOnce sync.Once
