@@ -73,8 +73,14 @@ func TestQueryDoesNotBlockTheRecvLoop(t *testing.T) {
 	// A query that never returns must not stop the next gateway message from
 	// being handled. Executing inline would stall acks, backpressure and
 	// shutdown for up to the query timeout.
+	//
+	// It is not enough for handleGatewayMessage to return promptly: a switch
+	// that silently drops the ResourceQuery case would also return promptly,
+	// without ever dispatching anything. So this test requires BOTH that the
+	// responder was actually entered AND that handleGatewayMessage did not
+	// wait for it to finish.
 	block := make(chan struct{})
-	slow := &blockingResponder{release: block}
+	slow := &blockingResponder{release: block, entered: make(chan struct{})}
 	m := newTestManagerWithResponder(t, slow)
 
 	done := make(chan struct{})
@@ -86,14 +92,22 @@ func TestQueryDoesNotBlockTheRecvLoop(t *testing.T) {
 		})
 		close(done)
 	}()
+	defer func() {
+		close(block)
+		<-done
+	}()
+
+	select {
+	case <-slow.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the responder was never entered; the query was not dispatched")
+	}
 
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		close(block)
 		t.Fatal("handleGatewayMessage blocked on the query; it must dispatch asynchronously")
 	}
-	close(block)
 }
 
 func TestNilResponderIsIgnored(t *testing.T) {
@@ -106,9 +120,17 @@ func TestNilResponderIsIgnored(t *testing.T) {
 	})
 }
 
-type blockingResponder struct{ release chan struct{} }
+// blockingResponder blocks in Execute until release is closed. entered is
+// closed as the first statement of Execute so callers can observe that the
+// query was actually dispatched (as opposed to a switch case that was
+// silently dropped and never called Execute at all).
+type blockingResponder struct {
+	release chan struct{}
+	entered chan struct{}
+}
 
 func (b *blockingResponder) Execute(_ context.Context, q *agentv1.ResourceQuery) *agentv1.ResourceQueryResult {
+	close(b.entered)
 	<-b.release
 	return &agentv1.ResourceQueryResult{QueryId: q.GetQueryId()}
 }
