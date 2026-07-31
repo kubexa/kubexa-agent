@@ -129,10 +129,21 @@ message LogCollectorConfig {
 }
 
 message WatcherConfig {
-  string                 id        = 1;
-  string                 namespace = 2; // boş ise tüm namespace
-  repeated ResourceKind  kinds     = 3;
+  string                 id         = 1;
+  string                 namespace  = 2; // boş ise tüm namespace
+  repeated ResourceKind  kinds      = 3;
   int32                  resync_sec = 4;
+  // GVRs to watch, including CRDs. `kinds` cannot express a CRD (it is a
+  // closed enum), so this is the field demand-driven watches use. An agent
+  // that understands both treats them as a union.
+  repeated ResourceRef   resources  = 5;
+}
+
+// ResourceRef names one API resource the way the dynamic client addresses it.
+message ResourceRef {
+  string group    = 1; // "" for the core group
+  string version  = 2;
+  string resource = 3; // plural, e.g. "cronjobs"
 }
 
 message MetricScrapeConfig {

@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/protobuf/proto"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
@@ -86,9 +86,28 @@ type Collector struct {
 	factories []dynamicinformer.DynamicSharedInformerFactory
 	syncs     []cache.InformerSynced
 
+	// runCtx is read by reconcile (via watchMu, see setRunCtx) from the
+	// gateway stream goroutine while Stop can concurrently write it to nil
+	// from the shutdown path. Every access from outside Start/Stop must go
+	// through watchMu — an unlocked read that raced Stop's write could hand
+	// context.WithCancel a nil parent, which panics unconditionally.
 	runCtx context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// watchMu guards watches and runCtx: Reconcile is driven by the gateway
+	// stream while Stop may run concurrently.
+	watchMu sync.Mutex
+	// watches holds the demand-driven informer set, keyed by gvrKey. This is
+	// disjoint from the static-rule factories above: each entry here owns
+	// its own factory and cancel func so it can be stopped independently.
+	watches map[string]*demandWatch
+
+	// newDemandInformer overrides how a demand-driven GVR's factory and
+	// informer are built. Nil in production, where defaultNewDemandInformer
+	// is used; tests substitute this to inject a start failure for one GVR
+	// deterministically.
+	newDemandInformer func(desc k8sresource.Descriptor) (dynamicinformer.DynamicSharedInformerFactory, cache.SharedIndexInformer, error)
 }
 
 // Options configures a Collector instance.
@@ -172,21 +191,23 @@ func (c *Collector) Start(ctx context.Context) error {
 	if c.cancel != nil {
 		return errors.New("state watcher already started")
 	}
-	c.runCtx, c.cancel = context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
+	c.setRunCtx(runCtx)
+	c.cancel = cancel
 
 	c.wg.Add(c.cfg.WorkerCount)
 	for i := 0; i < c.cfg.WorkerCount; i++ {
 		go func() {
 			defer c.wg.Done()
-			c.runWorker(c.runCtx)
+			c.runWorker(runCtx)
 		}()
 	}
 
-	if err := c.startInformers(c.runCtx); err != nil {
-		c.cancel()
+	if err := c.startInformers(runCtx); err != nil {
+		cancel()
 		c.wg.Wait()
 		c.cancel = nil
-		c.runCtx = nil
+		c.clearRunCtx()
 		return err
 	}
 
@@ -215,11 +236,49 @@ func (c *Collector) Stop(ctx context.Context) error {
 	select {
 	case <-done:
 		c.cancel = nil
-		c.runCtx = nil
+		c.clearRunCtx()
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// setRunCtx assigns runCtx under watchMu, the lock reconcile uses to capture
+// it. runCtx is read by reconcile from a different goroutine than the one
+// that calls Start/Stop (the gateway stream vs. the shutdown path), so every
+// write to it — not just reconcile's read — must go through this lock.
+func (c *Collector) setRunCtx(runCtx context.Context) {
+	c.watchMu.Lock()
+	c.runCtx = runCtx
+	c.watchMu.Unlock()
+}
+
+// clearRunCtx nils runCtx and drops the demand-driven watch set, both under
+// watchMu, on the path out of a run (Stop, or Start's own failure cleanup).
+// Every demand-driven informer's context is a child of runCtx, so cancelling
+// runCtx's CancelFunc (already done by the caller) has genuinely stopped all
+// of them — but the watch map entries survive that cancellation on their
+// own; only reconcile's stop step deletes an entry, and cancelling their
+// shared parent doesn't go through that step. Left in place, a Start after
+// this would let a later reconcile treat a GVR still in the map as "leave"
+// (its diff looks at key presence, not liveness) and never restart its
+// now-permanently-dead informer. Clearing the map here makes every entry
+// "missing" again, so the next reconcile that wants it starts it fresh.
+// Named separately from setRunCtx (rather than a nil argument to it) because
+// staticcheck flags passing a literal nil Context, even deliberately.
+func (c *Collector) clearRunCtx() {
+	c.watchMu.Lock()
+	c.runCtx = nil
+	c.watches = nil
+	c.watchMu.Unlock()
+}
+
+// Reconcile converges the demand-driven informer set on desired. Static rules
+// from configuration are unaffected — they are started once at Start and are
+// not part of this set, so an operator's baseline never depends on anyone
+// having a tab open.
+func (c *Collector) Reconcile(ctx context.Context, desired []k8sresource.Descriptor) error {
+	return c.reconcile(ctx, desired)
 }
 
 func (c *Collector) startInformers(ctx context.Context) error {
@@ -372,15 +431,15 @@ func (c *Collector) processItem(ctx context.Context, item workItem) error {
 	labels := ObjectLabels(item.object)
 
 	event := &agentv1.StateEvent{
-		Type:        eventType,
-		Kind:        item.desc.ProtoKind,
-		Name:        name,
-		Namespace:   namespace,
-		Object:      objectJSON,
-		Timestamp:   time.Now().UTC().UnixMilli(),
-		Labels:      labels,
-		ApiVersion:  item.desc.APIVersion(),
-		Resource:    item.desc.GVR.Resource,
+		Type:       eventType,
+		Kind:       item.desc.ProtoKind,
+		Name:       name,
+		Namespace:  namespace,
+		Object:     objectJSON,
+		Timestamp:  time.Now().UTC().UnixMilli(),
+		Labels:     labels,
+		ApiVersion: item.desc.APIVersion(),
+		Resource:   item.desc.GVR.Resource,
 	}
 
 	msg := &agentv1.AgentMessage{
