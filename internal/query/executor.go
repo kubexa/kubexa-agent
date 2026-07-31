@@ -178,9 +178,9 @@ func (e *Executor) list(
 	decision policy.Decision,
 	q *agentv1.ResourceQuery,
 ) *agentv1.ResourceQueryResult {
-	// QUERY_VIEW_TABLE is served by listTable, which Task 6 adds. Until then
-	// every view takes this FULL path, which keeps this task independently
-	// buildable and testable.
+	if q.GetView() == agentv1.QueryView_QUERY_VIEW_TABLE {
+		return e.listTable(ctx, ref, decision, q)
+	}
 	limit := q.GetLimit()
 	if limit <= 0 {
 		limit = e.defLimit
