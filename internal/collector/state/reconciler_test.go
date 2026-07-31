@@ -95,6 +95,43 @@ func TestReconcileToEmptyStopsEverything(t *testing.T) {
 	}
 }
 
+// A demand-driven informer must outlive the call that started it. The stream
+// manager reconciles while handling one gateway message, and if that message's
+// context parents the informers, every watch dies the instant the handler
+// returns -- silently, with no error and no data.
+func TestInformersOutliveTheReconcileContext(t *testing.T) {
+	r := newTestReconciler(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := r.reconcile(ctx, []descriptorFor{desc("batch", "v1", "cronjobs")}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+
+	if !r.running("batch/v1/cronjobs") {
+		t.Fatal("informer stopped when the reconcile context was cancelled")
+	}
+}
+
+// Reconcile called before Start has no collector lifetime to parent new
+// informers on. Starting one anyway would either use the per-call ctx (the
+// exact bug above) or silently fall back to context.Background(), which
+// leaks the informer past the collector's own Stop. Neither is acceptable,
+// so this must be a caller-level error, not a skipped-and-logged GVR.
+func TestReconcileErrorsWhenCollectorNotStarted(t *testing.T) {
+	r := newTestReconciler(t)
+	r.runCtx = nil // simulate Reconcile called before Start
+
+	err := r.reconcile(context.Background(), []descriptorFor{desc("batch", "v1", "cronjobs")})
+	if err == nil {
+		t.Fatal("reconcile succeeded with no collector run context, want an error")
+	}
+	if r.running("batch/v1/cronjobs") {
+		t.Fatal("informer started despite reconcile returning an error")
+	}
+}
+
 // descriptorFor is a local alias so the test bodies above (the spec) read
 // without a package-qualified type name.
 type descriptorFor = k8sresource.Descriptor
@@ -120,18 +157,25 @@ func newTestReconciler(t *testing.T) *Collector {
 		t.Fatalf("newMetrics: %v", err)
 	}
 
+	// runCtx stands in for the collector's own Start/Stop lifetime, which
+	// started informers must be parented on — never on a reconcile call's own
+	// ctx argument. See TestInformersOutliveTheReconcileContext.
+	runCtx, cancelRun := context.WithCancel(context.Background())
+
 	c := &Collector{
 		cfg:     Config{ResyncPeriod: 0},
 		dynamic: dynClient,
 		log:     logger.New("reconciler-test"),
 		metrics: m,
 		workCh:  make(chan workItem, 100),
+		runCtx:  runCtx,
 	}
 
 	t.Cleanup(func() {
 		// Stop everything the test started so no informer goroutine outlives
 		// the test (matters for -race, which watches goroutine lifetimes).
 		_ = c.reconcile(context.Background(), nil)
+		cancelRun()
 	})
 
 	return c
@@ -149,12 +193,19 @@ func (c *Collector) failFor(key string) {
 }
 
 // running reports whether a demand-driven informer for key (in
-// "group/version/resource" form) is currently registered.
+// "group/version/resource" form) is currently registered AND actually still
+// running. Map presence alone is not enough: canceling an informer's context
+// stops its Run loop without touching the watch map (only reconcile's own
+// stop step deletes the entry), so a helper that only checked the map would
+// not notice an informer parented on the wrong context dying underneath it.
 func (c *Collector) running(key string) bool {
 	c.watchMu.Lock()
 	defer c.watchMu.Unlock()
-	_, ok := c.watches[key]
-	return ok
+	w, ok := c.watches[key]
+	if !ok {
+		return false
+	}
+	return !w.informer.IsStopped()
 }
 
 // handle returns the informer instance registered for key, or nil. Two calls

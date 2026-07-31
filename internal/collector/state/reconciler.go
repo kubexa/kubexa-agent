@@ -30,6 +30,11 @@ type demandWatch struct {
 // everything else untouched. Restarting an informer that is staying would
 // resync its whole cache, and the pipeline would write that resync as a
 // burst of updates indistinguishable from real cluster change.
+//
+// ctx scopes the reconcile operation itself, not any informer it starts: it
+// is checked up front and again between starts so a slow or abandoned
+// reconcile can bail out early. It is never passed on as an informer's
+// parent context — see startDemandWatch for why that distinction matters.
 func (c *Collector) reconcile(ctx context.Context, desired []k8sresource.Descriptor) error {
 	if c.dynamic == nil {
 		return errors.New("reconcile: dynamic client is required")
@@ -76,9 +81,25 @@ func (c *Collector) reconcile(ctx context.Context, desired []k8sresource.Descrip
 		return nil
 	}
 
+	// Starting requires a collector lifetime to parent the new informers on.
+	// Reconcile called before Start (c.runCtx unset) would otherwise fall
+	// back to something like context.Background(), which is never cancelled
+	// by Stop and leaks the informer past the collector's own shutdown. Fail
+	// loudly instead.
+	if c.runCtx == nil {
+		return errors.New("reconcile: collector has not been started")
+	}
+
 	emitter := newEventEmitter(c.workCh, c.metrics)
 	for _, desc := range toStart {
-		if err := c.startDemandWatch(ctx, emitter, desc); err != nil {
+		if err := ctx.Err(); err != nil {
+			// The reconcile operation itself was abandoned; whatever we
+			// already started above stays running (parented on c.runCtx,
+			// not on ctx) and will be picked up as "leave" or "stop" by the
+			// next reconcile.
+			return err
+		}
+		if err := c.startDemandWatch(emitter, desc); err != nil {
 			// A GVR that fails to start (e.g. a CRD deleted between the
 			// catalog sweep and the watch request) must not take the rest
 			// of the reconcile down with it.
@@ -95,7 +116,16 @@ func (c *Collector) reconcile(ctx context.Context, desired []k8sresource.Descrip
 // the watch map. Demand-driven watches are cluster-wide (metav1.NamespaceAll)
 // regardless of any namespace scoping static rules use — a viewer's tab is
 // not namespace-scoped.
-func (c *Collector) startDemandWatch(parentCtx context.Context, emitter eventEmitter, desc k8sresource.Descriptor) error {
+//
+// The informer is parented on c.runCtx — the collector's own Start/Stop
+// lifetime — never on reconcile's ctx argument. reconcile runs once per
+// gateway message; if the informer's context were that per-message ctx, it
+// would be cancelled the instant the call returns, and the watch would start
+// and die in the same instant — silently, with no error and no log, just no
+// data ever arriving. A demand-driven watch must outlive the call that
+// started it: it lives until it is reconciled away or the collector stops.
+// Do not "simplify" this back to taking a parent context argument.
+func (c *Collector) startDemandWatch(emitter eventEmitter, desc k8sresource.Descriptor) error {
 	build := c.newDemandInformer
 	if build == nil {
 		build = c.defaultNewDemandInformer
@@ -106,7 +136,7 @@ func (c *Collector) startDemandWatch(parentCtx context.Context, emitter eventEmi
 		return err
 	}
 
-	wctx, cancel := context.WithCancel(parentCtx)
+	wctx, cancel := context.WithCancel(c.runCtx)
 
 	if _, err := informer.AddEventHandler(emitter.handlersFor(desc)); err != nil {
 		cancel()
