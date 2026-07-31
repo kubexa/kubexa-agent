@@ -7,16 +7,20 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/flowcontrol"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
 
@@ -433,4 +437,104 @@ func podMetricFrom(item metricsv1beta1.PodMetrics) PodMetric {
 		Timestamp:     item.Timestamp.Time,
 		Window:        item.Window.Duration,
 	}
+}
+
+// QueryClients bundles the two Kubernetes clients the live-query path needs.
+//
+// Both are built from the same REST config but with their own QPS/burst
+// budget, for the same reason NewProbeClientset exists: ad-hoc user queries
+// must not drain the token bucket the informers share. A user hammering
+// refresh should slow down their own queries, not stop data collection.
+type QueryClients struct {
+	// Dynamic serves the FULL view: whole objects for any GVR, CRDs included.
+	Dynamic dynamic.Interface
+	// RESTFor serves the TABLE view. Table rendering is an Accept-header
+	// negotiation on the raw request, and dynamic.Interface exposes no way to
+	// set one, so the executor needs the REST client underneath.
+	RESTFor func(gv schema.GroupVersion) (rest.Interface, error)
+}
+
+// NewQueryClients builds the live-query clients. Zero qps/burst takes the same
+// budget as the main client while still getting a separate limiter.
+func NewQueryClients(cfg *k8sconfig.Config, qps float32, burst int) (*QueryClients, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("k8s query client: config is required")
+	}
+	restCfg, err := resolveRESTConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("k8s query client: resolve rest config: %w", err)
+	}
+	if qps > 0 {
+		restCfg.QPS = qps
+	}
+	if burst > 0 {
+		restCfg.Burst = burst
+	}
+	return newQueryClientsFromRest(restCfg)
+}
+
+// newQueryClientsFromRest is the seam tests use to supply a REST config
+// without a cluster.
+func newQueryClientsFromRest(restCfg *rest.Config) (*QueryClients, error) {
+	// One rate limiter, shared by the dynamic client and every per-GroupVersion
+	// REST client built below. Setting it explicitly is the whole budget.
+	//
+	// rest.RESTClientFor builds its OWN token bucket whenever
+	// config.RateLimiter is nil (client-go rest/config.go:370-383), so leaving
+	// it unset gives every GroupVersion an independent full-strength budget:
+	// a query sweep touching N resource kinds would get N buckets and multiply
+	// the ceiling by N, defeating the only reason this constructor exists.
+	// kubernetes.NewForConfig avoids this by setting the limiter once
+	// (clientset.go:498-502), which is what makes NewProbeClientset's separate
+	// budget real rather than nominal.
+	//
+	// Copy first: the limiter must not be attached to the caller's config.
+	restCfg = rest.CopyConfig(restCfg)
+	if restCfg.RateLimiter == nil {
+		qps, burst := restCfg.QPS, restCfg.Burst
+		if qps == 0 {
+			qps = rest.DefaultQPS
+		}
+		if burst == 0 {
+			burst = rest.DefaultBurst
+		}
+		if qps > 0 {
+			restCfg.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(qps, burst)
+		}
+	}
+
+	dyn, err := dynamic.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("k8s query client: create dynamic client: %w", err)
+	}
+
+	var mu sync.Mutex
+	cache := map[schema.GroupVersion]rest.Interface{}
+
+	restFor := func(gv schema.GroupVersion) (rest.Interface, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if c, ok := cache[gv]; ok {
+			return c, nil
+		}
+		cfg := rest.CopyConfig(restCfg)
+		cfg.GroupVersion = &gv
+		// The core group lives under /api; every other group under /apis.
+		// Swapping these yields 404s at request time only, on every core
+		// resource, which is a miserable thing to debug.
+		if gv.Group == "" {
+			cfg.APIPath = "/api"
+		} else {
+			cfg.APIPath = "/apis"
+		}
+		cfg.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
+		c, err := rest.RESTClientFor(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("k8s query client: rest client for %s: %w", gv, err)
+		}
+		cache[gv] = c
+		return c, nil
+	}
+
+	return &QueryClients{Dynamic: dyn, RESTFor: restFor}, nil
 }

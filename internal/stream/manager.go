@@ -41,6 +41,13 @@ type WatchReconciler interface {
 	Reconcile(ctx context.Context, desired []k8sresource.Descriptor) error
 }
 
+// QueryResponder answers a live resource query from the gateway. It is
+// declared here rather than imported so this package does not depend on
+// internal/query; *query.Executor satisfies it structurally.
+type QueryResponder interface {
+	Execute(ctx context.Context, q *agentv1.ResourceQuery) *agentv1.ResourceQueryResult
+}
+
 // Manager manages the outbound gRPC stream to the Kubexa Gateway.
 type Manager interface {
 	// Run starts the connection loop. Blocks until ctx is cancelled.
@@ -88,6 +95,12 @@ type streamManager struct {
 	// disabled) — config updates are logged but no reconcile is attempted.
 	reconciler WatchReconciler
 
+	// responder answers live resource queries from the gateway. Set once at
+	// construction and read-only afterward. Nil is valid — queries are
+	// refused (handleResourceQuery is a no-op) when this agent does not run
+	// live resource queries.
+	responder QueryResponder
+
 	sendCh   chan *agentv1.AgentMessage
 	throttle throttleGate
 
@@ -134,7 +147,8 @@ func (g *throttleGate) throttled() bool {
 
 // New constructs a stream Manager wired to cfg, queue, logger, and shared
 // agent metrics. reconciler receives every gateway watch config update; pass
-// nil if this agent does not run demand-driven state collection.
+// nil if this agent does not run demand-driven state collection. responder
+// answers live resource queries; pass nil to refuse them.
 func New(
 	cfg *config.Config,
 	q queue.Queue,
@@ -142,6 +156,7 @@ func New(
 	streamMetrics *agentmetrics.StreamMetrics,
 	connMetrics *agentmetrics.ConnectionMetrics,
 	reconciler WatchReconciler,
+	responder QueryResponder,
 ) (Manager, error) {
 	if cfg == nil {
 		return nil, errors.New("config is nil")
@@ -163,6 +178,7 @@ func New(
 		streamMetrics: streamMetrics,
 		connMetrics:   connMetrics,
 		reconciler:    reconciler,
+		responder:     responder,
 		rng:           rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
 		sleep:         defaultSleeper,
 		sendCh:        make(chan *agentv1.AgentMessage, defaultSendChannelSize),
@@ -681,8 +697,45 @@ func (m *streamManager) handleGatewayMessage(ctx context.Context, msg *agentv1.G
 		)
 	case *agentv1.GatewayMessage_Ack:
 		// delivery acks handled by higher layers when wired
+	case *agentv1.GatewayMessage_ResourceQuery:
+		m.handleResourceQuery(ctx, p.ResourceQuery)
 	default:
 	}
+}
+
+// handleResourceQuery answers a live query on its own goroutine.
+//
+// Running it inline would block the recv loop -- and therefore acks,
+// backpressure and shutdown -- for as long as the query takes, which the
+// executor allows to be 30 seconds. The executor's own concurrency gate is
+// what bounds how many of these goroutines can be doing real work at once.
+//
+// This goroutine carries the session ctx but is deliberately not registered
+// with sessionWG, so endSession's sessionWG.Wait() does not wait for it to
+// finish. A query reply is session-scoped: once the session ends the
+// gateway's stream is gone, so a result that arrives after reconnect has
+// nowhere useful to go. Draining it on shutdown would only delay teardown
+// for no benefit; ctx cancellation (and Send's own failure once the stream
+// is torn down) is what stops it from doing pointless work.
+func (m *streamManager) handleResourceQuery(ctx context.Context, q *agentv1.ResourceQuery) {
+	if m.responder == nil || q == nil {
+		return
+	}
+	go func() {
+		result := m.responder.Execute(ctx, q)
+		if result == nil {
+			return
+		}
+		msg := &agentv1.AgentMessage{
+			MessageId: uuid.NewString(),
+			Payload:   &agentv1.AgentMessage_ResourceQueryResult{ResourceQueryResult: result},
+		}
+		if err := m.Send(ctx, msg); err != nil {
+			m.log.Err(err).Warn("failed to send resource query result",
+				logger.F("query_id", q.GetQueryId()),
+			)
+		}
+	}()
 }
 
 // reconcileWatchConfig maps every WatcherConfig.Resources entry across every

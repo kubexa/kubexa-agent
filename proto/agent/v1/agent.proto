@@ -37,6 +37,7 @@ message AgentMessage {
     MetricsEvent           kube_metrics       = 8;
     PrometheusMetricsEvent prometheus_metrics = 9;
     ResourceCatalog        catalog            = 10;
+    ResourceQueryResult    resource_query_result = 11;
   }
 }
 
@@ -77,6 +78,7 @@ message GatewayMessage {
     ConfigUpdate       config       = 4;
     BackpressureSignal backpressure = 5;
     Shutdown           shutdown     = 6;
+    ResourceQuery      resource_query = 7;
   }
 }
 
@@ -151,4 +153,83 @@ message MetricScrapeConfig {
   string endpoint        = 2; // scrape URL
   int32  interval_sec    = 3;
   map<string, string> extra_labels = 4;
+}
+
+// ─── Live resource query ────────────────────────────────────────────────────
+
+// ResourceQuery asks the agent to read one resource type right now and reply.
+// It is the pull counterpart to WatcherConfig: nothing is started, nothing is
+// remembered, and the agent holds no state between queries.
+message ResourceQuery {
+  string      query_id       = 1;  // correlates the reply; opaque to the agent
+  ResourceRef ref            = 2;
+  QueryVerb   verb           = 3;
+  QueryView   view           = 4;
+  string      namespace      = 5;  // "" = all namespaces / cluster-scoped
+  string      name           = 6;  // required for GET, ignored for LIST
+  string      label_selector = 7;
+  string      field_selector = 8;
+  int32       limit          = 9;  // page size; 0 uses the agent default
+  string      continue_token = 10; // opaque Kubernetes continue token
+  int32       timeout_ms     = 11; // clamped by the agent to [1s, 30s]
+}
+
+enum QueryVerb {
+  QUERY_VERB_UNSPECIFIED = 0;
+  QUERY_VERB_LIST        = 1;
+  QUERY_VERB_GET         = 2;
+}
+
+// QueryView selects the response shape. TABLE uses the API server's own
+// server-side printing, which yields kubectl's columns -- including the
+// additionalPrinterColumns a CRD defines -- at a fraction of the payload size.
+enum QueryView {
+  QUERY_VIEW_UNSPECIFIED = 0;
+  QUERY_VIEW_TABLE       = 1;
+  QUERY_VIEW_FULL        = 2;
+}
+
+// ResourceQueryResult is always sent, success or failure. A gateway that has
+// forgotten the query_id drops the reply; the agent never withholds one.
+message ResourceQueryResult {
+  string     query_id       = 1;
+  QueryError error          = 2;  // when set, payload is empty
+  bytes      payload        = 3;  // JSON: a meta.k8s.io/v1 Table, or an object array
+
+  // continue_token and remaining are populated for QUERY_VIEW_FULL only.
+  //
+  // On QUERY_VIEW_TABLE they are always empty/zero even mid-pagination: the
+  // API server carries that state inside the Table body itself, and it is
+  // left there. A TABLE consumer must read metadata.continue and
+  // metadata.remainingItemCount from the payload JSON. Reading an empty
+  // continue_token here as "no more pages" truncates every TABLE listing at
+  // its first page.
+  //
+  // metadata.remainingItemCount is an upper bound, not an exact count: the
+  // agent drops rows the config policy's name patterns exclude, and that
+  // filtering happens after the API server has already paged and counted.
+  // QUERY_VIEW_FULL's remaining field carries the same caveat.
+  string continue_token = 4;
+  int32  remaining      = 5;
+
+  bool truncated = 6;  // response size cap was reached
+}
+
+message QueryError {
+  QueryErrorCode code    = 1;
+  string         message = 2;
+}
+
+// POLICY_DENIED and RBAC_DENIED are separate on purpose: they send the
+// operator to two different files -- the agent's own config versus the
+// ClusterRole -- and one merged code sends half of them to the wrong one.
+enum QueryErrorCode {
+  QUERY_ERROR_UNSPECIFIED        = 0;
+  QUERY_ERROR_POLICY_DENIED      = 1;
+  QUERY_ERROR_RBAC_DENIED        = 2;
+  QUERY_ERROR_NOT_FOUND          = 3;
+  QUERY_ERROR_TIMEOUT            = 4;
+  QUERY_ERROR_TOO_LARGE          = 5;
+  QUERY_ERROR_RESOURCE_EXHAUSTED = 6;
+  QUERY_ERROR_INTERNAL           = 7;
 }

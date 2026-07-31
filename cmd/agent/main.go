@@ -25,6 +25,8 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/k8s/k8sconfig"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	"github.com/kubexa/kubexa-agent/internal/metrics"
+	"github.com/kubexa/kubexa-agent/internal/query"
+	"github.com/kubexa/kubexa-agent/internal/query/policy"
 	"github.com/kubexa/kubexa-agent/internal/queue"
 	"github.com/kubexa/kubexa-agent/internal/stream"
 	"github.com/kubexa/kubexa-agent/pkg/buildinfo"
@@ -141,7 +143,38 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		logger.F("metrics_enabled", cfg.Collect.Metrics.Enabled),
 	)
 
-	collectors, err := buildCollectors(cfg, kube, q, mainReg, log)
+	// Compiled once and shared: the executor enforces it per request, and the
+	// capability reporter publishes its per-GVR verdict to the UI.
+	queryPolicy, err := policy.Compile(cfg)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("query policy: %w", err)
+	}
+
+	// The live-query path gets its own client pair for the same reason the
+	// capability probe does: an ad-hoc user query must not drain the
+	// rate-limit token bucket the informers share. Zero QPS/burst means the
+	// same budget as the main client, but through a SEPARATE limiter.
+	queryClients, err := k8s.NewQueryClients(&k8sconfig.Config{}, 0, 0)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("query clients: %w", err)
+	}
+
+	// Built even when query.enabled is false: the policy answers POLICY_DENIED,
+	// which is a diagnosis. A nil responder would just drop the query.
+	queryExecutor, err := query.New(query.Options{
+		Clients:    *queryClients,
+		Policy:     queryPolicy,
+		Logger:     logger.New("query", logger.WithAgentID(cfg.Agent.AgentID)),
+		Registerer: mainReg,
+	})
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("query executor: %w", err)
+	}
+
+	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy)
 	if err != nil {
 		_ = q.Close()
 		return fmt.Errorf("collectors: %w", err)
@@ -168,6 +201,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		agentMetrics.Stream(),
 		agentMetrics.Connection(),
 		reconciler,
+		queryExecutor,
 	)
 	if err != nil {
 		_ = q.Close()
@@ -273,6 +307,7 @@ func buildCollectors(
 	q queue.Queue,
 	reg prometheus.Registerer,
 	log *logger.Logger,
+	queryPolicy *policy.Policy,
 ) ([]Collector, error) {
 	var collectors []Collector
 
@@ -330,6 +365,7 @@ func buildCollectors(
 				AgentId:   cfg.Agent.AgentID,
 			},
 			Logger: logger.New("capability-reporter", logger.WithAgentID(cfg.Agent.AgentID)),
+			Policy: queryPolicy,
 		})
 		if err != nil {
 			return nil, err

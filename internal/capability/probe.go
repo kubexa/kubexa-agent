@@ -15,6 +15,10 @@ type Capability struct {
 	CanList     bool
 	CanWatch    bool
 	ProbeFailed bool
+	// PolicyList and PolicyGet come from the agent's own configuration, not
+	// from the API server. RBAC may permit what the cluster owner refuses.
+	PolicyList bool
+	PolicyGet  bool
 }
 
 const defaultProbeWorkers = 8
