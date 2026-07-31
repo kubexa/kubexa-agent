@@ -102,14 +102,19 @@ helm-template: ## render chart manifests (debug)
 		--set gateway.tls=false \
 		--set persistence.enabled=false
 
-helm-package: ## package helm chart to dist/
-	@mkdir -p dist
-	helm package helm/kubexa-agent -d dist \
-		--version $(shell grep '^version:' helm/kubexa-agent/Chart.yaml | awk '{print $$2}')
-	@echo "✓ chart packaged to dist/"
+CHART_NAME    := $(shell grep '^name:' helm/kubexa-agent/Chart.yaml | awk '{print $$2}')
+CHART_VERSION := $(shell grep '^version:' helm/kubexa-agent/Chart.yaml | awk '{print $$2}')
+CHART_TGZ     := dist/$(CHART_NAME)-$(CHART_VERSION).tgz
 
+helm-package: ## package helm chart to dist/
+	@rm -rf dist && mkdir -p dist
+	helm package helm/kubexa-agent -d dist --version $(CHART_VERSION)
+	@echo "✓ chart packaged to $(CHART_TGZ)"
+
+# Glob kullanmayın: `helm push` ikinci argümanı remote sayar, dist/ içindeki
+# ikinci bir .tgz "scheme prefix missing from remote" hatasını geri getirir.
 helm-push-oci: helm-package ## push chart to GHCR OCI (requires helm registry login)
-	helm push dist/kubexa-agent-*.tgz oci://ghcr.io/kubexa/charts
+	helm push $(CHART_TGZ) oci://ghcr.io/kubexa/charts
 
 ## ─────────────────────────────────────────
 ## Clean

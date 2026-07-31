@@ -38,19 +38,24 @@ jobs:
       - name: Lint chart
         run: helm lint $CHART_PATH
 
-      - name: Get chart version
+      - name: Get chart name and version
         id: chart_version
         run: |
-          VERSION=$(grep '^version:' $CHART_PATH/Chart.yaml | awk '{print $2}')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "name=$(grep '^name:' $CHART_PATH/Chart.yaml | awk '{print $2}')" >> $GITHUB_OUTPUT
+          echo "version=$(grep '^version:' $CHART_PATH/Chart.yaml | awk '{print $2}')" >> $GITHUB_OUTPUT
 
       - name: Package chart
         run: |
-          mkdir -p dist
+          rm -rf dist && mkdir -p dist
           helm package $CHART_PATH \
             --destination dist \
             --version ${{ steps.chart_version.outputs.version }}
 
+      # Glob değil, tam dosya adı: `helm push` ikinci argümanı remote olarak
+      # okur ve fazlasını sessizce yok sayar, yani dist/ içinde ikinci bir
+      # .tgz olduğu anda remote yerine o tarball geçer.
       - name: Push to GHCR (OCI)
         run: |
-          helm push dist/*.tgz oci://$REGISTRY/${IMAGE_NAMESPACE}/charts
+          helm push \
+            "dist/${{ steps.chart_version.outputs.name }}-${{ steps.chart_version.outputs.version }}.tgz" \
+            "oci://$REGISTRY/${IMAGE_NAMESPACE}/charts"
