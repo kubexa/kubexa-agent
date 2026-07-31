@@ -20,7 +20,14 @@ rules:
     verbs: ["get"]
   {{- end }}
 
-  {{- if .Values.collect.state.enabled }}
+  {{- /*
+    Read access for both the state collector (continuous watches) and live
+    resource query (on-demand reads). The two are independent in the agent --
+    cmd/agent/main.go builds the query executor regardless of collect.state --
+    so gating these rules on collect.state.enabled alone left an installation
+    with state disabled and query enabled taking RBAC_DENIED on every query.
+  */ -}}
+  {{- if or .Values.collect.state.enabled .Values.query.enabled }}
   - apiGroups: [""]
     resources:
       - pods

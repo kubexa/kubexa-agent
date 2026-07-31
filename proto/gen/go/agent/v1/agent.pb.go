@@ -1609,11 +1609,16 @@ type ResourceQueryResult struct {
 	// continue_token and remaining are populated for QUERY_VIEW_FULL only.
 	//
 	// On QUERY_VIEW_TABLE they are always empty/zero even mid-pagination: the
-	// API server carries that state inside the Table body itself, and lifting
-	// it out would mean decoding and re-encoding every response. A TABLE
-	// consumer must read metadata.continue and metadata.remainingItemCount
-	// from the payload JSON. Reading an empty continue_token here as "no more
-	// pages" truncates every TABLE listing at its first page.
+	// API server carries that state inside the Table body itself, and it is
+	// left there. A TABLE consumer must read metadata.continue and
+	// metadata.remainingItemCount from the payload JSON. Reading an empty
+	// continue_token here as "no more pages" truncates every TABLE listing at
+	// its first page.
+	//
+	// metadata.remainingItemCount is an upper bound, not an exact count: the
+	// agent drops rows the config policy's name patterns exclude, and that
+	// filtering happens after the API server has already paged and counted.
+	// QUERY_VIEW_FULL's remaining field carries the same caveat.
 	ContinueToken string `protobuf:"bytes,4,opt,name=continue_token,json=continueToken,proto3" json:"continue_token,omitempty"`
 	Remaining     int32  `protobuf:"varint,5,opt,name=remaining,proto3" json:"remaining,omitempty"`
 	Truncated     bool   `protobuf:"varint,6,opt,name=truncated,proto3" json:"truncated,omitempty"` // response size cap was reached

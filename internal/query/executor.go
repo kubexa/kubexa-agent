@@ -32,6 +32,12 @@ const (
 	maxTimeout      = 30 * time.Second
 	defaultMaxBytes = 8 << 20
 	defaultLimit    = int32(500)
+	// maxLimit caps the page size a requester may ask for. Without it, a
+	// query carrying limit: 2000000 has the agent ask the API server for two
+	// million objects and decode and buffer every one of them BEFORE maxBytes
+	// is ever consulted -- the byte cap runs on the assembled result, far too
+	// late to save a memory-limited pod in the customer's cluster.
+	maxLimit = int32(5000)
 )
 
 // Options configures an Executor. Only Clients and Policy are required.
@@ -73,6 +79,12 @@ func New(opts Options) (*Executor, error) {
 	}
 	if opts.DefaultLimit <= 0 {
 		opts.DefaultLimit = defaultLimit
+	}
+	// The configured default is capped by the same ceiling as a request's
+	// limit; an operator cannot opt their own pod into the OOM maxLimit exists
+	// to prevent.
+	if opts.DefaultLimit > maxLimit {
+		opts.DefaultLimit = maxLimit
 	}
 	return &Executor{
 		clients:  opts.Clients,
@@ -118,7 +130,12 @@ func (e *Executor) execute(ctx context.Context, q *agentv1.ResourceQuery) *agent
 	// asserts the API client recorded zero calls for a denied request.
 	decision := e.policy.Decide(ref, verb, q.GetNamespace(), q.GetName())
 	if !decision.Allowed {
-		e.metrics.observe(string(verb), ref.Resource, view, "policy_denied", 0, 0)
+		// unknownResource, not ref.Resource: nothing has validated the string
+		// off the wire at this point. See metrics.go for why recording it
+		// would be an unbounded, permanent allocation inside the customer's
+		// cluster. Everything past this gate matched a rule the owner wrote,
+		// so those paths keep the real resource.
+		e.metrics.observe(string(verb), unknownResource, view, "policy_denied", 0, 0)
 		// Logged at debug, not warn: a denial is the policy working, not a
 		// fault. It is here so an operator debugging "why can't I see this
 		// type" gets the reason without enabling anything exotic.
@@ -181,14 +198,10 @@ func (e *Executor) list(
 	if q.GetView() == agentv1.QueryView_QUERY_VIEW_TABLE {
 		return e.listTable(ctx, ref, decision, q)
 	}
-	limit := q.GetLimit()
-	if limit <= 0 {
-		limit = e.defLimit
-	}
 	opts := metav1.ListOptions{
 		LabelSelector: andSelector(decision.LabelSelector, q.GetLabelSelector()),
 		FieldSelector: andSelector(decision.FieldSelector, q.GetFieldSelector()),
-		Limit:         int64(limit),
+		Limit:         int64(e.clampLimit(q.GetLimit())),
 		Continue:      q.GetContinueToken(),
 	}
 
@@ -309,6 +322,20 @@ func clampTimeout(ms int32) time.Duration {
 		return maxTimeout
 	}
 	return d
+}
+
+// clampLimit resolves the page size actually asked of the API server: the
+// configured default when the request set none, and never more than maxLimit.
+// Both list paths go through it -- a cap only the FULL view honours is not a
+// cap.
+func (e *Executor) clampLimit(limit int32) int32 {
+	if limit <= 0 {
+		return e.defLimit
+	}
+	if limit > maxLimit {
+		return maxLimit
+	}
+	return limit
 }
 
 // andSelector conjoins the policy's selector with the request's, so a

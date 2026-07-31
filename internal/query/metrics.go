@@ -2,6 +2,18 @@ package query
 
 import "github.com/prometheus/client_golang/prometheus"
 
+// unknownResource is the resource label recorded for a query that never got
+// past the policy gate.
+//
+// ref.Resource arrives on the wire and is attacker-chosen until a policy rule
+// matches it. Feeding it unvalidated into a CounterVec and two HistogramVecs
+// lets anyone who can reach the stream mint a metric child per bogus string,
+// and Prometheus collectors never evict children -- the agent's RSS would
+// climb until the pod is OOM-killed, inside the customer's cluster. A fixed
+// placeholder keeps the denial series bounded; an allowed query keeps its real
+// resource, whose cardinality is bounded by the owner's own rule set.
+const unknownResource = "other"
+
 // recorders holds the query path's Prometheus instruments. All are optional:
 // a nil recorders is valid and every method is a no-op, so tests and the
 // dev path need no registry.
