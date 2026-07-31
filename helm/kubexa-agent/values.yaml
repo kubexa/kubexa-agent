@@ -161,7 +161,28 @@ collect:
     #     extraLabels:
     #       service: my-app
 
-# Live, on-demand resource reads. Omit to inherit collect.state.
+# Live, on-demand resource reads requested by the Kubexa platform — distinct
+# from collect.state, which governs continuous streaming. Where collect.state
+# pushes a running feed of changes, query answers a single point-in-time
+# question asked by the UI (e.g. "show me this Deployment now").
+#
+# Omitting this whole section inherits collect.state entirely. Inheritance is
+# PER-FIELD, not all-or-nothing: setting only redactSecrets here still
+# inherits rules from collect.state.rules, and vice versa.
+#
+# rules: [] (the default below) inherits collect.state.rules too — it does
+# NOT mean "deny everything". To actually deny all live queries, set
+# enabled: false instead.
+#
+# Each rule:
+#   namespace: ""  matches every namespace AND cluster-scoped resources.
+#                  "team-*" prefix matching is also supported.
+#   names:         entries accept a trailing "*" only (e.g. "be-*"), no other
+#                  globbing.
+#   resources:     built-in kinds by plural name (pods, services, ...); CRDs
+#                  must be given as the full group/version/resource, e.g.
+#                  monitoring.coreos.com/v1/prometheusrules.
+#   verbs:         omit for both list and get.
 query:
   enabled: true
   # redactSecrets: false   # unset inherits collect.state.redactSecrets
