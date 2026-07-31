@@ -59,6 +59,42 @@ func TestRESTForCachesPerGroupVersion(t *testing.T) {
 	}
 }
 
+// The separate budget is the entire point of this constructor, and it is only
+// real if every client shares ONE limiter. rest.RESTClientFor silently builds
+// its own whenever config.RateLimiter is nil, which would give each
+// GroupVersion a full-strength bucket of its own.
+func TestRESTForSharesOneRateLimiterAcrossGroupVersions(t *testing.T) {
+	qc, err := newQueryClientsFromRest(restConfigForTest(t))
+	if err != nil {
+		t.Fatalf("newQueryClientsFromRest: %v", err)
+	}
+	core, err := qc.RESTFor(schema.GroupVersion{Group: "", Version: "v1"})
+	if err != nil {
+		t.Fatalf("RESTFor(core): %v", err)
+	}
+	apps, err := qc.RESTFor(schema.GroupVersion{Group: "apps", Version: "v1"})
+	if err != nil {
+		t.Fatalf("RESTFor(apps/v1): %v", err)
+	}
+	if core.GetRateLimiter() == nil {
+		t.Fatal("the core client has no rate limiter; the query budget is unbounded")
+	}
+	if core.GetRateLimiter() != apps.GetRateLimiter() {
+		t.Error("each GroupVersion got its own rate limiter, so N resource kinds " +
+			"multiply the QPS ceiling by N — they must share one bucket")
+	}
+}
+
+func TestNewQueryClientsDoesNotMutateTheCallerConfig(t *testing.T) {
+	cfg := restConfigForTest(t)
+	if _, err := newQueryClientsFromRest(cfg); err != nil {
+		t.Fatalf("newQueryClientsFromRest: %v", err)
+	}
+	if cfg.RateLimiter != nil {
+		t.Error("the caller's config was mutated; the limiter belongs to the copy")
+	}
+}
+
 func restConfigForTest(t *testing.T) *rest.Config {
 	t.Helper()
 	return &rest.Config{Host: "https://127.0.0.1:6443"}
