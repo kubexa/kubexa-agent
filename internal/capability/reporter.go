@@ -40,6 +40,28 @@ type Options struct {
 	Workers           int
 	DiscoveryInterval time.Duration
 	SweepInterval     time.Duration
+	Policy            PolicySource
+}
+
+// PolicySource reports the agent's configured live-query policy per resource.
+// Primitive parameters keep this package independent of internal/query/policy.
+type PolicySource interface {
+	AllowsAnyList(group, version, resource string) bool
+	AllowsAnyGet(group, version, resource string) bool
+}
+
+// applyPolicy stamps each capability with the configuration policy's verdict.
+// A nil source means live query is not configured, in which case every verdict
+// is false: reporting true would have the UI offer types no query can answer.
+func applyPolicy(caps []Capability, src PolicySource) {
+	if src == nil {
+		return
+	}
+	for i := range caps {
+		c := &caps[i]
+		c.PolicyList = src.AllowsAnyList(c.Group, c.Version, c.Resource)
+		c.PolicyGet = src.AllowsAnyGet(c.Group, c.Version, c.Resource)
+	}
 }
 
 // Reporter discovers the cluster's resource types and the agent's permission
@@ -53,6 +75,7 @@ type Reporter struct {
 
 	discoveryInterval time.Duration
 	sweepInterval     time.Duration
+	policy            PolicySource
 
 	state sweepState
 
@@ -103,6 +126,7 @@ func NewReporter(opts Options) (*Reporter, error) {
 		workers:           opts.Workers,
 		discoveryInterval: opts.DiscoveryInterval,
 		sweepInterval:     opts.SweepInterval,
+		policy:            opts.Policy,
 	}
 	if r.discoveryInterval <= 0 {
 		r.discoveryInterval = defaultDiscoveryInterval
@@ -196,6 +220,7 @@ func (r *Reporter) refresh(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	applyPolicy(capabilities, r.policy)
 
 	// The sweep state only advances once the catalog has actually reached the
 	// queue. A message that never reached the queue is not a completed sweep:
@@ -252,6 +277,8 @@ func buildCatalog(
 			CanList:     c.CanList,
 			CanWatch:    c.CanWatch,
 			ProbeFailed: c.ProbeFailed,
+			PolicyList:  c.PolicyList,
+			PolicyGet:   c.PolicyGet,
 		})
 	}
 	return &agentv1.ResourceCatalog{
