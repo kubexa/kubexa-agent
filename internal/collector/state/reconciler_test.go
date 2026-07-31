@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,6 +130,43 @@ func TestReconcileErrorsWhenCollectorNotStarted(t *testing.T) {
 	}
 	if r.running("batch/v1/cronjobs") {
 		t.Fatal("informer started despite reconcile returning an error")
+	}
+}
+
+// c.runCtx is shared state: reconcile reads it (to parent new informers)
+// from whatever goroutine drives the gateway stream, while Stop writes it to
+// nil from the shutdown path. Before the fix both accesses were unlocked, so
+// a reconcile could pass the nil-check, get preempted, have Stop win the
+// race and nil the field out from under it, and then hand
+// context.WithCancel a nil parent — which panics unconditionally and takes
+// the whole agent process down, not just one GVR. This drives Reconcile and
+// Stop concurrently across many iterations; the only acceptable outcome is
+// no panic and, under -race, no data race report.
+func TestReconcileAndStopRunConcurrentlyWithoutPanicking(t *testing.T) {
+	r := newTestReconciler(t)
+
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		// Re-arm as Start would: a fresh runCtx/cancel pair so this
+		// iteration's Stop has something real to tear down, exercising the
+		// same nil-out Reconcile races against.
+		runCtx, cancel := context.WithCancel(context.Background())
+		r.watchMu.Lock()
+		r.runCtx = runCtx
+		r.watchMu.Unlock()
+		r.cancel = cancel
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = r.reconcile(context.Background(), []descriptorFor{desc("batch", "v1", "cronjobs")})
+		}()
+		go func() {
+			defer wg.Done()
+			_ = r.Stop(context.Background())
+		}()
+		wg.Wait()
 	}
 }
 
