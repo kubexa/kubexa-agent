@@ -38,3 +38,5 @@ go.work.sum
 # Helm: local overrides (copy from my-values.example.yaml; may contain tokens)
 temp/
 /bin
+# subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/

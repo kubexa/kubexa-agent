@@ -20,6 +20,10 @@ rbac:
   create: true
   # Extra ClusterRole rules appended to the generated role.
   extraRules: []
+  # The generated ClusterRole grants read access to the resource block below
+  # when EITHER collect.state.enabled OR query.enabled is true -- the state
+  # collector and live resource query are independent features that read the
+  # same objects, and gating on one alone left the other with RBAC_DENIED.
 
 podAnnotations: {}
 podLabels: {}
@@ -160,6 +164,42 @@ collect:
     #     interval: 30s
     #     extraLabels:
     #       service: my-app
+
+# Live, on-demand resource reads requested by the Kubexa platform — distinct
+# from collect.state, which governs continuous streaming. Where collect.state
+# pushes a running feed of changes, query answers a single point-in-time
+# question asked by the UI (e.g. "show me this Deployment now").
+#
+# Omitting this whole section inherits collect.state entirely. Inheritance is
+# PER-FIELD, not all-or-nothing: setting only redactSecrets here still
+# inherits rules from collect.state.rules, and vice versa.
+#
+# rules: [] (the default below) inherits collect.state.rules too — it does
+# NOT mean "deny everything". To actually deny all live queries, set
+# enabled: false instead.
+#
+# Each rule:
+#   namespace: ""  matches every namespace AND cluster-scoped resources.
+#                  "team-*" prefix matching is also supported.
+#   names:         entries accept a trailing "*" only (e.g. "be-*"), no other
+#                  globbing.
+#   resources:     built-in kinds by plural name (pods, services, ...); CRDs
+#                  must be given as the full group/version/resource, e.g.
+#                  monitoring.coreos.com/v1/prometheusrules.
+#   verbs:         omit for both list and get. This restricts which
+#                  OPERATIONS are permitted, not how much of an object comes
+#                  back — e.g. verbs: [list] on secrets still returns full
+#                  Secret data/stringData on a full-view list, it only blocks
+#                  fetching a single Secret by name via get. redactSecrets is
+#                  the only setting that strips Secret data/stringData.
+query:
+  enabled: true
+  # redactSecrets: false   # unset inherits collect.state.redactSecrets
+  rules: []
+  #  - namespace: stage
+  #    resources: [pods]
+  #    names: ["be-*"]
+  #    verbs: [list, get]
 
 buffer:
   maxMemoryBytes: 67108864 # 64 MiB

@@ -66,6 +66,16 @@ data:
           {{- toYaml . | nindent 10 }}
         {{- end }}
 
+    query:
+      enabled: {{ .Values.query.enabled }}
+      {{- if hasKey .Values.query "redactSecrets" }}
+      redact_secrets: {{ .Values.query.redactSecrets }}
+      {{- end }}
+      {{- with .Values.query.rules }}
+      rules:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
     buffer:
       max_memory_bytes: {{ .Values.buffer.maxMemoryBytes }}
       spill_dir: {{ .Values.buffer.spillDir | quote }}
