@@ -42,7 +42,11 @@
             "properties": {
               "id": { "type": "string" },
               "namespace": { "type": "string" },
-              "resources": { "type": "array", "items": { "type": "string" } },
+              "resources": {
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1
+              },
               "names": { "type": "array", "items": { "type": "string" } },
               "verbs": {
                 "type": "array",
