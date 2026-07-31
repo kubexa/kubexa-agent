@@ -195,9 +195,19 @@ message ResourceQueryResult {
   string     query_id       = 1;
   QueryError error          = 2;  // when set, payload is empty
   bytes      payload        = 3;  // JSON: a meta.k8s.io/v1 Table, or an object array
-  string     continue_token = 4;
-  int32      remaining      = 5;
-  bool       truncated      = 6;  // response size cap was reached
+
+  // continue_token and remaining are populated for QUERY_VIEW_FULL only.
+  //
+  // On QUERY_VIEW_TABLE they are always empty/zero even mid-pagination: the
+  // API server carries that state inside the Table body itself, and lifting
+  // it out would mean decoding and re-encoding every response. A TABLE
+  // consumer must read metadata.continue and metadata.remainingItemCount
+  // from the payload JSON. Reading an empty continue_token here as "no more
+  // pages" truncates every TABLE listing at its first page.
+  string continue_token = 4;
+  int32  remaining      = 5;
+
+  bool truncated = 6;  // response size cap was reached
 }
 
 message QueryError {
