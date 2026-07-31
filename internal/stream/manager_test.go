@@ -573,9 +573,13 @@ func TestAuthInterceptorMetadata(t *testing.T) {
 	assertMD(t, gotMD, "x-cluster-id", "cluster-1")
 }
 
+// Deliberately NOT t.Parallel(): this test mutates the package global
+// buildinfo.Version, which TestAuthInterceptorMetadata asserts against. With
+// both marked parallel they ran concurrently and the assertion read
+// "1.2.3-test" roughly once in 300 runs. Staying sequential is what fixes it:
+// a parallel sibling is paused for the whole sequential phase, so it cannot
+// observe the mutation window.
 func TestAuthInterceptorMetadataUsesBuildinfoVersion(t *testing.T) {
-	t.Parallel()
-
 	orig := buildinfo.Version
 	buildinfo.Version = "1.2.3-test"
 	t.Cleanup(func() { buildinfo.Version = orig })
