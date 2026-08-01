@@ -137,6 +137,11 @@ const (
 	QueryErrorCode_QUERY_ERROR_TOO_LARGE          QueryErrorCode = 5
 	QueryErrorCode_QUERY_ERROR_RESOURCE_EXHAUSTED QueryErrorCode = 6
 	QueryErrorCode_QUERY_ERROR_INTERNAL           QueryErrorCode = 7
+	// A continue token that outlived the resource version it names. Distinct
+	// from INTERNAL because it is the one query failure the CALLER can fix, by
+	// restarting the listing from the first page -- reported as INTERNAL it
+	// reads as a platform fault and offers no recovery.
+	QueryErrorCode_QUERY_ERROR_EXPIRED QueryErrorCode = 8
 )
 
 // Enum value maps for QueryErrorCode.
@@ -150,6 +155,7 @@ var (
 		5: "QUERY_ERROR_TOO_LARGE",
 		6: "QUERY_ERROR_RESOURCE_EXHAUSTED",
 		7: "QUERY_ERROR_INTERNAL",
+		8: "QUERY_ERROR_EXPIRED",
 	}
 	QueryErrorCode_value = map[string]int32{
 		"QUERY_ERROR_UNSPECIFIED":        0,
@@ -160,6 +166,7 @@ var (
 		"QUERY_ERROR_TOO_LARGE":          5,
 		"QUERY_ERROR_RESOURCE_EXHAUSTED": 6,
 		"QUERY_ERROR_INTERNAL":           7,
+		"QUERY_ERROR_EXPIRED":            8,
 	}
 )
 
@@ -1889,7 +1896,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\tQueryView\x12\x1a\n" +
 	"\x16QUERY_VIEW_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10QUERY_VIEW_TABLE\x10\x01\x12\x13\n" +
-	"\x0fQUERY_VIEW_FULL\x10\x02*\xf6\x01\n" +
+	"\x0fQUERY_VIEW_FULL\x10\x02*\x8f\x02\n" +
 	"\x0eQueryErrorCode\x12\x1b\n" +
 	"\x17QUERY_ERROR_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19QUERY_ERROR_POLICY_DENIED\x10\x01\x12\x1b\n" +
@@ -1898,7 +1905,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x13QUERY_ERROR_TIMEOUT\x10\x04\x12\x19\n" +
 	"\x15QUERY_ERROR_TOO_LARGE\x10\x05\x12\"\n" +
 	"\x1eQUERY_ERROR_RESOURCE_EXHAUSTED\x10\x06\x12\x18\n" +
-	"\x14QUERY_ERROR_INTERNAL\x10\a2O\n" +
+	"\x14QUERY_ERROR_INTERNAL\x10\a\x12\x17\n" +
+	"\x13QUERY_ERROR_EXPIRED\x10\b2O\n" +
 	"\fAgentService\x12?\n" +
 	"\aConnect\x12\x16.agent.v1.AgentMessage\x1a\x18.agent.v1.GatewayMessage(\x010\x01B>Z<github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1b\x06proto3"
 

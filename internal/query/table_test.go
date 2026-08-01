@@ -353,3 +353,73 @@ func TestTableViewPreservesLargeNumbersInCells(t *testing.T) {
 		t.Errorf("cell value %s did not survive the round trip, got %s", nanos, res.GetPayload())
 	}
 }
+
+// A TABLE consumer must read pagination from the same two response fields a
+// FULL consumer does. Before this, continue_token and remaining were always
+// empty on this path and the body's metadata.continue was the only source,
+// so a frontend needed one reader per view.
+func TestTableViewReportsPaginationInTheResultFields(t *testing.T) {
+	var got http.Request
+	body := `{"kind":"Table","apiVersion":"meta.k8s.io/v1",` +
+		`"metadata":{"continue":"tok-next","remainingItemCount":42},` +
+		`"columnDefinitions":[{"name":"Name","type":"string"}],` +
+		`"rows":[{"cells":["be-1"]}]}`
+	_, clients := tableServerBody(t, &got, body)
+	e := tableExecutor(t, clients)
+
+	res := e.Execute(context.Background(), tableQuery())
+	if res.GetError() != nil {
+		t.Fatalf("unexpected error: %v", res.GetError())
+	}
+	if res.GetContinueToken() != "tok-next" {
+		t.Fatalf("continue_token = %q, want %q", res.GetContinueToken(), "tok-next")
+	}
+	if res.GetRemaining() != 42 {
+		t.Fatalf("remaining = %d, want 42", res.GetRemaining())
+	}
+}
+
+// Lifting the token into the result fields must not remove it from the body:
+// the payload's own metadata.continue is the documented location and clients
+// already read it there.
+func TestTableViewKeepsContinueTokenInTheBodyToo(t *testing.T) {
+	var got http.Request
+	body := `{"kind":"Table","apiVersion":"meta.k8s.io/v1",` +
+		`"metadata":{"continue":"tok-next"},` +
+		`"columnDefinitions":[{"name":"Name","type":"string"}],` +
+		`"rows":[{"cells":["be-1"]}]}`
+	_, clients := tableServerBody(t, &got, body)
+	e := tableExecutor(t, clients)
+
+	res := e.Execute(context.Background(), tableQuery())
+	if res.GetError() != nil {
+		t.Fatalf("unexpected error: %v", res.GetError())
+	}
+	var table metav1.Table
+	if err := json.Unmarshal(res.GetPayload(), &table); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if table.Continue != "tok-next" {
+		t.Fatalf("payload metadata.continue = %q, want it preserved", table.Continue)
+	}
+}
+
+// A server that omits remainingItemCount (the common case: it is only sent
+// while serving a paged list) must yield zero, not a panic. The field is a
+// *int64 on ListMeta precisely because absent and zero are different.
+func TestTableViewRemainingIsZeroWhenTheServerOmitsIt(t *testing.T) {
+	var got http.Request
+	_, clients := tableServer(t, &got) // tableJSON carries no metadata at all
+	e := tableExecutor(t, clients)
+
+	res := e.Execute(context.Background(), tableQuery())
+	if res.GetError() != nil {
+		t.Fatalf("unexpected error: %v", res.GetError())
+	}
+	if res.GetRemaining() != 0 {
+		t.Fatalf("remaining = %d, want 0", res.GetRemaining())
+	}
+	if res.GetContinueToken() != "" {
+		t.Fatalf("continue_token = %q, want empty", res.GetContinueToken())
+	}
+}
