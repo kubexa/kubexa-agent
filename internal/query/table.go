@@ -59,10 +59,12 @@ const tableKind = "Table"
 // exactly what `kubectl get` shows them. Cells are consequently left alone;
 // the row's metadata object is not.
 //
-// Pagination is unchanged by the re-encode. continue_token and remaining stay
-// empty on this path and the consumer reads metadata.continue out of the body,
-// as the proto documents; re-marshalling a metav1.Table preserves the body's
-// own ListMeta. Row filtering does make the body's remainingItemCount an upper
+// Pagination is unchanged by the re-encode: re-marshalling a metav1.Table
+// preserves the body's own ListMeta, so metadata.continue survives in the
+// payload. The continue token and remaining count are ALSO reported in the
+// result's own continue_token and remaining fields, lifted from that same
+// ListMeta, so a TABLE consumer and a FULL consumer read pagination from one
+// place instead of two. Row filtering does make remainingItemCount an upper
 // bound rather than an exact count -- the same caveat the FULL path already
 // carries, for the same reason: paging happens on the API server, before the
 // name filter runs here.
@@ -116,7 +118,7 @@ func (e *Executor) listTable(
 		return tableTooLarge()
 	}
 
-	payload, qerr := e.filterTable(raw, ref, decision)
+	payload, meta, qerr := e.filterTable(raw, ref, decision)
 	if qerr != nil {
 		return &agentv1.ResourceQueryResult{Error: qerr}
 	}
@@ -126,16 +128,33 @@ func (e *Executor) listTable(
 	if len(payload) > e.maxBytes {
 		return tableTooLarge()
 	}
-	return &agentv1.ResourceQueryResult{Payload: payload}
+	// ContinueToken and Remaining are lifted out of the body's own ListMeta so
+	// a TABLE consumer reads pagination from the same two response fields a
+	// FULL consumer does. The body keeps its metadata.continue -- this adds a
+	// second, consistent place to read it, it does not move it.
+	var remaining int32
+	if rc := meta.RemainingItemCount; rc != nil {
+		remaining = int32(*rc)
+	}
+	return &agentv1.ResourceQueryResult{
+		Payload:       payload,
+		ContinueToken: meta.Continue,
+		Remaining:     remaining,
+	}
 }
 
 // filterTable applies the policy's name patterns and the standard
 // sanitization to every row of a server-rendered Table.
+//
+// It also hands back the decoded ListMeta, so the caller can report the
+// server's continue token in the response fields without decoding the body a
+// second time. The returned meta is the SERVER's, taken before row filtering:
+// filtering rows does not change what the next page starts from.
 func (e *Executor) filterTable(
 	raw []byte,
 	ref policy.Ref,
 	decision policy.Decision,
-) ([]byte, *agentv1.QueryError) {
+) ([]byte, metav1.ListMeta, *agentv1.QueryError) {
 	var table metav1.Table
 	// UseNumber, not a plain Unmarshal: TableRow.Cells is []any, so a bare
 	// decode turns every printed number into a float64 and re-encodes it from
@@ -146,7 +165,7 @@ func (e *Executor) filterTable(
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	if err := dec.Decode(&table); err != nil {
-		return nil, queryError(agentv1.QueryErrorCode_QUERY_ERROR_INTERNAL,
+		return nil, metav1.ListMeta{}, queryError(agentv1.QueryErrorCode_QUERY_ERROR_INTERNAL,
 			"the API server's table response could not be decoded: "+err.Error())
 	}
 	// Fail closed on a body that is not a Table. Content negotiation is a
@@ -156,7 +175,7 @@ func (e *Executor) filterTable(
 	// here would skip both the name filter and sanitization -- precisely the
 	// hole this function exists to close.
 	if table.Kind != tableKind {
-		return nil, queryError(agentv1.QueryErrorCode_QUERY_ERROR_INTERNAL, fmt.Sprintf(
+		return nil, metav1.ListMeta{}, queryError(agentv1.QueryErrorCode_QUERY_ERROR_INTERNAL, fmt.Sprintf(
 			"the API server answered with kind %q instead of a Table; this resource does "+
 				"not support server-side printing, so request the full view instead",
 			table.Kind))
@@ -198,7 +217,7 @@ func (e *Executor) filterTable(
 		state.SanitizeUnstructured(obj, ref.Resource, decision.RedactSecrets)
 		enc, err := json.Marshal(obj.Object)
 		if err != nil {
-			return nil, queryError(agentv1.QueryErrorCode_QUERY_ERROR_INTERNAL, err.Error())
+			return nil, metav1.ListMeta{}, queryError(agentv1.QueryErrorCode_QUERY_ERROR_INTERNAL, err.Error())
 		}
 		row.Object.Raw = enc
 		kept = append(kept, row)
@@ -207,9 +226,12 @@ func (e *Executor) filterTable(
 
 	out, err := json.Marshal(&table)
 	if err != nil {
-		return nil, queryError(agentv1.QueryErrorCode_QUERY_ERROR_INTERNAL, err.Error())
+		return nil, metav1.ListMeta{}, queryError(agentv1.QueryErrorCode_QUERY_ERROR_INTERNAL, err.Error())
 	}
-	return out, nil
+	// table.ListMeta, not a copy taken earlier: row filtering above replaces
+	// table.Rows and never touches ListMeta, so this is still the server's own
+	// continue token and remaining count.
+	return out, table.ListMeta, nil
 }
 
 func tableTooLarge() *agentv1.ResourceQueryResult {
