@@ -36,8 +36,12 @@ rules:
       - configmaps
       - endpoints
       - persistentvolumeclaims
+      - persistentvolumes
       - serviceaccounts
       - nodes
+      - resourcequotas
+      - limitranges
+      - replicationcontrollers
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources:
