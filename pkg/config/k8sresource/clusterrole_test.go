@@ -1,0 +1,75 @@
+package k8sresource_test
+
+import (
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/kubexa/kubexa-agent/pkg/config/k8sresource"
+)
+
+// The chart's ClusterRole must cover every resource this registry knows.
+//
+// The registry is what the agent will accept in a query and what capability
+// discovery advertises; the ClusterRole is what the API server will actually
+// let the agent read. When the two drift, the failure is invisible here and
+// only shows up on a deployed cluster as RBAC_DENIED for that one type, with
+// nothing in the agent's own config to explain it.
+//
+// It has drifted once already: persistentvolumes, resourcequotas, limitranges
+// and replicationcontrollers were in the registry from the start and were
+// never in the ClusterRole (found 2026-08-02, before the 0.5.0 release).
+//
+// The check is a substring match over the rendered template rather than a YAML
+// parse: the file is a Go template, its resource lists are gated behind
+// {{- if }} blocks that only Helm can evaluate, and a resource name appearing
+// anywhere in it is exactly the property that matters. Coarse, but it cannot
+// pass while a name is genuinely absent, which is the only direction that hurts.
+func TestClusterRoleCoversRegistry(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "helm", "kubexa-agent", "templates", "clusterrole.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	chart := string(raw)
+
+	// Match a bare list item ("      - pods") or an inline list
+	// (`resources: ["namespaces"]`), so a name that only appears in a comment
+	// does not count as a grant.
+	granted := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?m)^\s*-\s+([a-z0-9./]+)\s*$`).FindAllStringSubmatch(chart, -1) {
+		granted[m[1]] = true
+	}
+	for _, m := range regexp.MustCompile(`resources:\s*\[([^\]]*)\]`).FindAllStringSubmatch(chart, -1) {
+		for _, name := range strings.Split(m[1], ",") {
+			granted[strings.Trim(strings.TrimSpace(name), `"'`)] = true
+		}
+	}
+
+	missing := []string{}
+	seen := map[string]bool{}
+	for _, alias := range k8sresource.KnownAliases() {
+		d, err := k8sresource.Parse(alias)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", alias, err)
+		}
+		resource := d.GVR.Resource
+		if seen[resource] {
+			continue
+		}
+		seen[resource] = true
+		if !granted[resource] {
+			missing = append(missing, resource)
+		}
+	}
+
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("ClusterRole does not grant read access to registry resources: %v\n"+
+			"A deployed agent returns RBAC_DENIED for each of these while the agent's own "+
+			"query policy reports them as allowed.", missing)
+	}
+}
