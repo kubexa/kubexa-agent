@@ -232,4 +232,9 @@ enum QueryErrorCode {
   QUERY_ERROR_TOO_LARGE          = 5;
   QUERY_ERROR_RESOURCE_EXHAUSTED = 6;
   QUERY_ERROR_INTERNAL           = 7;
+  // A continue token that outlived the resource version it names. Distinct
+  // from INTERNAL because it is the one query failure the CALLER can fix, by
+  // restarting the listing from the first page -- reported as INTERNAL it
+  // reads as a platform fault and offers no recovery.
+  QUERY_ERROR_EXPIRED            = 8;
 }
