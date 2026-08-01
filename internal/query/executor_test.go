@@ -13,6 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -353,4 +354,58 @@ func apierrorsForbidden() error {
 	return apierrors.NewForbidden(
 		schema.GroupResource{Resource: "pods"}, "",
 		errors.New("forbidden by RBAC"))
+}
+
+// An expired continue token is the one query failure the caller can fix, by
+// restarting the listing from the first page. It must not land in INTERNAL,
+// which the backend turns into an HTTP 500 -- a user who leaves a list open
+// past the resource version's compaction window (roughly five minutes) hits
+// this routinely, and a 500 reads as a platform fault with no recovery.
+func TestExpiredContinueTokenMapsToExpiredNotInternal(t *testing.T) {
+	dyn := newFakeDynamic()
+	dyn.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewResourceExpired("continue token has expired")
+	})
+	e := newExecutor(t, allowPodsInStage, dyn)
+
+	res := e.Execute(context.Background(), listQuery("stage"))
+	if got := res.GetError().GetCode(); got != agentv1.QueryErrorCode_QUERY_ERROR_EXPIRED {
+		t.Fatalf("code = %v, want EXPIRED -- reported as INTERNAL this becomes an HTTP 500 "+
+			"and the client is never told to page again from the start", got)
+	}
+}
+
+// A 410 Gone that is not specifically ResourceExpired (an older API server
+// answers a compacted continue token this way) must map to the same code:
+// both mean the token is dead and the remedy is identical.
+func TestGoneMapsToExpired(t *testing.T) {
+	dyn := newFakeDynamic()
+	dyn.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
+			Status: metav1.StatusFailure,
+			Code:   http.StatusGone,
+			Reason: metav1.StatusReasonGone,
+		}}
+	})
+	e := newExecutor(t, allowPodsInStage, dyn)
+
+	res := e.Execute(context.Background(), listQuery("stage"))
+	if got := res.GetError().GetCode(); got != agentv1.QueryErrorCode_QUERY_ERROR_EXPIRED {
+		t.Fatalf("code = %v, want EXPIRED", got)
+	}
+}
+
+// The EXPIRED arm sits above the NOT_FOUND arm in mapAPIError; this asserts it
+// did not swallow ordinary 404s on the way in.
+func TestNotFoundStillMapsToNotFoundAfterTheExpiredArm(t *testing.T) {
+	dyn := newFakeDynamic()
+	dyn.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "nope")
+	})
+	e := newExecutor(t, allowPodsInStage, dyn)
+
+	res := e.Execute(context.Background(), listQuery("stage"))
+	if got := res.GetError().GetCode(); got != agentv1.QueryErrorCode_QUERY_ERROR_NOT_FOUND {
+		t.Fatalf("code = %v, want NOT_FOUND", got)
+	}
 }

@@ -357,6 +357,18 @@ func mapAPIError(err error) *agentv1.QueryError {
 	switch {
 	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
 		return queryError(agentv1.QueryErrorCode_QUERY_ERROR_RBAC_DENIED, err.Error())
+	// Checked BEFORE IsNotFound: an expired continue token is a 410 Gone, and
+	// IsGone is what apierrors.IsNotFound would NOT catch -- but the ordering
+	// matters anyway, since both arms answer a "the thing you named is not
+	// here" family of statuses and only this one is recoverable by paging
+	// again from the start.
+	//
+	// A continue token names an etcd resource version, so it dies when that
+	// version is compacted -- roughly five minutes. Someone leaving a list
+	// open and scrolling hits this routinely; before it had its own code it
+	// surfaced as an HTTP 500.
+	case apierrors.IsResourceExpired(err), apierrors.IsGone(err):
+		return queryError(agentv1.QueryErrorCode_QUERY_ERROR_EXPIRED, err.Error())
 	case apierrors.IsNotFound(err):
 		return queryError(agentv1.QueryErrorCode_QUERY_ERROR_NOT_FOUND, err.Error())
 	case errors.Is(err, context.DeadlineExceeded), apierrors.IsTimeout(err):
