@@ -1,21 +1,29 @@
 {
     // https://go.microsoft.com/fwlink/?linkid=830387
+    //
+    // The agent configs run `make build-debug` first and then exec the binary
+    // instead of letting the Go extension build one. The reason is the version
+    // stamp: buildinfo.Version defaults to "dev", which agentversion.Core
+    // cannot parse, and an unparseable version sorts BELOW every real one — so
+    // the backend refuses a live resource query from an unstamped agent with
+    // "upgrade the agent", whatever was actually built. The real version comes
+    // from `git describe`, which only a shell can run, hence the preLaunchTask.
+    //
+    // `make build-debug` keeps symbols and disables inlining (-N -l), so
+    // breakpoints and variable inspection work exactly as with a normal launch.
     "version": "0.2.0",
     "configurations": [
         {
             "name": "Agent (dev)",
             "type": "go",
             "request": "launch",
-            "mode": "auto",
-            "program": "${workspaceFolder}/cmd/agent",
+            "mode": "exec",
+            "program": "${workspaceFolder}/bin/kubexa-agent-debug",
             "cwd": "${workspaceFolder}",
+            "preLaunchTask": "build-agent-debug",
             "args": [
                 "--dev",
                 "--config=${workspaceFolder}/config/example-local.yaml"
-            ],
-            "buildFlags": [
-                "-ldflags",
-                "-X github.com/kubexa/kubexa-agent/pkg/buildinfo.Version=dev -X github.com/kubexa/kubexa-agent/pkg/buildinfo.Commit=debug -X github.com/kubexa/kubexa-agent/pkg/buildinfo.BuildTime=local"
             ]
         },
         {
@@ -33,9 +41,10 @@
             "name": "Agent (default search paths)",
             "type": "go",
             "request": "launch",
-            "mode": "auto",
-            "program": "${workspaceFolder}/cmd/agent",
-            "cwd": "${workspaceFolder}"
+            "mode": "exec",
+            "program": "${workspaceFolder}/bin/kubexa-agent-debug",
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "build-agent-debug"
         }
     ]
 }

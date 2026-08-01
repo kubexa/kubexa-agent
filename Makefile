@@ -8,15 +8,22 @@ PROTO_FILES     := $(PROTO_DIR)/agent/v1/*.proto $(PROTO_DIR)/common/v1/*.proto
 VERSION         ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT          ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME      ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-LDFLAGS         := -s -w \
+# The version stamp is split out from the release flags because EVERY way of
+# starting the agent needs it, debug builds included. buildinfo.Version
+# defaults to the literal "dev", which agentversion.Core cannot parse, and an
+# unparseable version sorts below any real one -- so the backend answers a
+# live resource query from an unstamped agent with "upgrade the agent"
+# regardless of what was actually built.
+VERSION_LDFLAGS := \
 	-X github.com/kubexa/kubexa-agent/pkg/buildinfo.Version=$(VERSION) \
 	-X github.com/kubexa/kubexa-agent/pkg/buildinfo.Commit=$(COMMIT) \
 	-X github.com/kubexa/kubexa-agent/pkg/buildinfo.BuildTime=$(BUILD_TIME)
+LDFLAGS         := -s -w $(VERSION_LDFLAGS)
 GO_BUILD_FLAGS  := -ldflags="$(LDFLAGS)"
 DOCKER_IMAGE    := kubexa/kubexa-agent
 DOCKER_TAG      := $(VERSION)
 
-.PHONY: all build test lint proto gen clean docker-build helm-lint helm-template helm-package helm-push-oci run run-local run-dev run-dev-grpc help
+.PHONY: all build build-debug test lint proto gen clean docker-build helm-lint helm-template helm-package helm-push-oci run run-local run-dev run-dev-grpc help
 
 all: proto build
 
@@ -47,14 +54,21 @@ build: ## compile binary
 	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -o bin/$(BINARY_NAME) ./cmd/agent
 	@echo "✓ bin/$(BINARY_NAME)"
 
+build-debug: ## compile an unstripped, unoptimized binary for the VS Code debugger
+	@echo "→ building $(BINARY_NAME)-debug ($(VERSION))..."
+	@mkdir -p bin
+	CGO_ENABLED=0 go build -gcflags="all=-N -l" -ldflags="$(VERSION_LDFLAGS)" \
+		-o bin/$(BINARY_NAME)-debug ./cmd/agent
+	@echo "✓ bin/$(BINARY_NAME)-debug"
+
 run: ## run locally (uses ./config/config.yaml or /etc/kubexa/config.yaml unless you pass flags)
-	go run ./cmd/agent
+	go run -ldflags="$(VERSION_LDFLAGS)" ./cmd/agent
 
 run-local: ## run agent with config/example-local.yaml
-	go run ./cmd/agent --config=config/example-local.yaml
+	go run -ldflags="$(VERSION_LDFLAGS)" ./cmd/agent --config=config/example-local.yaml
 
 run-dev: ## run agent in dev mode (debug logs, localhost bind, kubeconfig)
-	go run -ldflags="$(LDFLAGS)" ./cmd/agent --dev --config=config/example-local.yaml
+	go run -ldflags="$(VERSION_LDFLAGS)" ./cmd/agent --dev --config=config/example-local.yaml
 
 run-dev-grpc: ## run local AgentService mock (insecure gRPC on 127.0.0.1:50051)
 	go run ./cmd/dev-grpc-server

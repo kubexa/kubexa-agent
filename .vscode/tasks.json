@@ -1,0 +1,26 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            // launch.json cannot run `git describe`, so the debug configs do
+            // not build the agent themselves: they run this first and then
+            // exec the binary it produces. The Makefile is the single place
+            // the version stamp is computed, for release and debug alike.
+            "label": "build-agent-debug",
+            "type": "shell",
+            "command": "make build-debug",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": [
+                "$go"
+            ],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared",
+                "clear": true
+            }
+        }
+    ]
+}
