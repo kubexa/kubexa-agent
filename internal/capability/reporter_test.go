@@ -110,6 +110,36 @@ func TestNeedsSweepOnFirstRun(t *testing.T) {
 	}
 }
 
+// The mirror of the failure case: what publish actually hands the queue. The
+// catalog alone is not enough -- the server routes on the payload type and
+// stamps freshness from meta.timestamp, so a catalog published without a meta
+// (r.agentMeta is nil until the stream handshake fills it) must still carry
+// one rather than nil-deref or arrive undatable.
+func TestPublishSendsCatalogWithStampedMeta(t *testing.T) {
+	w := &captureWriter{}
+	r := &Reporter{writer: w}
+	at := time.Date(2026, 7, 30, 10, 7, 56, 0, time.UTC)
+
+	if err := r.publish(context.Background(), caps(1), nil, "sha256:a", at); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	msgs := w.all()
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %d, want 1", len(msgs))
+	}
+	msg := msgs[0]
+	if msg.GetMessageId() == "" {
+		t.Fatal("messageId is empty; the server dedupes on it")
+	}
+	if msg.GetMeta().GetTimestamp() != at.UnixMilli() {
+		t.Fatalf("meta.timestamp = %d, want %d", msg.GetMeta().GetTimestamp(), at.UnixMilli())
+	}
+	if msg.GetCatalog().GetFingerprint() != "sha256:a" {
+		t.Fatalf("payload = %T, want a catalog with fingerprint sha256:a", msg.GetPayload())
+	}
+}
+
 // A catalog that never reached the queue is not a completed sweep. Recording
 // one would mean no catalog at all until the hourly safety sweep -- an hour of
 // an empty type list because the queue was briefly full at startup. refresh
