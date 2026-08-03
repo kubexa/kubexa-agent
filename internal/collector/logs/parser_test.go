@@ -99,18 +99,32 @@ func todoImplementFilterPodLabelsTest(t *testing.T) {
 	}
 }
 
-func TestParseLineKeepsStreamMarker(t *testing.T) {
-	line := "2026-08-03T10:00:00.123456789Z stderr F boom"
+// TestParseLineStripsTheAPITimestampPrefix locks in the actual producer
+// format: the agent's only log source is CoreV1().Pods(ns).GetLogs with
+// Timestamps: true, which prefixes each line with "<RFC3339Nano> " and
+// nothing else. There is no "stdout"/"stderr" marker to recover here —
+// kubelet consumes that field itself when it renders the response and does
+// not re-emit it (see log.proto's reserved field 9, "stream").
+func TestParseLineStripsTheAPITimestampPrefix(t *testing.T) {
+	line := "2026-08-03T10:00:00.123456789Z boom"
 	got := ParseLine(line, time.Now())
-	if got.Stream != "stderr" {
-		t.Fatalf("stream = %q, want stderr", got.Stream)
+	if got.Message != "boom" {
+		t.Fatalf("message = %q, want boom", got.Message)
+	}
+	if string(got.Raw) != "boom" {
+		t.Fatalf("raw = %q, want boom", got.Raw)
+	}
+	wantTS := time.Date(2026, 8, 3, 10, 0, 0, 123456789, time.UTC)
+	if !got.Timestamp.Equal(wantTS) {
+		t.Fatalf("timestamp = %v, want %v", got.Timestamp, wantTS)
 	}
 }
 
-// raw is what the consumer writes to Loki. With the CRI prefix still attached,
-// `| json` at query time sees "2026-... stdout F {" and parses nothing.
+// raw is what the consumer writes to Loki. With the timestamp prefix the
+// Kubernetes pods/log API adds still attached, `| json` at query time sees
+// "2026-...Z {" and parses nothing.
 func TestParseLineRawIsThePayloadNotThePrefixedLine(t *testing.T) {
-	line := `2026-08-03T10:00:00Z stdout F {"level":"error","msg":"boom","trace_id":"abc"}`
+	line := `2026-08-03T10:00:00Z {"level":"error","msg":"boom","trace_id":"abc"}`
 	got := ParseLine(line, time.Now())
 	if string(got.Raw) != `{"level":"error","msg":"boom","trace_id":"abc"}` {
 		t.Fatalf("raw = %q, want the JSON payload alone", got.Raw)
@@ -124,8 +138,5 @@ func TestParseLineWithoutPrefixKeepsWholeLineAsRaw(t *testing.T) {
 	got := ParseLine("plain text line", time.Now())
 	if string(got.Raw) != "plain text line" {
 		t.Fatalf("raw = %q", got.Raw)
-	}
-	if got.Stream != "" {
-		t.Fatalf("stream = %q, want empty for a line with no CRI prefix", got.Stream)
 	}
 }
