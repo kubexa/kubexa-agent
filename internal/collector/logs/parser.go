@@ -21,6 +21,9 @@ type ParsedLine struct {
 	Level     agentv1.LogLevel
 	Raw       []byte
 	Timestamp time.Time
+	// Stream is the CRI marker: "stdout", "stderr", or "" when the line
+	// carried no prefix (a log source that is not the kubelet's file format).
+	Stream string
 }
 
 // ParseLine trims and parses a log line, extracting level, message, and timestamp when present.
@@ -30,16 +33,22 @@ func ParseLine(line string, fallback time.Time) ParsedLine {
 		return ParsedLine{Timestamp: fallback}
 	}
 
-	raw := []byte(trimmed)
 	msg := trimmed
 	ts := fallback
+	stream := ""
 	level := agentv1.LogLevel_LOG_LEVEL_UNSPECIFIED
 
 	// Kubernetes log API prefix: "2006-01-02T15:04:05.999999999Z stdout F payload"
-	if parsedTS, rest, ok := splitK8sLogPrefix(trimmed); ok {
+	if parsedTS, parsedStream, rest, ok := splitK8sLogPrefix(trimmed); ok {
 		ts = parsedTS
+		stream = parsedStream
 		msg = rest
 	}
+
+	// Captured AFTER the prefix split on purpose: raw is what reaches Loki as
+	// the log line, and a line that still carries "2026-…Z stdout F " in front
+	// of its JSON cannot be parsed by `| json` at query time.
+	raw := []byte(msg)
 
 	if pl, ok := parseJSONLine(msg); ok {
 		if !pl.Timestamp.IsZero() {
@@ -51,12 +60,6 @@ func ParseLine(line string, fallback time.Time) ParsedLine {
 		if pl.Level != agentv1.LogLevel_LOG_LEVEL_UNSPECIFIED {
 			level = pl.Level
 		}
-		return ParsedLine{
-			Message:   msg,
-			Level:     level,
-			Raw:       raw,
-			Timestamp: ts,
-		}
 	}
 
 	return ParsedLine{
@@ -64,31 +67,35 @@ func ParseLine(line string, fallback time.Time) ParsedLine {
 		Level:     level,
 		Raw:       raw,
 		Timestamp: ts,
+		Stream:    stream,
 	}
 }
 
-func splitK8sLogPrefix(line string) (time.Time, string, bool) {
+func splitK8sLogPrefix(line string) (time.Time, string, string, bool) {
 	// RFC3339Nano timestamp at line start (39+ chars).
 	if len(line) < 30 || line[0] < '0' || line[0] > '9' {
-		return time.Time{}, line, false
+		return time.Time{}, "", line, false
 	}
 	space := strings.IndexByte(line, ' ')
 	if space <= 0 {
-		return time.Time{}, line, false
+		return time.Time{}, "", line, false
 	}
 	tsPart := line[:space]
 	parsed, err := time.Parse(time.RFC3339Nano, tsPart)
 	if err != nil {
 		if parsed, err = time.Parse(time.RFC3339, tsPart); err != nil {
-			return time.Time{}, line, false
+			return time.Time{}, "", line, false
 		}
 	}
 	rest := strings.TrimSpace(line[space+1:])
-	// Drop "stdout F" or "stderr F" tripwire fields when present.
+	stream := ""
+	// Drop "stdout F" or "stderr F" tripwire fields when present, keeping the
+	// stream marker — it is a two-valued, indexable fact about the line.
 	if parts := strings.Fields(rest); len(parts) >= 3 && (parts[0] == "stdout" || parts[0] == "stderr") && len(parts[1]) == 1 {
+		stream = parts[0]
 		rest = strings.Join(parts[2:], " ")
 	}
-	return parsed.UTC(), rest, true
+	return parsed.UTC(), stream, rest, true
 }
 
 func parseJSONLine(line string) (ParsedLine, bool) {
