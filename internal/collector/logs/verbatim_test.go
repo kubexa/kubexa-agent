@@ -6,26 +6,27 @@ import (
 	"time"
 )
 
-// TestParseLineThenJoinerFoldsAJavaStackTraceIntoOneRecord drives lines shaped
-// exactly like what the kubelet log API hands the scanner (CRI-prefixed,
-// tab-indented stack frames) through ParseLine and then the joiner, the same
-// path stream.go uses. This is the case the design opens with: a JVM
-// exception plus its "Caused by:" cause must ship to Loki as one event, not
-// one record per frame.
+// TestParseLineThenJoinerFoldsAJavaStackTraceIntoOneRecord drives lines
+// shaped exactly like what the agent's actual log source hands the scanner —
+// the Kubernetes pods/log API with Timestamps: true, which prefixes each
+// line with "<RFC3339Nano> " and nothing else — through ParseLine and then
+// the joiner, the same path stream.go uses. This is the case the design
+// opens with: a JVM exception plus its "Caused by:" cause must ship to Loki
+// as one event, not one record per frame.
 //
 // It fails on the trimming parser because ParseLine strips the leading tab
 // off every frame before the joiner ever sees it, so isContinuation's
 // leading-whitespace rule never fires and each frame becomes its own record.
 func TestParseLineThenJoinerFoldsAJavaStackTraceIntoOneRecord(t *testing.T) {
-	criLines := []string{
-		`2026-08-03T10:00:00.000000000Z stdout F Exception in thread "main" java.lang.RuntimeException: boom`,
-		"2026-08-03T10:00:00.001000000Z stdout F \tat com.foo.Bar.method(Bar.java:42)",
-		"2026-08-03T10:00:00.002000000Z stdout F \tat com.foo.Baz.method(Baz.java:10)",
-		`2026-08-03T10:00:00.003000000Z stdout F Caused by: java.lang.NullPointerException`,
-		"2026-08-03T10:00:00.004000000Z stdout F \tat com.foo.Qux.method(Qux.java:5)",
-		"2026-08-03T10:00:00.005000000Z stdout F \t... 3 more",
+	apiLines := []string{
+		`2026-08-03T10:00:00.000000000Z Exception in thread "main" java.lang.RuntimeException: boom`,
+		"2026-08-03T10:00:00.001000000Z \tat com.foo.Bar.method(Bar.java:42)",
+		"2026-08-03T10:00:00.002000000Z \tat com.foo.Baz.method(Baz.java:10)",
+		`2026-08-03T10:00:00.003000000Z Caused by: java.lang.NullPointerException`,
+		"2026-08-03T10:00:00.004000000Z \tat com.foo.Qux.method(Qux.java:5)",
+		"2026-08-03T10:00:00.005000000Z \t... 3 more",
 	}
-	nextRecordLine := `2026-08-03T10:00:00.006000000Z stdout F next record, unrelated`
+	nextRecordLine := `2026-08-03T10:00:00.006000000Z next record, unrelated`
 
 	wantPayloads := []string{
 		`Exception in thread "main" java.lang.RuntimeException: boom`,
@@ -40,7 +41,7 @@ func TestParseLineThenJoinerFoldsAJavaStackTraceIntoOneRecord(t *testing.T) {
 	now := time.Now()
 	j := newJoiner(64*1024, time.Second)
 
-	for _, line := range criLines {
+	for _, line := range apiLines {
 		parsed := ParseLine(line, now)
 		if out := j.Add(parsed, now); len(out) != 0 {
 			t.Fatalf("trace record emitted early: %q", out)
@@ -67,7 +68,7 @@ func TestParseLineThenJoinerFoldsAJavaStackTraceIntoOneRecord(t *testing.T) {
 func TestParseLinePreservesLeadingAndInternalWhitespace(t *testing.T) {
 	now := time.Now()
 
-	t.Run("leading whitespace with no CRI prefix", func(t *testing.T) {
+	t.Run("leading whitespace with no timestamp prefix", func(t *testing.T) {
 		got := ParseLine("\tat com.foo.Bar.method(Bar.java:42)", now)
 		want := "\tat com.foo.Bar.method(Bar.java:42)"
 		if string(got.Raw) != want {
@@ -75,8 +76,8 @@ func TestParseLinePreservesLeadingAndInternalWhitespace(t *testing.T) {
 		}
 	})
 
-	t.Run("leading whitespace behind the CRI prefix", func(t *testing.T) {
-		got := ParseLine("2026-08-03T10:00:00Z stdout F \tat com.foo.Bar.method(Bar.java:42)", now)
+	t.Run("leading whitespace behind the API timestamp prefix", func(t *testing.T) {
+		got := ParseLine("2026-08-03T10:00:00Z \tat com.foo.Bar.method(Bar.java:42)", now)
 		want := "\tat com.foo.Bar.method(Bar.java:42)"
 		if string(got.Raw) != want {
 			t.Fatalf("raw = %q, want %q", got.Raw, want)
