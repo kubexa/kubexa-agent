@@ -72,9 +72,11 @@ func (j *joiner) take() []ParsedLine {
 
 // canExtend reports whether `line` continues the pending record. A JSON record
 // is never extended: it is complete by construction, and `| json` has to be
-// able to parse what reaches Loki.
+// able to parse what reaches Loki. The pending line's Raw may itself carry
+// leading whitespace the application wrote (an indented JSON payload), so the
+// JSON check has to look past it the same way parser.go's detection does.
 func (j *joiner) canExtend(line ParsedLine) bool {
-	if strings.HasPrefix(string(j.pending.Raw), "{") {
+	if strings.HasPrefix(strings.TrimLeft(string(j.pending.Raw), " \t"), "{") {
 		return false
 	}
 	return isContinuation(string(line.Raw))

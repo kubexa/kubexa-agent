@@ -121,19 +121,25 @@ func (x *LogBatch) GetEntries() []*LogEntry {
 }
 
 type LogEntry struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PodName       string                 `protobuf:"bytes,1,opt,name=pod_name,json=podName,proto3" json:"pod_name,omitempty"`
-	Namespace     string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Container     string                 `protobuf:"bytes,3,opt,name=container,proto3" json:"container,omitempty"`
-	Timestamp     int64                  `protobuf:"varint,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"` // unix nanoseconds
-	Message       string                 `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
-	Level         LogLevel               `protobuf:"varint,6,opt,name=level,proto3,enum=agent.v1.LogLevel" json:"level,omitempty"`
-	Labels        map[string]string      `protobuf:"bytes,7,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // pod labels passthrough
-	Raw           []byte                 `protobuf:"bytes,8,opt,name=raw,proto3" json:"raw,omitempty"`                                                                                 // the application's own line, prefix stripped
-	Stream        string                 `protobuf:"bytes,9,opt,name=stream,proto3" json:"stream,omitempty"`                                                                           // "stdout" | "stderr", from the CRI prefix
-	Workload      string                 `protobuf:"bytes,10,opt,name=workload,proto3" json:"workload,omitempty"`                                                                      // owning workload name, "" when uncontrolled
-	WorkloadKind  string                 `protobuf:"bytes,11,opt,name=workload_kind,json=workloadKind,proto3" json:"workload_kind,omitempty"`                                          // Deployment | StatefulSet | DaemonSet | Job | CronJob
-	NodeName      string                 `protobuf:"bytes,12,opt,name=node_name,json=nodeName,proto3" json:"node_name,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	PodName   string                 `protobuf:"bytes,1,opt,name=pod_name,json=podName,proto3" json:"pod_name,omitempty"`
+	Namespace string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Container string                 `protobuf:"bytes,3,opt,name=container,proto3" json:"container,omitempty"`
+	Timestamp int64                  `protobuf:"varint,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"` // unix nanoseconds
+	Message   string                 `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+	Level     LogLevel               `protobuf:"varint,6,opt,name=level,proto3,enum=agent.v1.LogLevel" json:"level,omitempty"`
+	Labels    map[string]string      `protobuf:"bytes,7,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // pod labels passthrough
+	Raw       []byte                 `protobuf:"bytes,8,opt,name=raw,proto3" json:"raw,omitempty"`                                                                                 // the application's own line, prefix stripped
+	// source is the Kubernetes pods/log API,
+	// which never carries a stdout/stderr
+	// marker (kubelet consumes the CRI
+	// record's stream field itself and does
+	// not re-emit it). Recovering this means
+	// tailing /var/log/pods from the node —
+	// its own sub-project, not a label.
+	Workload      string `protobuf:"bytes,10,opt,name=workload,proto3" json:"workload,omitempty"`                             // owning workload name, "" when uncontrolled
+	WorkloadKind  string `protobuf:"bytes,11,opt,name=workload_kind,json=workloadKind,proto3" json:"workload_kind,omitempty"` // Deployment | StatefulSet | DaemonSet | Job | CronJob
+	NodeName      string `protobuf:"bytes,12,opt,name=node_name,json=nodeName,proto3" json:"node_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -224,13 +230,6 @@ func (x *LogEntry) GetRaw() []byte {
 	return nil
 }
 
-func (x *LogEntry) GetStream() string {
-	if x != nil {
-		return x.Stream
-	}
-	return ""
-}
-
 func (x *LogEntry) GetWorkload() string {
 	if x != nil {
 		return x.Workload
@@ -258,7 +257,7 @@ const file_proto_agent_v1_log_proto_rawDesc = "" +
 	"\n" +
 	"\x18proto/agent/v1/log.proto\x12\bagent.v1\"8\n" +
 	"\bLogBatch\x12,\n" +
-	"\aentries\x18\x01 \x03(\v2\x12.agent.v1.LogEntryR\aentries\"\xbe\x03\n" +
+	"\aentries\x18\x01 \x03(\v2\x12.agent.v1.LogEntryR\aentries\"\xb4\x03\n" +
 	"\bLogEntry\x12\x19\n" +
 	"\bpod_name\x18\x01 \x01(\tR\apodName\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x1c\n" +
@@ -267,15 +266,15 @@ const file_proto_agent_v1_log_proto_rawDesc = "" +
 	"\amessage\x18\x05 \x01(\tR\amessage\x12(\n" +
 	"\x05level\x18\x06 \x01(\x0e2\x12.agent.v1.LogLevelR\x05level\x126\n" +
 	"\x06labels\x18\a \x03(\v2\x1e.agent.v1.LogEntry.LabelsEntryR\x06labels\x12\x10\n" +
-	"\x03raw\x18\b \x01(\fR\x03raw\x12\x16\n" +
-	"\x06stream\x18\t \x01(\tR\x06stream\x12\x1a\n" +
+	"\x03raw\x18\b \x01(\fR\x03raw\x12\x1a\n" +
 	"\bworkload\x18\n" +
 	" \x01(\tR\bworkload\x12#\n" +
 	"\rworkload_kind\x18\v \x01(\tR\fworkloadKind\x12\x1b\n" +
 	"\tnode_name\x18\f \x01(\tR\bnodeName\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*w\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\t\x10\n" +
+	"R\x06stream*w\n" +
 	"\bLogLevel\x12\x19\n" +
 	"\x15LOG_LEVEL_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fLOG_LEVEL_DEBUG\x10\x01\x12\x12\n" +
