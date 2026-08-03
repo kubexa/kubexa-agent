@@ -98,3 +98,34 @@ func todoImplementFilterPodLabelsTest(t *testing.T) {
 		t.Fatalf("app label = %q, want api", got["app"])
 	}
 }
+
+func TestParseLineKeepsStreamMarker(t *testing.T) {
+	line := "2026-08-03T10:00:00.123456789Z stderr F boom"
+	got := ParseLine(line, time.Now())
+	if got.Stream != "stderr" {
+		t.Fatalf("stream = %q, want stderr", got.Stream)
+	}
+}
+
+// raw is what the consumer writes to Loki. With the CRI prefix still attached,
+// `| json` at query time sees "2026-... stdout F {" and parses nothing.
+func TestParseLineRawIsThePayloadNotThePrefixedLine(t *testing.T) {
+	line := `2026-08-03T10:00:00Z stdout F {"level":"error","msg":"boom","trace_id":"abc"}`
+	got := ParseLine(line, time.Now())
+	if string(got.Raw) != `{"level":"error","msg":"boom","trace_id":"abc"}` {
+		t.Fatalf("raw = %q, want the JSON payload alone", got.Raw)
+	}
+	if got.Message != "boom" {
+		t.Fatalf("message = %q, want boom", got.Message)
+	}
+}
+
+func TestParseLineWithoutPrefixKeepsWholeLineAsRaw(t *testing.T) {
+	got := ParseLine("plain text line", time.Now())
+	if string(got.Raw) != "plain text line" {
+		t.Fatalf("raw = %q", got.Raw)
+	}
+	if got.Stream != "" {
+		t.Fatalf("stream = %q, want empty for a line with no CRI prefix", got.Stream)
+	}
+}
