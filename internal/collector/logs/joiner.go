@@ -89,7 +89,7 @@ func isContinuation(line string) bool {
 	if line[0] == ' ' || line[0] == '\t' {
 		return true
 	}
-	for _, prefix := range []string{"at ", "Caused by:", "... ", "goroutine ", "\tat "} {
+	for _, prefix := range []string{"Caused by:", "... ", "goroutine "} {
 		if strings.HasPrefix(line, prefix) {
 			return true
 		}
