@@ -26,20 +26,24 @@ type ParsedLine struct {
 	Stream string
 }
 
-// ParseLine trims and parses a log line, extracting level, message, and timestamp when present.
+// ParseLine parses a log line, extracting level, message, and timestamp when
+// present. The payload it carries (Raw, and Message when nothing overrides
+// it) is the application's line as written: leading and internal whitespace
+// are preserved verbatim. Only "\r"/"\n" left over from the transport's own
+// line framing are stripped — that framing is not payload.
 func ParseLine(line string, fallback time.Time) ParsedLine {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
+	line = strings.TrimRight(line, "\r\n")
+	if line == "" {
 		return ParsedLine{Timestamp: fallback}
 	}
 
-	msg := trimmed
+	msg := line
 	ts := fallback
 	stream := ""
 	level := agentv1.LogLevel_LOG_LEVEL_UNSPECIFIED
 
 	// Kubernetes log API prefix: "2006-01-02T15:04:05.999999999Z stdout F payload"
-	if parsedTS, parsedStream, rest, ok := splitK8sLogPrefix(trimmed); ok {
+	if parsedTS, parsedStream, rest, ok := splitK8sLogPrefix(line); ok {
 		ts = parsedTS
 		stream = parsedStream
 		msg = rest
@@ -87,19 +91,49 @@ func splitK8sLogPrefix(line string) (time.Time, string, string, bool) {
 			return time.Time{}, "", line, false
 		}
 	}
-	rest := strings.TrimSpace(line[space+1:])
+	rest := line[space+1:]
 	stream := ""
-	// Drop "stdout F" or "stderr F" tripwire fields when present, keeping the
-	// stream marker — it is a two-valued, indexable fact about the line.
-	if parts := strings.Fields(rest); len(parts) >= 3 && (parts[0] == "stdout" || parts[0] == "stderr") && len(parts[1]) == 1 {
-		stream = parts[0]
-		rest = strings.Join(parts[2:], " ")
+	// Drop the "stdout F"/"stderr F" tripwire fields when present, keeping the
+	// stream marker — it is a two-valued, indexable fact about the line. The
+	// CRI log format separates timestamp/stream/tag/payload with exactly one
+	// space each, so this only consumes those two known tokens and their
+	// separators; anything past the tag — including whitespace the
+	// application itself wrote — is left untouched.
+	if payload, parsedStream, ok := stripStreamAndTag(rest); ok {
+		stream = parsedStream
+		rest = payload
 	}
 	return parsed.UTC(), stream, rest, true
 }
 
+// stripStreamAndTag splits "stdout F payload" (or "stderr P payload") into
+// its stream marker and payload. It does not touch whitespace inside the
+// payload — the app may have indented it, and that indentation is part of
+// the verbatim line.
+func stripStreamAndTag(s string) (payload, stream string, ok bool) {
+	streamEnd := strings.IndexByte(s, ' ')
+	if streamEnd <= 0 {
+		return s, "", false
+	}
+	streamPart := s[:streamEnd]
+	if streamPart != "stdout" && streamPart != "stderr" {
+		return s, "", false
+	}
+	afterStream := s[streamEnd+1:]
+	tagEnd := strings.IndexByte(afterStream, ' ')
+	if tagEnd != 1 {
+		// The tag is always exactly one character ("F" full / "P" partial).
+		return s, "", false
+	}
+	return afterStream[tagEnd+1:], streamPart, true
+}
+
 func parseJSONLine(line string) (ParsedLine, bool) {
-	if !strings.HasPrefix(line, "{") {
+	// The application may have indented its own JSON output; that leading
+	// whitespace is payload and stays in Raw. It is only stripped here, for
+	// detection, and json.Unmarshal itself skips insignificant leading
+	// whitespace when parsing the value below.
+	if !strings.HasPrefix(strings.TrimLeft(line, " \t"), "{") {
 		return ParsedLine{}, false
 	}
 	var obj map[string]any
