@@ -32,6 +32,14 @@ const (
 	reconnectSinceOverlap = 5 * time.Second
 )
 
+// A joined record is capped well under the 256KB line cap so a runaway trace
+// cannot grow one record without bound, and is held at most this long so the
+// last line of a stream that went quiet still reaches the queue.
+const (
+	maxJoinedBytes = 64 * 1024
+	maxJoinHold    = 2 * time.Second
+)
+
 type streamKey struct {
 	podUID        string
 	containerName string
@@ -258,6 +266,18 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 	const maxLineSize = 256 * 1024
 	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
 
+	// One joiner per container stream. Lines from two containers interleave in
+	// time, so a shared joiner would attach one program's frames to another's
+	// panic.
+	join := newJoiner(maxJoinedBytes, maxJoinHold)
+	defer func() {
+		for _, record := range join.Flush() {
+			if err := c.handleLogLine(ctx, target, record); err != nil {
+				log.Warn("failed to handle log line", logger.F("error", err.Error()))
+			}
+		}
+	}()
+
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -268,14 +288,16 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 		if parsed.Message == "" && len(parsed.Raw) == 0 {
 			continue
 		}
-		if err := c.handleLogLine(ctx, target, parsed); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
+		for _, record := range join.Add(parsed, time.Now()) {
+			if err := c.handleLogLine(ctx, target, record); err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return err
+				}
+				log.Warn("failed to handle log line", logger.F("error", err.Error()))
+				continue
 			}
-			log.Warn("failed to handle log line", logger.F("error", err.Error()))
-			continue
+			cursor.markProcessed(record.Timestamp)
 		}
-		cursor.markProcessed(parsed.Timestamp)
 	}
 	if err := scanner.Err(); err != nil {
 		return err
@@ -286,17 +308,27 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 	return nil
 }
 
-func (c *Collector) handleLogLine(ctx context.Context, target streamTarget, parsed ParsedLine) error {
-	entry := &agentv1.LogEntry{
-		PodName:   target.pod.Name,
-		Namespace: target.pod.Namespace,
-		Container: target.container,
-		Timestamp: parsed.Timestamp.UnixNano(),
-		Message:   parsed.Message,
-		Level:     parsed.Level,
-		Labels:    FilterPodLabels(target.pod.Labels),
-		Raw:       parsed.Raw,
+// buildLogEntry is the single place a parsed line becomes a wire entry, so the
+// fields the consumer indexes cannot drift from the fields the parser fills.
+func buildLogEntry(target streamTarget, parsed ParsedLine, workload workloadRef) *agentv1.LogEntry {
+	return &agentv1.LogEntry{
+		PodName:      target.pod.Name,
+		Namespace:    target.pod.Namespace,
+		Container:    target.container,
+		Timestamp:    parsed.Timestamp.UnixNano(),
+		Message:      parsed.Message,
+		Level:        parsed.Level,
+		Labels:       FilterPodLabels(target.pod.Labels),
+		Raw:          parsed.Raw,
+		Stream:       parsed.Stream,
+		Workload:     workload.Name,
+		WorkloadKind: workload.Kind,
+		NodeName:     target.pod.Spec.NodeName,
 	}
+}
+
+func (c *Collector) handleLogLine(ctx context.Context, target streamTarget, parsed ParsedLine) error {
+	entry := buildLogEntry(target, parsed, c.workloads.Resolve(ctx, target.pod))
 
 	msg := &agentv1.AgentMessage{
 		MessageId: uuid.NewString(),
