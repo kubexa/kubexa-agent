@@ -60,6 +60,20 @@ func TestJoinerFlushesAfterTheHoldWindow(t *testing.T) {
 	}
 }
 
+// "at least 3 retries remain" is an ordinary log line, not a stack frame.
+// Real stack traces indent their frames, which the leading-whitespace rule
+// already covers, so matching a bare "at " prefix only risks joining
+// unrelated records.
+func TestJoinerDoesNotJoinAnUnindentedAtLine(t *testing.T) {
+	now := time.Now()
+	j := newJoiner(64*1024, time.Second)
+	j.Add(plain("connection lost", now), now)
+	out := j.Add(plain("at least 3 retries remain", now), now)
+	if len(out) != 1 || string(out[0].Raw) != "connection lost" {
+		t.Fatalf("joined an ordinary line: %q", out)
+	}
+}
+
 func TestJoinerFlushReturnsThePending(t *testing.T) {
 	now := time.Now()
 	j := newJoiner(64*1024, time.Second)
