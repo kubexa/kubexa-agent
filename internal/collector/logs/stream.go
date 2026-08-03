@@ -343,7 +343,6 @@ func buildLogEntry(target streamTarget, parsed ParsedLine, workload workloadRef)
 		Level:        parsed.Level,
 		Labels:       FilterPodLabels(target.pod.Labels),
 		Raw:          parsed.Raw,
-		Stream:       parsed.Stream,
 		Workload:     workload.Name,
 		WorkloadKind: workload.Kind,
 		NodeName:     target.pod.Spec.NodeName,

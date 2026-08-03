@@ -72,7 +72,7 @@ func TestStreamCursor_nilSafe(t *testing.T) {
 	}
 }
 
-func TestHandleLogLinePopulatesStreamAndWorkload(t *testing.T) {
+func TestHandleLogLinePopulatesWorkload(t *testing.T) {
 	ctrl := true
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name: "api-1", Namespace: "stage",
@@ -80,12 +80,9 @@ func TestHandleLogLinePopulatesStreamAndWorkload(t *testing.T) {
 	}, Spec: corev1.PodSpec{NodeName: "node-2"}}
 
 	entry := buildLogEntry(streamTarget{pod: pod, container: "app"},
-		ParsedLine{Message: "hi", Raw: []byte("hi"), Stream: "stderr", Timestamp: time.Unix(0, 7)},
+		ParsedLine{Message: "hi", Raw: []byte("hi"), Timestamp: time.Unix(0, 7)},
 		workloadRef{Name: "db", Kind: "StatefulSet"})
 
-	if entry.GetStream() != "stderr" {
-		t.Fatalf("stream = %q", entry.GetStream())
-	}
 	if entry.GetWorkload() != "db" || entry.GetWorkloadKind() != "StatefulSet" {
 		t.Fatalf("workload = %q/%q", entry.GetWorkloadKind(), entry.GetWorkload())
 	}
