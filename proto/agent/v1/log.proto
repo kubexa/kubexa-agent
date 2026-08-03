@@ -15,7 +15,11 @@ message LogEntry {
   string message        = 5;
   LogLevel level        = 6;
   map<string, string> labels = 7;  // pod labels passthrough
-  bytes  raw            = 8;       // original bytes, format bozuk ise
+  bytes  raw            = 8;       // the application's own line, prefix stripped
+  string stream         = 9;       // "stdout" | "stderr", from the CRI prefix
+  string workload       = 10;      // owning workload name, "" when uncontrolled
+  string workload_kind  = 11;      // Deployment | StatefulSet | DaemonSet | Job | CronJob
+  string node_name      = 12;
 }
 
 enum LogLevel {

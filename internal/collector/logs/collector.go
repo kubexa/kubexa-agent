@@ -27,6 +27,12 @@ import (
 
 const componentName = "log-collector"
 
+// workloadResolverTTL bounds how long a resolved workload is trusted before
+// the next lookup: long enough that steady-state cost is one API call per
+// controller, short enough that a rollout's new ReplicaSet is picked up
+// without an agent restart.
+const workloadResolverTTL = 5 * time.Minute
+
 // Writer buffers AgentMessage values for downstream export.
 type Writer interface {
 	Write(ctx context.Context, msg *agentv1.AgentMessage) error
@@ -70,6 +76,12 @@ type Collector struct {
 	metrics   *metrics
 	agentMeta *commonv1.AgentMetadata
 	sem       *semaphore.Weighted
+	workloads *workloadResolver
+	// writeTimeout is the same per-write budget queueWriter was built with. A
+	// stream's deferred joiner flush reads it to size its own detached
+	// context, so that budget stays consistent with actual queue writes
+	// instead of a separately guessed constant.
+	writeTimeout time.Duration
 
 	streamsMu    sync.Mutex
 	streams      map[streamKey]*streamHandle
@@ -155,10 +167,12 @@ func New(opts Options) (*Collector, error) {
 		log:         log,
 		metrics:     metrics,
 		agentMeta:   proto.Clone(meta).(*commonv1.AgentMetadata),
-		sem:         semaphore.NewWeighted(cfg.MaxConcurrentStreams),
-		streams:     make(map[streamKey]*streamHandle),
-		checkpoints: cpStore,
-		sleep:       sleep,
+		sem:          semaphore.NewWeighted(cfg.MaxConcurrentStreams),
+		workloads:    newWorkloadResolver(opts.Kube.Clientset(), workloadResolverTTL),
+		writeTimeout: writeTimeout,
+		streams:      make(map[streamKey]*streamHandle),
+		checkpoints:  cpStore,
+		sleep:        sleep,
 	}, nil
 }
 
