@@ -77,6 +77,11 @@ type Collector struct {
 	agentMeta *commonv1.AgentMetadata
 	sem       *semaphore.Weighted
 	workloads *workloadResolver
+	// writeTimeout is the same per-write budget queueWriter was built with. A
+	// stream's deferred joiner flush reads it to size its own detached
+	// context, so that budget stays consistent with actual queue writes
+	// instead of a separately guessed constant.
+	writeTimeout time.Duration
 
 	streamsMu    sync.Mutex
 	streams      map[streamKey]*streamHandle
@@ -162,11 +167,12 @@ func New(opts Options) (*Collector, error) {
 		log:         log,
 		metrics:     metrics,
 		agentMeta:   proto.Clone(meta).(*commonv1.AgentMetadata),
-		sem:         semaphore.NewWeighted(cfg.MaxConcurrentStreams),
-		workloads:   newWorkloadResolver(opts.Kube.Clientset(), workloadResolverTTL),
-		streams:     make(map[streamKey]*streamHandle),
-		checkpoints: cpStore,
-		sleep:       sleep,
+		sem:          semaphore.NewWeighted(cfg.MaxConcurrentStreams),
+		workloads:    newWorkloadResolver(opts.Kube.Clientset(), workloadResolverTTL),
+		writeTimeout: writeTimeout,
+		streams:      make(map[streamKey]*streamHandle),
+		checkpoints:  cpStore,
+		sleep:        sleep,
 	}, nil
 }
 
