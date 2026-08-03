@@ -16,7 +16,15 @@ message LogEntry {
   LogLevel level        = 6;
   map<string, string> labels = 7;  // pod labels passthrough
   bytes  raw            = 8;       // the application's own line, prefix stripped
-  string stream         = 9;       // "stdout" | "stderr", from the CRI prefix
+  reserved 9;
+  reserved "stream";                // removed 2026-08-03: the agent's only log
+                                     // source is the Kubernetes pods/log API,
+                                     // which never carries a stdout/stderr
+                                     // marker (kubelet consumes the CRI
+                                     // record's stream field itself and does
+                                     // not re-emit it). Recovering this means
+                                     // tailing /var/log/pods from the node —
+                                     // its own sub-project, not a label.
   string workload       = 10;      // owning workload name, "" when uncontrolled
   string workload_kind  = 11;      // Deployment | StatefulSet | DaemonSet | Job | CronJob
   string node_name      = 12;

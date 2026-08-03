@@ -21,33 +21,32 @@ type ParsedLine struct {
 	Level     agentv1.LogLevel
 	Raw       []byte
 	Timestamp time.Time
-	// Stream is the CRI marker: "stdout", "stderr", or "" when the line
-	// carried no prefix (a log source that is not the kubelet's file format).
-	Stream string
 }
 
-// ParseLine trims and parses a log line, extracting level, message, and timestamp when present.
+// ParseLine parses a log line, extracting level, message, and timestamp when
+// present. The payload it carries (Raw, and Message when nothing overrides
+// it) is the application's line as written: leading and internal whitespace
+// are preserved verbatim. Only "\r"/"\n" left over from the transport's own
+// line framing are stripped — that framing is not payload.
 func ParseLine(line string, fallback time.Time) ParsedLine {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
+	line = strings.TrimRight(line, "\r\n")
+	if line == "" {
 		return ParsedLine{Timestamp: fallback}
 	}
 
-	msg := trimmed
+	msg := line
 	ts := fallback
-	stream := ""
 	level := agentv1.LogLevel_LOG_LEVEL_UNSPECIFIED
 
-	// Kubernetes log API prefix: "2006-01-02T15:04:05.999999999Z stdout F payload"
-	if parsedTS, parsedStream, rest, ok := splitK8sLogPrefix(trimmed); ok {
+	// Kubernetes log API prefix: "2006-01-02T15:04:05.999999999Z payload"
+	if parsedTS, rest, ok := splitK8sLogPrefix(line); ok {
 		ts = parsedTS
-		stream = parsedStream
 		msg = rest
 	}
 
 	// Captured AFTER the prefix split on purpose: raw is what reaches Loki as
-	// the log line, and a line that still carries "2026-…Z stdout F " in front
-	// of its JSON cannot be parsed by `| json` at query time.
+	// the log line, and a line that still carries "2026-…Z " in front of its
+	// JSON cannot be parsed by `| json` at query time.
 	raw := []byte(msg)
 
 	if pl, ok := parseJSONLine(msg); ok {
@@ -67,39 +66,46 @@ func ParseLine(line string, fallback time.Time) ParsedLine {
 		Level:     level,
 		Raw:       raw,
 		Timestamp: ts,
-		Stream:    stream,
 	}
 }
 
-func splitK8sLogPrefix(line string) (time.Time, string, string, bool) {
+// splitK8sLogPrefix strips the Kubernetes pods/log API's timestamp prefix:
+// "<RFC3339Nano> <payload>", present because the collector requests
+// Timestamps: true (see internal/k8s/client.go). This is the only prefix
+// format the agent ever sees. An earlier version of this function also
+// stripped a "stdout"/"stderr" + tag marker ("stdout F payload"), on the
+// assumption the CRI log format's own stream field would show up here too.
+// It never does: kubelet consumes that field itself when it renders the
+// pods/log response and does not re-emit it, so that branch never fired
+// against a real line — only against a hand-written test one. Recovering an
+// actual stdout/stderr marker means tailing /var/log/pods on the node
+// directly, which is a different log source entirely (see log.proto's
+// reserved field 9, "stream").
+func splitK8sLogPrefix(line string) (time.Time, string, bool) {
 	// RFC3339Nano timestamp at line start (39+ chars).
 	if len(line) < 30 || line[0] < '0' || line[0] > '9' {
-		return time.Time{}, "", line, false
+		return time.Time{}, line, false
 	}
 	space := strings.IndexByte(line, ' ')
 	if space <= 0 {
-		return time.Time{}, "", line, false
+		return time.Time{}, line, false
 	}
 	tsPart := line[:space]
 	parsed, err := time.Parse(time.RFC3339Nano, tsPart)
 	if err != nil {
 		if parsed, err = time.Parse(time.RFC3339, tsPart); err != nil {
-			return time.Time{}, "", line, false
+			return time.Time{}, line, false
 		}
 	}
-	rest := strings.TrimSpace(line[space+1:])
-	stream := ""
-	// Drop "stdout F" or "stderr F" tripwire fields when present, keeping the
-	// stream marker — it is a two-valued, indexable fact about the line.
-	if parts := strings.Fields(rest); len(parts) >= 3 && (parts[0] == "stdout" || parts[0] == "stderr") && len(parts[1]) == 1 {
-		stream = parts[0]
-		rest = strings.Join(parts[2:], " ")
-	}
-	return parsed.UTC(), stream, rest, true
+	return parsed.UTC(), line[space+1:], true
 }
 
 func parseJSONLine(line string) (ParsedLine, bool) {
-	if !strings.HasPrefix(line, "{") {
+	// The application may have indented its own JSON output; that leading
+	// whitespace is payload and stays in Raw. It is only stripped here, for
+	// detection, and json.Unmarshal itself skips insignificant leading
+	// whitespace when parsing the value below.
+	if !strings.HasPrefix(strings.TrimLeft(line, " \t"), "{") {
 		return ParsedLine{}, false
 	}
 	var obj map[string]any
