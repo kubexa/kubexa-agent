@@ -73,3 +73,30 @@ func TestClusterRoleCoversRegistry(t *testing.T) {
 			"query policy reports them as allowed.", missing)
 	}
 }
+
+// The live usage columns read metrics.k8s.io through the QUERY path, which an
+// install may use with scraping turned off. Gating the RBAC rule on
+// collect.metrics.enabled alone would make those reads RBAC_DENIED on exactly
+// that install, with nothing in the agent's own config to explain it.
+func TestClusterRoleGrantsMetricsForLiveQueriesToo(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "helm", "kubexa-agent", "templates", "clusterrole.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	chart := string(raw)
+
+	idx := strings.Index(chart, `- apiGroups: ["metrics.k8s.io"]`)
+	if idx < 0 {
+		t.Fatal("no metrics.k8s.io rule in the ClusterRole")
+	}
+	// The {{- if }} immediately above the rule is the one that gates it.
+	head := chart[:idx]
+	gate := head[strings.LastIndex(head, "{{- if"):]
+	if !strings.Contains(gate, "query.enabled") {
+		t.Errorf("the metrics.k8s.io rule is not granted for live queries; gate is %q", strings.TrimSpace(gate))
+	}
+	if !strings.Contains(gate, "collect.metrics.enabled") {
+		t.Errorf("the metrics.k8s.io rule no longer covers scraping; gate is %q", strings.TrimSpace(gate))
+	}
+}
