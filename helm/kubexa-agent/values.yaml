@@ -195,6 +195,12 @@ collect:
 query:
   enabled: true
   # redactSecrets: false   # unset inherits collect.state.redactSecrets
+  #
+  # Listing NAMED rules here replaces the collect.state inheritance -- an
+  # empty list inherits, a non-empty one does not. Reading metrics.k8s.io for
+  # the cpu/memory columns is granted implicitly whenever query.enabled is
+  # true, so it must NOT be written here: doing so would make this list
+  # non-empty and silently drop the inherited object rules.
   rules: []
   #  - namespace: stage
   #    resources: [pods]

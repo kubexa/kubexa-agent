@@ -104,7 +104,9 @@ rules:
     verbs: ["get"]
   {{- end }}
 
-  {{- if .Values.collect.metrics.enabled }}
+  {{- if or .Values.collect.metrics.enabled .Values.query.enabled }}
+  # Scraping writes these to the metrics backend; a live listing reads them
+  # straight back through the query path. Either feature alone needs the rule.
   - apiGroups: ["metrics.k8s.io"]
     resources:
       - pods

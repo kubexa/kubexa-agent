@@ -23,8 +23,9 @@ collect:
 	}
 
 	rules := cfg.QueryRules()
-	if len(rules) != 1 {
-		t.Fatalf("got %d inherited rules, want 1", len(rules))
+	// +1 for the implicit metrics usage rule that QueryRules always appends.
+	if len(rules) != 2 {
+		t.Fatalf("got %d inherited rules, want 2 (the inherited rule plus the implicit metrics rule)", len(rules))
 	}
 	if rules[0].Namespace != "stage" {
 		t.Errorf("namespace = %q, want %q", rules[0].Namespace, "stage")
@@ -66,11 +67,15 @@ query:
 	}
 
 	rules := cfg.QueryRules()
-	if len(rules) != 1 || rules[0].Namespace != "prod" {
+	// +1 for the implicit metrics usage rule that QueryRules always appends.
+	if len(rules) != 2 || rules[0].Namespace != "prod" {
 		t.Fatalf("got %+v, want the query rule to replace the state rules", rules)
 	}
 	if strings.Join(rules[0].Verbs, ",") != "list" {
 		t.Errorf("verbs = %v, want [list]", rules[0].Verbs)
+	}
+	if rules[1].ID != metricsUsageRuleID {
+		t.Errorf("rules[1] = %q, want the implicit metrics rule", rules[1].ID)
 	}
 }
 
@@ -90,8 +95,9 @@ query:
 	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got := cfg.QueryRules(); len(got) != 1 || got[0].Namespace != "stage" {
-		t.Errorf("rules = %+v, want the inherited state rule", got)
+	// +1 for the implicit metrics usage rule that QueryRules always appends.
+	if got := cfg.QueryRules(); len(got) != 2 || got[0].Namespace != "stage" {
+		t.Errorf("rules = %+v, want the inherited state rule plus the implicit metrics rule", got)
 	}
 	if cfg.QueryRedactSecrets() {
 		t.Error("query.redact_secrets=false must override collect.state.redact_secrets=true")
@@ -180,6 +186,66 @@ query:
 	}
 	if err := cfg.ValidateQuery(); err != nil {
 		t.Fatalf("ValidateQuery() = %v, want nil", err)
+	}
+}
+
+func TestQueryRulesAlwaysCarryTheMetricsUsageRule(t *testing.T) {
+	// The cpu/memory columns of a live listing read metrics.k8s.io through
+	// this same query path. The rule is implicit rather than written into the
+	// chart's query.rules because a non-empty query.rules cancels the
+	// collect.state inheritance below -- which would leave a cluster able to
+	// read metrics and nothing else.
+	cfg := &Config{}
+	cfg.Collect.State.Rules = []StateNamespaceRule{{ID: "pods", Resources: []string{"pods"}}}
+
+	rules := cfg.QueryRules()
+
+	var found *QueryRule
+	for i := range rules {
+		if rules[i].ID == metricsUsageRuleID {
+			found = &rules[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("metrics usage rule missing from %+v", rules)
+	}
+	if strings.Join(found.Resources, ",") != "metrics.k8s.io/v1beta1/pods,metrics.k8s.io/v1beta1/nodes" {
+		t.Errorf("resources = %v", found.Resources)
+	}
+	if strings.Join(found.Verbs, ",") != "list" {
+		t.Errorf("verbs = %v, want [list]", found.Verbs)
+	}
+	if found.Namespace != "" {
+		t.Errorf("namespace = %q, want empty (nodes are cluster-scoped)", found.Namespace)
+	}
+
+	// The inherited rule must still be there: the implicit rule ADDS, it does
+	// not replace.
+	var inherited bool
+	for _, r := range rules {
+		if r.ID == "pods" {
+			inherited = true
+		}
+	}
+	if !inherited {
+		t.Error("the collect.state rule was dropped")
+	}
+}
+
+func TestQueryRulesKeepTheMetricsRuleAlongsideExplicitRules(t *testing.T) {
+	cfg := &Config{}
+	cfg.Query.Rules = []QueryRule{{ID: "own", Resources: []string{"pods"}}}
+
+	rules := cfg.QueryRules()
+
+	if len(rules) != 2 {
+		t.Fatalf("rules = %d, want 2 (the owner's and the implicit one)", len(rules))
+	}
+	if rules[0].ID != "own" {
+		t.Errorf("the owner's rule must come first, got %q", rules[0].ID)
+	}
+	if rules[1].ID != metricsUsageRuleID {
+		t.Errorf("rules[1] = %q, want %q", rules[1].ID, metricsUsageRuleID)
 	}
 }
 
