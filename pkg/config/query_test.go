@@ -200,7 +200,13 @@ query:
 
 func TestQueryRulesMirrorScopedOwnerRuleIntoOneMetricsRule(t *testing.T) {
 	cfg := &Config{}
-	cfg.Query.Rules = []QueryRule{{ID: "be", Namespace: "stage", Resources: []string{"pods"}, Names: []string{"be-*"}}}
+	cfg.Query.Rules = []QueryRule{{
+		ID:            "be",
+		Namespace:     "stage",
+		Resources:     []string{"pods"},
+		Names:         []string{"be-*"},
+		LabelSelector: "app=be",
+	}}
 
 	rules := cfg.QueryRules()
 
@@ -223,6 +229,13 @@ func TestQueryRulesMirrorScopedOwnerRuleIntoOneMetricsRule(t *testing.T) {
 	}
 	if strings.Join(mirror.Verbs, ",") != "list" {
 		t.Errorf("verbs = %v, want [list]", mirror.Verbs)
+	}
+	// LabelSelector must be carried over too -- metrics-server's PodMetrics
+	// endpoint genuinely honours it (verified against a live cluster), so
+	// dropping it here would silently widen what the metrics query returns
+	// relative to the object rule that authorized it.
+	if mirror.LabelSelector != "app=be" {
+		t.Errorf("label_selector = %q, want %q", mirror.LabelSelector, "app=be")
 	}
 }
 
@@ -287,8 +300,60 @@ func TestQueryRulesFieldSelectorRuleProducesNoMetricsMirror(t *testing.T) {
 
 	rules := cfg.QueryRules()
 	if len(rules) != 1 {
-		t.Fatalf("got %+v, want no mirror: a pod field selector has no PodMetrics analogue, "+
-			"and dropping just the selector would silently widen the owner's scope", rules)
+		t.Fatalf("got %+v, want no mirror: metrics-server's PodMetrics fieldSelector accepts only "+
+			"metadata.name/metadata.namespace and hard-400s on anything else (verified against a live "+
+			"cluster), and dropping just the selector would silently widen the owner's scope", rules)
+	}
+}
+
+// A field-selector rule that permits listing a resource captures that
+// resource's object LIST too, because Decide's rule selection does not
+// consider field selectors -- it is the executor's row filter, not the rule
+// match, that applies the selector. So a later, broader rule for the same
+// resource is unreachable for the object listing, and mirroring ITS metrics
+// grant would answer with more than the effective object policy allows.
+// Verified against the compiled policy: with these two rules in force, a
+// live "list pods" query is allowed with fieldSel="status.phase=Running",
+// so rule b never decides a pods query and must not seed a metrics mirror
+// either.
+func TestQueryRulesFieldSelectorRuleBlocksLaterBroaderRuleFromMirroring(t *testing.T) {
+	cfg := &Config{}
+	cfg.Query.Rules = []QueryRule{
+		{ID: "a", Resources: []string{"pods"}, FieldSelector: "status.phase=Running"},
+		{ID: "b", Resources: []string{"pods"}},
+	}
+
+	rules := cfg.QueryRules()
+
+	for _, r := range rules {
+		if strings.HasPrefix(r.ID, metricsUsageRuleID) {
+			t.Fatalf("got %+v, want no pods metrics mirror at all: rule b is unreachable for pods "+
+				"because rule a's field selector already captures every pods query", rules)
+		}
+	}
+	// The two owner rules themselves must be untouched.
+	if len(rules) != 2 || rules[0].ID != "a" || rules[1].ID != "b" {
+		t.Fatalf("got %+v, want exactly the two owner rules and nothing else", rules)
+	}
+}
+
+func TestQueryRulesUnparseableResourceEntryIsSkippedNotFatal(t *testing.T) {
+	cfg := &Config{}
+	cfg.Query.Rules = []QueryRule{{Resources: []string{"nonsense", "pods"}}}
+
+	rules := cfg.QueryRules()
+
+	var sawMirror bool
+	for _, r := range rules {
+		if strings.HasPrefix(r.ID, metricsUsageRuleID) {
+			sawMirror = true
+			if strings.Join(r.Resources, ",") != "metrics.k8s.io/v1beta1/pods" {
+				t.Errorf("resources = %v, want only the pods metrics resource", r.Resources)
+			}
+		}
+	}
+	if !sawMirror {
+		t.Fatalf("got %+v, want the unparseable entry skipped and the pods mirror still produced", rules)
 	}
 }
 
