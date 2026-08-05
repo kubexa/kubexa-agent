@@ -71,8 +71,37 @@ func (c *Config) QueryRedactSecrets() bool {
 	return c.Collect.State.RedactSecrets
 }
 
+// metricsUsageRuleID names the implicit rule below, so a test and an operator
+// reading a denial log can both tell it apart from anything the owner wrote.
+const metricsUsageRuleID = "kubexa-usage-metrics"
+
+// metricsUsageRule permits reading metrics.k8s.io, which is where a live
+// listing's cpu and memory columns come from.
+//
+// It is appended by QueryRules rather than shipped in the chart's query.rules
+// because query.rules being non-empty CANCELS the collect.state inheritance
+// below: a chart that wrote this rule into query.rules would narrow every
+// cluster's live reads to metrics alone and break the object listing itself.
+//
+// List only, and every namespace: the caller reads a page of objects, and
+// nodes are cluster-scoped. metrics.k8s.io returns two numbers per object and
+// nothing else, so this opens no surface that listing the objects did not
+// already open.
+func metricsUsageRule() QueryRule {
+	return QueryRule{
+		ID: metricsUsageRuleID,
+		Resources: []string{
+			"metrics.k8s.io/v1beta1/pods",
+			"metrics.k8s.io/v1beta1/nodes",
+		},
+		Verbs: []string{"list"},
+	}
+}
+
 // QueryRules returns the effective rule set: query.rules when present,
-// otherwise collect.state.rules converted rule for rule.
+// otherwise collect.state.rules converted rule for rule -- plus the implicit
+// metrics usage rule in both cases, so live queries can always answer the
+// cpu/memory columns.
 //
 // An inherited rule carries no Verbs, which means both list and get -- the
 // same access the streaming path already had to those resources. Widening is
@@ -82,11 +111,11 @@ func (c *Config) QueryRules() []QueryRule {
 		return nil
 	}
 	if len(c.Query.Rules) > 0 {
-		out := make([]QueryRule, len(c.Query.Rules))
+		out := make([]QueryRule, len(c.Query.Rules), len(c.Query.Rules)+1)
 		copy(out, c.Query.Rules)
-		return out
+		return append(out, metricsUsageRule())
 	}
-	out := make([]QueryRule, 0, len(c.Collect.State.Rules))
+	out := make([]QueryRule, 0, len(c.Collect.State.Rules)+1)
 	for _, r := range c.Collect.State.Rules {
 		out = append(out, QueryRule{
 			ID:            r.ID,
@@ -96,7 +125,7 @@ func (c *Config) QueryRules() []QueryRule {
 			FieldSelector: r.FieldSelector,
 		})
 	}
-	return out
+	return append(out, metricsUsageRule())
 }
 
 // validateQuery returns one violation string per problem, matching the
