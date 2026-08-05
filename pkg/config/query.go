@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kubexa/kubexa-agent/pkg/config/k8sresource"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // QueryConfig governs live, on-demand resource reads requested by the Kubexa
@@ -71,37 +72,118 @@ func (c *Config) QueryRedactSecrets() bool {
 	return c.Collect.State.RedactSecrets
 }
 
-// metricsUsageRuleID names the implicit rule below, so a test and an operator
-// reading a denial log can both tell it apart from anything the owner wrote.
+// metricsUsageRuleID names the implicit rules below, so a test and an
+// operator reading a denial log can both tell them apart from anything the
+// owner wrote. Mirrored rules append the source rule's own label so multiple
+// mirrors are still distinguishable from one another.
 const metricsUsageRuleID = "kubexa-usage-metrics"
 
-// metricsUsageRule permits reading metrics.k8s.io, which is where a live
-// listing's cpu and memory columns come from.
+// corePodsGVR and coreNodesGVR are what a rule's Resources entries must
+// resolve to (via k8sresource.Parse, which understands every alias -- "pods",
+// "pod", "v1/pods") for that rule to be mirrored into a metrics.k8s.io grant.
+var (
+	corePodsGVR  = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	coreNodesGVR = schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+)
+
+// permitsListing reports whether a rule's Verbs grants "list" -- empty means
+// both list and get are granted, matching how policy.Compile interprets it.
+func permitsListing(verbs []string) bool {
+	if len(verbs) == 0 {
+		return true
+	}
+	for _, v := range verbs {
+		if strings.EqualFold(strings.TrimSpace(v), "list") {
+			return true
+		}
+	}
+	return false
+}
+
+// ruleTargets reports whether any of a rule's Resources entries resolves to
+// want. Entries that fail to parse are skipped rather than treated as a
+// match or an error: validateQuery already reports malformed entries, and a
+// rule that is otherwise fine should not lose its metrics mirror over an
+// unrelated typo elsewhere in the same Resources list.
+func ruleTargets(resources []string, want schema.GroupVersionResource) bool {
+	for _, name := range resources {
+		d, err := k8sresource.Parse(name)
+		if err != nil {
+			continue
+		}
+		if d.GVR == want {
+			return true
+		}
+	}
+	return false
+}
+
+// metricsUsageRules mirrors each rule in the effective set that permits
+// listing pods or nodes into a matching metrics.k8s.io grant, so the live
+// listing's cpu/memory columns are scoped to exactly what the owner already
+// granted for the objects themselves -- never more.
 //
 // It is appended by QueryRules rather than shipped in the chart's query.rules
 // because query.rules being non-empty CANCELS the collect.state inheritance
-// below: a chart that wrote this rule into query.rules would narrow every
+// below: a chart that wrote rules into query.rules would narrow every
 // cluster's live reads to metrics alone and break the object listing itself.
 //
-// List only, and every namespace: the caller reads a page of objects, and
-// nodes are cluster-scoped. metrics.k8s.io returns two numbers per object and
-// nothing else, so this opens no surface that listing the objects did not
-// already open.
-func metricsUsageRule() QueryRule {
-	return QueryRule{
-		ID: metricsUsageRuleID,
-		Resources: []string{
-			"metrics.k8s.io/v1beta1/pods",
-			"metrics.k8s.io/v1beta1/nodes",
-		},
-		Verbs: []string{"list"},
+// A rule that does not grant "list" (Verbs: [get] only, no list implied)
+// produces nothing: the object listing it would decorate cannot happen
+// either, so there is nothing for a metrics column to attach to.
+//
+// A rule carrying a FieldSelector is skipped entirely rather than mirrored
+// without it. A pod field selector like spec.nodeName=x has no meaning on a
+// PodMetrics object, and metrics-server would reject or silently ignore it,
+// so carrying it over would be unreliable -- and dropping just the selector
+// would silently widen the owner's scope. Losing the two metrics columns for
+// that rule is the safe failure.
+//
+// LabelSelector IS mirrored: PodMetrics objects carry the pod's labels, and
+// the executor ANDs the policy's selector into whatever the request carries,
+// so it can only narrow what comes back, never widen it.
+func metricsUsageRules(rules []QueryRule) []QueryRule {
+	var out []QueryRule
+	for i, r := range rules {
+		if r.FieldSelector != "" {
+			continue
+		}
+		if !permitsListing(r.Verbs) {
+			continue
+		}
+		source := r.ID
+		if source == "" {
+			source = fmt.Sprintf("#%d", i)
+		}
+		if ruleTargets(r.Resources, corePodsGVR) {
+			out = append(out, QueryRule{
+				ID:            metricsUsageRuleID + ":" + source + ":pods",
+				Namespace:     r.Namespace,
+				Resources:     []string{"metrics.k8s.io/v1beta1/pods"},
+				Names:         append([]string(nil), r.Names...),
+				Verbs:         []string{"list"},
+				LabelSelector: r.LabelSelector,
+			})
+		}
+		if ruleTargets(r.Resources, coreNodesGVR) {
+			out = append(out, QueryRule{
+				ID:            metricsUsageRuleID + ":" + source + ":nodes",
+				Namespace:     r.Namespace,
+				Resources:     []string{"metrics.k8s.io/v1beta1/nodes"},
+				Names:         append([]string(nil), r.Names...),
+				Verbs:         []string{"list"},
+				LabelSelector: r.LabelSelector,
+			})
+		}
 	}
+	return out
 }
 
 // QueryRules returns the effective rule set: query.rules when present,
-// otherwise collect.state.rules converted rule for rule -- plus the implicit
-// metrics usage rule in both cases, so live queries can always answer the
-// cpu/memory columns.
+// otherwise collect.state.rules converted rule for rule -- plus, in both
+// cases, a metrics.k8s.io mirror of every rule that permits listing pods or
+// nodes, so live queries can answer the cpu/memory columns without widening
+// what the owner already granted.
 //
 // An inherited rule carries no Verbs, which means both list and get -- the
 // same access the streaming path already had to those resources. Widening is
@@ -111,13 +193,13 @@ func (c *Config) QueryRules() []QueryRule {
 		return nil
 	}
 	if len(c.Query.Rules) > 0 {
-		out := make([]QueryRule, len(c.Query.Rules), len(c.Query.Rules)+1)
+		out := make([]QueryRule, len(c.Query.Rules))
 		copy(out, c.Query.Rules)
-		return append(out, metricsUsageRule())
+		return append(out, metricsUsageRules(c.Query.Rules)...)
 	}
-	out := make([]QueryRule, 0, len(c.Collect.State.Rules)+1)
+	base := make([]QueryRule, 0, len(c.Collect.State.Rules))
 	for _, r := range c.Collect.State.Rules {
-		out = append(out, QueryRule{
+		base = append(base, QueryRule{
 			ID:            r.ID,
 			Namespace:     r.Namespace,
 			Resources:     append([]string(nil), r.Resources...),
@@ -125,7 +207,7 @@ func (c *Config) QueryRules() []QueryRule {
 			FieldSelector: r.FieldSelector,
 		})
 	}
-	return append(out, metricsUsageRule())
+	return append(base, metricsUsageRules(base)...)
 }
 
 // validateQuery returns one violation string per problem, matching the
