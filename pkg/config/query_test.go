@@ -74,8 +74,8 @@ query:
 	if strings.Join(rules[0].Verbs, ",") != "list" {
 		t.Errorf("verbs = %v, want [list]", rules[0].Verbs)
 	}
-	if rules[1].ID != metricsUsageRuleID {
-		t.Errorf("rules[1] = %q, want the implicit metrics rule", rules[1].ID)
+	if !strings.HasPrefix(rules[1].ID, metricsUsageRuleID) {
+		t.Errorf("rules[1].ID = %q, want prefix %q (the mirrored metrics rule)", rules[1].ID, metricsUsageRuleID)
 	}
 }
 
@@ -189,63 +189,138 @@ query:
 	}
 }
 
-func TestQueryRulesAlwaysCarryTheMetricsUsageRule(t *testing.T) {
-	// The cpu/memory columns of a live listing read metrics.k8s.io through
-	// this same query path. The rule is implicit rather than written into the
-	// chart's query.rules because a non-empty query.rules cancels the
-	// collect.state inheritance below -- which would leave a cluster able to
-	// read metrics and nothing else.
+// The cpu/memory columns of a live listing read metrics.k8s.io through this
+// same query path. The grant is implicit rather than written into the
+// chart's query.rules -- a non-empty query.rules cancels the collect.state
+// inheritance below, which would leave a cluster able to read metrics and
+// nothing else -- but it must never be BROADER than what the owner already
+// granted the object listing itself. The tests below mirror the finding: the
+// old implicit rule was one unscoped grant for every namespace and every
+// node; it is now one mirror per owner rule, carrying that rule's own scope.
+
+func TestQueryRulesMirrorScopedOwnerRuleIntoOneMetricsRule(t *testing.T) {
 	cfg := &Config{}
-	cfg.Collect.State.Rules = []StateNamespaceRule{{ID: "pods", Resources: []string{"pods"}}}
+	cfg.Query.Rules = []QueryRule{{ID: "be", Namespace: "stage", Resources: []string{"pods"}, Names: []string{"be-*"}}}
 
 	rules := cfg.QueryRules()
 
-	var found *QueryRule
-	for i := range rules {
-		if rules[i].ID == metricsUsageRuleID {
-			found = &rules[i]
-		}
+	// The owner's own rule must still be first; the mirror only adds.
+	if len(rules) != 2 || rules[0].ID != "be" {
+		t.Fatalf("got %+v, want the owner's rule first plus exactly one mirror", rules)
 	}
-	if found == nil {
-		t.Fatalf("metrics usage rule missing from %+v", rules)
+	mirror := rules[1]
+	if !strings.HasPrefix(mirror.ID, metricsUsageRuleID) {
+		t.Errorf("mirror ID = %q, want prefix %q", mirror.ID, metricsUsageRuleID)
 	}
-	if strings.Join(found.Resources, ",") != "metrics.k8s.io/v1beta1/pods,metrics.k8s.io/v1beta1/nodes" {
-		t.Errorf("resources = %v", found.Resources)
+	if strings.Join(mirror.Resources, ",") != "metrics.k8s.io/v1beta1/pods" {
+		t.Errorf("resources = %v, want only the pods metrics resource (no nodes rule)", mirror.Resources)
 	}
-	if strings.Join(found.Verbs, ",") != "list" {
-		t.Errorf("verbs = %v, want [list]", found.Verbs)
+	if mirror.Namespace != "stage" {
+		t.Errorf("namespace = %q, want %q", mirror.Namespace, "stage")
 	}
-	if found.Namespace != "" {
-		t.Errorf("namespace = %q, want empty (nodes are cluster-scoped)", found.Namespace)
+	if strings.Join(mirror.Names, ",") != "be-*" {
+		t.Errorf("names = %v, want [be-*]", mirror.Names)
 	}
-
-	// The inherited rule must still be there: the implicit rule ADDS, it does
-	// not replace.
-	var inherited bool
-	for _, r := range rules {
-		if r.ID == "pods" {
-			inherited = true
-		}
-	}
-	if !inherited {
-		t.Error("the collect.state rule was dropped")
+	if strings.Join(mirror.Verbs, ",") != "list" {
+		t.Errorf("verbs = %v, want [list]", mirror.Verbs)
 	}
 }
 
-func TestQueryRulesKeepTheMetricsRuleAlongsideExplicitRules(t *testing.T) {
+func TestQueryRulesMirrorUnrestrictedRuleIntoPodsAndNodesMetricsRules(t *testing.T) {
 	cfg := &Config{}
-	cfg.Query.Rules = []QueryRule{{ID: "own", Resources: []string{"pods"}}}
+	cfg.Query.Rules = []QueryRule{{ID: "own", Resources: []string{"pods", "nodes"}}}
 
 	rules := cfg.QueryRules()
 
-	if len(rules) != 2 {
-		t.Fatalf("rules = %d, want 2 (the owner's and the implicit one)", len(rules))
+	if len(rules) != 3 || rules[0].ID != "own" {
+		t.Fatalf("got %+v, want the owner's rule first plus two mirrors", rules)
 	}
-	if rules[0].ID != "own" {
-		t.Errorf("the owner's rule must come first, got %q", rules[0].ID)
+	var sawPods, sawNodes bool
+	for _, r := range rules[1:] {
+		if !strings.HasPrefix(r.ID, metricsUsageRuleID) {
+			t.Errorf("mirror ID = %q, want prefix %q", r.ID, metricsUsageRuleID)
+		}
+		if r.Namespace != "" || len(r.Names) != 0 {
+			t.Errorf("rule %+v should stay unrestricted, mirroring the owner's unrestricted rule", r)
+		}
+		switch strings.Join(r.Resources, ",") {
+		case "metrics.k8s.io/v1beta1/pods":
+			sawPods = true
+		case "metrics.k8s.io/v1beta1/nodes":
+			sawNodes = true
+		}
 	}
-	if rules[1].ID != metricsUsageRuleID {
-		t.Errorf("rules[1] = %q, want %q", rules[1].ID, metricsUsageRuleID)
+	if !sawPods || !sawNodes {
+		t.Fatalf("rules = %+v, want both a pods and a nodes metrics mirror", rules)
+	}
+}
+
+func TestQueryRulesMirrorResourceAliasForms(t *testing.T) {
+	// "pods", "pod" and "v1/pods" all resolve to the same GVR via
+	// k8sresource.Parse; the mirror must recognise all of them, not just the
+	// literal string "pods".
+	for _, alias := range []string{"pod", "v1/pods"} {
+		t.Run(alias, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.Query.Rules = []QueryRule{{Resources: []string{alias}}}
+			rules := cfg.QueryRules()
+			if len(rules) != 2 || strings.Join(rules[1].Resources, ",") != "metrics.k8s.io/v1beta1/pods" {
+				t.Fatalf("got %+v, want the alias recognised and mirrored to metrics.k8s.io/v1beta1/pods", rules)
+			}
+		})
+	}
+}
+
+func TestQueryRulesGetOnlyRuleProducesNoMetricsMirror(t *testing.T) {
+	cfg := &Config{}
+	cfg.Query.Rules = []QueryRule{{Resources: []string{"pods"}, Verbs: []string{"get"}}}
+
+	rules := cfg.QueryRules()
+	if len(rules) != 1 {
+		t.Fatalf("got %+v, want no mirror: a get-only rule permits no listing for a metrics column to attach to", rules)
+	}
+}
+
+func TestQueryRulesFieldSelectorRuleProducesNoMetricsMirror(t *testing.T) {
+	cfg := &Config{}
+	cfg.Query.Rules = []QueryRule{{Resources: []string{"pods"}, FieldSelector: "spec.nodeName=x"}}
+
+	rules := cfg.QueryRules()
+	if len(rules) != 1 {
+		t.Fatalf("got %+v, want no mirror: a pod field selector has no PodMetrics analogue, "+
+			"and dropping just the selector would silently widen the owner's scope", rules)
+	}
+}
+
+func TestQueryRulesUnrelatedResourceProducesNoMetricsMirror(t *testing.T) {
+	cfg := &Config{}
+	cfg.Query.Rules = []QueryRule{{Resources: []string{"services"}}}
+
+	rules := cfg.QueryRules()
+	if len(rules) != 1 {
+		t.Fatalf("got %+v, want no mirror for a rule that grants neither pods nor nodes", rules)
+	}
+}
+
+func TestQueryRulesMirrorInheritedStateRulesToo(t *testing.T) {
+	cfg := &Config{}
+	cfg.Collect.State.Rules = []StateNamespaceRule{{ID: "pods", Namespace: "stage", Resources: []string{"pods"}}}
+
+	rules := cfg.QueryRules()
+
+	// The inherited rule must still be there: the mirror only adds.
+	if len(rules) != 2 || rules[0].ID != "pods" {
+		t.Fatalf("got %+v, want the inherited rule first plus one mirror", rules)
+	}
+	mirror := rules[1]
+	if !strings.HasPrefix(mirror.ID, metricsUsageRuleID) {
+		t.Errorf("mirror ID = %q, want prefix %q", mirror.ID, metricsUsageRuleID)
+	}
+	if mirror.Namespace != "stage" {
+		t.Errorf("namespace = %q, want %q", mirror.Namespace, "stage")
+	}
+	if strings.Join(mirror.Resources, ",") != "metrics.k8s.io/v1beta1/pods" {
+		t.Errorf("resources = %v, want only pods (no nodes rule)", mirror.Resources)
 	}
 }
 

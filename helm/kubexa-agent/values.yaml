@@ -198,9 +198,14 @@ query:
   #
   # Listing NAMED rules here replaces the collect.state inheritance -- an
   # empty list inherits, a non-empty one does not. Reading metrics.k8s.io for
-  # the cpu/memory columns is granted implicitly whenever query.enabled is
-  # true, so it must NOT be written here: doing so would make this list
-  # non-empty and silently drop the inherited object rules.
+  # the cpu/memory columns is granted implicitly, but only where the rules
+  # already in force say so: every rule here (or, when this list is empty,
+  # inherited from collect.state.rules) that permits listing pods or nodes
+  # gets a matching metrics.k8s.io grant carrying that same rule's namespace,
+  # names and label selector -- so the columns never reach a namespace or
+  # object the listing itself does not already reach. It must NOT be written
+  # here directly: doing so would make this list non-empty and silently drop
+  # the inherited object rules.
   rules: []
   #  - namespace: stage
   #    resources: [pods]
