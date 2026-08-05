@@ -102,9 +102,13 @@ func permitsListing(verbs []string) bool {
 
 // ruleTargets reports whether any of a rule's Resources entries resolves to
 // want. Entries that fail to parse are skipped rather than treated as a
-// match or an error: validateQuery already reports malformed entries, and a
-// rule that is otherwise fine should not lose its metrics mirror over an
-// unrelated typo elsewhere in the same Resources list.
+// match or an error: a rule that is otherwise fine should not lose its
+// metrics mirror over an unrelated typo elsewhere in the same Resources
+// list. This is safe to do quietly because it is not the last word --
+// policy.Compile walks the same effective rule set (query.rules, or the
+// inherited collect.state.rules) and hard-fails on an unparseable resource,
+// and cmd/agent/main.go treats that as fatal, so a genuinely malformed entry
+// still stops the agent rather than being silently ignored.
 func ruleTargets(resources []string, want schema.GroupVersionResource) bool {
 	for _, name := range resources {
 		d, err := k8sresource.Parse(name)
@@ -133,29 +137,53 @@ func ruleTargets(resources []string, want schema.GroupVersionResource) bool {
 // either, so there is nothing for a metrics column to attach to.
 //
 // A rule carrying a FieldSelector is skipped entirely rather than mirrored
-// without it. A pod field selector like spec.nodeName=x has no meaning on a
-// PodMetrics object, and metrics-server would reject or silently ignore it,
-// so carrying it over would be unreliable -- and dropping just the selector
-// would silently widen the owner's scope. Losing the two metrics columns for
+// without it. Measured against a live cluster: metrics-server's PodMetrics
+// endpoint accepts fieldSelector only on metadata.name and metadata.namespace
+// and answers a hard 400 ("is not a known field selector") for anything
+// else, including a plain pod field like spec.nodeName -- so a field
+// selector copied across is not merely unreliable, it fails the request
+// outright. Dropping just the selector instead of the whole rule would
+// silently widen the owner's scope, so losing the two metrics columns for
 // that rule is the safe failure.
 //
-// LabelSelector IS mirrored: PodMetrics objects carry the pod's labels, and
-// the executor ANDs the policy's selector into whatever the request carries,
-// so it can only narrow what comes back, never widen it.
+// A field-selector rule that permits listing a resource also PERMANENTLY
+// blocks mirroring any later rule for that same resource, even one with no
+// field selector of its own. This mirrors a quirk of Decide's own
+// first-match-wins semantics: Decide does not consider field selectors when
+// choosing which rule answers a query, so a field-selector pods rule still
+// captures (and narrows) the object LIST -- it is not skipped there, only
+// here. A later, broader pods rule is therefore unreachable for the object
+// listing too, and mirroring its metrics grant would answer with more than
+// the effective object policy actually allows. Blocking is conservative --
+// it can cost the columns in cases where the two rules' namespaces do not
+// even overlap -- and that is the accepted failure direction.
+//
+// LabelSelector IS mirrored: measured against a live cluster, PodMetrics
+// objects carry the pod's labels and metrics-server's labelSelector query
+// param genuinely filters them, and the executor ANDs the policy's selector
+// into whatever the request carries, so it can only narrow what comes back,
+// never widen it.
 func metricsUsageRules(rules []QueryRule) []QueryRule {
 	var out []QueryRule
+	var blockedPods, blockedNodes bool
 	for i, r := range rules {
-		if r.FieldSelector != "" {
-			continue
-		}
 		if !permitsListing(r.Verbs) {
 			continue
 		}
+		hitPods := ruleTargets(r.Resources, corePodsGVR)
+		hitNodes := ruleTargets(r.Resources, coreNodesGVR)
+
+		if r.FieldSelector != "" {
+			blockedPods = blockedPods || hitPods
+			blockedNodes = blockedNodes || hitNodes
+			continue
+		}
+
 		source := r.ID
 		if source == "" {
 			source = fmt.Sprintf("#%d", i)
 		}
-		if ruleTargets(r.Resources, corePodsGVR) {
+		if hitPods && !blockedPods {
 			out = append(out, QueryRule{
 				ID:            metricsUsageRuleID + ":" + source + ":pods",
 				Namespace:     r.Namespace,
@@ -165,7 +193,7 @@ func metricsUsageRules(rules []QueryRule) []QueryRule {
 				LabelSelector: r.LabelSelector,
 			})
 		}
-		if ruleTargets(r.Resources, coreNodesGVR) {
+		if hitNodes && !blockedNodes {
 			out = append(out, QueryRule{
 				ID:            metricsUsageRuleID + ":" + source + ":nodes",
 				Namespace:     r.Namespace,
