@@ -130,11 +130,13 @@ func (e *Executor) execute(ctx context.Context, q *agentv1.ResourceQuery) *agent
 	// asserts the API client recorded zero calls for a denied request.
 	decision := e.policy.Decide(ref, verb, q.GetNamespace(), q.GetName())
 	if !decision.Allowed {
-		// unknownResource, not ref.Resource: nothing has validated the string
-		// off the wire at this point. See metrics.go for why recording it
-		// would be an unbounded, permanent allocation inside the customer's
-		// cluster. Everything past this gate matched a rule the owner wrote,
-		// so those paths keep the real resource.
+		// unknownResource, not ref.Resource. A denied query's resource is
+		// whatever the wire asked for, bounded by nothing -- Decide rejects a
+		// ref that is not a syntactically valid identifier, but "syntactically
+		// valid" still spans every DNS-1123 label there is. See metrics.go for
+		// why recording it would be an unbounded, permanent allocation inside
+		// the customer's cluster. metricResource applies the same reasoning to
+		// the allowed-but-failed path under a wildcard rule.
 		e.metrics.observe(string(verb), unknownResource, view, "policy_denied", 0, 0)
 		// Logged at debug, not warn: a denial is the policy working, not a
 		// fault. It is here so an operator debugging "why can't I see this
