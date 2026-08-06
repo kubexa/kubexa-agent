@@ -15,7 +15,6 @@ rules:
     resources: ["*"]
     verbs: ["get", "list", "watch"]
   {{- end }}
-
   # Cluster identity and discovery
   - apiGroups: [""]
     resources: ["namespaces"]
