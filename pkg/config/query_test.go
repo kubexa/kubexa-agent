@@ -417,3 +417,226 @@ query:
 		t.Errorf("Validate() error should contain query verb violation: %v", err)
 	}
 }
+
+func TestQueryRuleAcceptsResourceWildcard(t *testing.T) {
+	var cfg Config
+	src := `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := cfg.ValidateQuery(); err != nil {
+		t.Fatalf("ValidateQuery: %v", err)
+	}
+}
+
+func TestQueryRuleWildcardDoesNotExcuseOtherEntries(t *testing.T) {
+	var cfg Config
+	src := `
+query:
+  rules:
+    - id: everything
+      resources: ["*", "podz"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	err := cfg.ValidateQuery()
+	if err == nil {
+		t.Fatal("ValidateQuery must still reject podz alongside the wildcard")
+	}
+	if !strings.Contains(err.Error(), "podz") {
+		t.Errorf("violation = %q, want it to name podz", err.Error())
+	}
+}
+
+// A wildcard rule already permits metrics.k8s.io itself, and being an owner
+// rule it is evaluated before any appended mirror, so a mirror of it could
+// never be reached.
+func TestQueryRulesEmitNoMetricsMirrorForWildcard(t *testing.T) {
+	var cfg Config
+	src := `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	rules := cfg.QueryRules()
+	if len(rules) != 1 {
+		t.Fatalf("got %d rules, want 1 (the wildcard alone, no mirror): %+v", len(rules), rules)
+	}
+}
+
+// A namespace-scoped wildcard leaves other namespaces to the rules that name
+// them, and those rules must keep their metrics mirrors.
+func TestQueryRulesMirrorLaterRuleAfterScopedWildcard(t *testing.T) {
+	var cfg Config
+	src := `
+query:
+  rules:
+    - id: stage-all
+      namespace: stage
+      resources: ["*"]
+    - id: prod-pods
+      namespace: prod
+      resources: [pods]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var mirrored []string
+	for _, r := range cfg.QueryRules() {
+		if strings.HasPrefix(r.ID, metricsUsageRuleID) {
+			mirrored = append(mirrored, r.ID)
+		}
+	}
+	if len(mirrored) != 1 {
+		t.Fatalf("mirrors = %v, want exactly the prod-pods mirror", mirrored)
+	}
+	if !strings.Contains(mirrored[0], "prod-pods") {
+		t.Errorf("mirror = %q, want it to derive from prod-pods", mirrored[0])
+	}
+}
+
+// A field selector on a wildcard rule blocks later pods/nodes mirrors for the
+// same reason a field selector on a pods rule does: Decide ignores field
+// selectors when choosing a rule, so the wildcard still captures the object
+// LIST and a later rule's mirror would answer with more than the effective
+// object policy allows.
+func TestQueryRulesWildcardWithFieldSelectorBlocksLaterMirrors(t *testing.T) {
+	var cfg Config
+	src := `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+      field_selector: metadata.name=api
+    - id: later-pods
+      resources: [pods]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, r := range cfg.QueryRules() {
+		if strings.HasPrefix(r.ID, metricsUsageRuleID) {
+			t.Fatalf("unexpected mirror %q after a field-selector wildcard", r.ID)
+		}
+	}
+}
+
+// collect.state validation goes through ParseResourceKind and must keep
+// rejecting the wildcard: a watch needs a concrete resource to open.
+func TestStateRulesStillRejectWildcard(t *testing.T) {
+	var cfg Config
+	src := `
+collect:
+  state:
+    enabled: true
+    rules:
+      - namespace: stage
+        resources: ["*"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("collect.state.rules must reject the wildcard")
+	}
+}
+
+// StateCollectConfig.validate returns early -- and skips its own rules
+// entirely -- when collect.state.enabled is false, so the test above alone
+// does not exercise this path. Without validateQuery's inheritance-aware
+// check, a wildcard sitting here would pass every validation this config has
+// (collect.state's own validation is skipped because it's disabled, and
+// validateQuery only ever looked at c.Query.Rules, which is empty) and reach
+// Compile as a live grant via QueryRules' inheritance.
+func TestStateRulesStillRejectWildcardWhenStateDisabled(t *testing.T) {
+	var cfg Config
+	src := `
+collect:
+  state:
+    enabled: false
+    rules:
+      - namespace: stage
+        resources: ["*"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("a wildcard inherited from a disabled collect.state.rules must still be rejected")
+	}
+	if !strings.Contains(err.Error(), "collect.state.rules") {
+		t.Errorf("violation = %q, want it to name collect.state.rules", err.Error())
+	}
+}
+
+// k8sresource.Parse tolerates a partial wildcard ("apps/*", "apps/v1/*") as
+// an ordinary GVR whose Resource field happens to be "*", with a nil error.
+// ValidateQuery must reject it outright: only the bare "*" is a wildcard, and
+// a partial form would otherwise compile into a rule matching no real GVR --
+// a policy the owner believes is in force and is not.
+func TestQueryRuleRejectsPartialWildcardForms(t *testing.T) {
+	for _, spec := range []string{"apps/v1/*", "apps/*", "*/*", "v1/*"} {
+		t.Run(spec, func(t *testing.T) {
+			var cfg Config
+			src := "query:\n  rules:\n    - resources: [\"" + spec + "\"]\n"
+			if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			err := cfg.ValidateQuery()
+			if err == nil {
+				t.Fatalf("ValidateQuery must reject partial wildcard %q", spec)
+			}
+			if !strings.Contains(err.Error(), spec) {
+				t.Errorf("violation = %q, want it to name %q", err.Error(), spec)
+			}
+		})
+	}
+}
+
+// The partial forms have to be caught here too, and attributed here. Checking
+// only the bare "*" in the inheritance-aware branch left "apps/v1/*" to
+// policy.Compile, which labels every effective rule "query rule #N" -- sending
+// the operator to a section they never wrote in while their actual mistake
+// sits under collect.state.rules.
+func TestStateRulesRejectPartialWildcardAndSayWhere(t *testing.T) {
+	for _, spec := range []string{"apps/v1/*", "apps/*", "*/*", "v1/*"} {
+		t.Run(spec, func(t *testing.T) {
+			var cfg Config
+			src := `
+collect:
+  state:
+    enabled: false
+    rules:
+      - resources: ["` + spec + `"]
+`
+			if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate must reject partial wildcard %q in collect.state.rules", spec)
+			}
+			if !strings.Contains(err.Error(), "collect.state.rules") {
+				t.Errorf("violation = %q, want it to name collect.state.rules", err.Error())
+			}
+			if strings.Contains(err.Error(), "query rule") {
+				t.Errorf("violation = %q, must not blame query.rules for an entry the "+
+					"operator wrote under collect.state.rules", err.Error())
+			}
+			if !strings.Contains(err.Error(), spec) {
+				t.Errorf("violation = %q, want it to name %q", err.Error(), spec)
+			}
+		})
+	}
+}

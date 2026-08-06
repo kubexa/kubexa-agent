@@ -395,3 +395,360 @@ func TestCompileRejectsInvalidConfig(t *testing.T) {
 		t.Fatal("Compile must reject a pattern with a non-trailing star")
 	}
 }
+
+var crdRef = Ref{Group: "monitoring.coreos.com", Version: "v1", Resource: "prometheusrules"}
+
+func TestWildcardAllowsUnknownCRD(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	for _, verb := range []Verb{VerbList, VerbGet} {
+		name := ""
+		if verb == VerbGet {
+			name = "some-rule"
+		}
+		if d := p.Decide(crdRef, verb, "stage", name); !d.Allowed {
+			t.Errorf("Decide(%s) = %+v, want allowed", verb, d)
+		}
+	}
+}
+
+func TestWildcardStillHonoursNamespace(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: stage-all
+      namespace: stage
+      resources: ["*"]
+`)
+	if p.Decide(crdRef, VerbList, "prod", "").Allowed {
+		t.Error("a namespace-scoped wildcard must not answer another namespace")
+	}
+	// A cluster-scoped read carries no namespace and is granted only by a rule
+	// that names none -- unchanged by the wildcard.
+	if p.Decide(nodesRef, VerbList, "", "").Allowed {
+		t.Error("a namespace-scoped wildcard must not answer a cluster-scoped read")
+	}
+}
+
+func TestWildcardStillHonoursVerbs(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+      verbs: [list]
+`)
+	if !p.Decide(crdRef, VerbList, "stage", "").Allowed {
+		t.Error("list must be allowed")
+	}
+	if p.Decide(crdRef, VerbGet, "stage", "some-rule").Allowed {
+		t.Error("get must be denied when only list is granted")
+	}
+}
+
+// Name patterns must reach the Decision so the executor filters LIST rows
+// against the same rule that permitted the query.
+func TestWildcardCarriesNamePatterns(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+      names: ["be-*"]
+`)
+	d := p.Decide(podsRef, VerbList, "stage", "")
+	if !d.Allowed {
+		t.Fatalf("Decide = %+v, want allowed", d)
+	}
+	if !MatchesName("be-api", d.NamePatterns) {
+		t.Error("be-api must match")
+	}
+	if MatchesName("fe-web", d.NamePatterns) {
+		t.Error("fe-web must not match")
+	}
+}
+
+func TestWildcardDeniedWhenQueryDisabled(t *testing.T) {
+	p := compile(t, `
+query:
+  enabled: false
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	if p.Decide(crdRef, VerbList, "stage", "").Allowed {
+		t.Error("query.enabled=false must still refuse everything")
+	}
+}
+
+func TestWildcardMakesCapabilityReportAllowAnyGVR(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	if !p.AllowsAnyList("example.io", "v1alpha1", "widgets") {
+		t.Error("AllowsAnyList must report true for an unknown GVR under a wildcard")
+	}
+	if !p.AllowsAnyGet("example.io", "v1alpha1", "widgets") {
+		t.Error("AllowsAnyGet must report true for an unknown GVR under a wildcard")
+	}
+}
+
+func TestWildcardRuleIDs(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: named-pods
+      resources: [pods]
+    - id: everything
+      resources: ["*"]
+`)
+	ids := p.WildcardRuleIDs()
+	if len(ids) != 1 || ids[0] != "everything" {
+		t.Fatalf("WildcardRuleIDs = %v, want [everything]", ids)
+	}
+
+	off := compile(t, `
+query:
+  enabled: false
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	if len(off.WildcardRuleIDs()) != 0 {
+		t.Error("a disabled policy permits nothing and must report no wildcard rules")
+	}
+}
+
+// A rule with no id still has to be nameable in the startup warning.
+func TestWildcardRuleIDsFallBackToIndex(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - resources: ["*"]
+`)
+	ids := p.WildcardRuleIDs()
+	if len(ids) != 1 || ids[0] != "#0" {
+		t.Fatalf("WildcardRuleIDs = %v, want [#0]", ids)
+	}
+}
+
+// A wildcard rule carves out nothing, secrets included. This is the one
+// behaviour someone would later be tempted to "fix" with a carve-out, so it
+// gets its own assertion rather than living only implied by the CRD test.
+func TestWildcardHasNoCarveOutForSecrets(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	if !p.Decide(secretsRef, VerbList, "stage", "").Allowed {
+		t.Error("a wildcard rule must not carve out secrets")
+	}
+}
+
+// A wildcard sitting in a disabled collect.state section's rules must not
+// reach Compile as a live grant. StateCollectConfig.validate skips entirely
+// when collect.state.enabled is false, so this is caught by validateQuery's
+// own inheritance-aware check (Compile calls root.ValidateQuery() first) --
+// not by anything collect-side.
+func TestCompileRejectsWildcardInheritedFromDisabledState(t *testing.T) {
+	var cfg pkgconfig.Config
+	src := `
+collect:
+  state:
+    enabled: false
+    rules:
+      - resources: ["*"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, err := Compile(&cfg); err == nil {
+		t.Fatal("Compile must reject a wildcard inherited from a disabled collect.state.rules")
+	}
+}
+
+// k8sresource.Parse tolerates a partial wildcard ("apps/*", "apps/v1/*") as
+// an ordinary GVR whose Resource field happens to be "*", with a nil error.
+// Compile must reject it rather than silently compiling a rule that matches
+// no real GVR -- and must do so however the entry reached the effective rule
+// set, including through collect.state inheritance.
+func TestCompileRejectsPartialWildcardForms(t *testing.T) {
+	for _, spec := range []string{"apps/v1/*", "apps/*", "*/*", "v1/*"} {
+		t.Run(spec, func(t *testing.T) {
+			var cfg pkgconfig.Config
+			src := "query:\n  rules:\n    - resources: [\"" + spec + "\"]\n"
+			if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if _, err := Compile(&cfg); err == nil {
+				t.Fatalf("Compile must reject partial wildcard %q", spec)
+			}
+		})
+	}
+}
+
+func TestCompileRejectsPartialWildcardInheritedFromState(t *testing.T) {
+	var cfg pkgconfig.Config
+	src := `
+collect:
+  state:
+    enabled: false
+    rules:
+      - resources: ["apps/v1/*"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, err := Compile(&cfg); err == nil {
+		t.Fatal("Compile must reject a partial wildcard inherited from collect.state.rules")
+	}
+}
+
+// The security test for the wildcard rule. Before the wildcard existed, a ref
+// had to EQUAL one compiled from the owner's config, so nothing downstream
+// ever saw a string the requester chose. A wildcard rule matches any ref, and
+// the dynamic client's path.Join URL building happily normalises "./secrets"
+// into a request for the real Secrets endpoint -- while the redaction in
+// collector/state keys off an exact "secrets" compare and misses it. That is
+// full Secret values leaving a cluster configured with redact_secrets: true,
+// so the ref has to be rejected before any rule is consulted.
+func TestDecideRejectsNonCanonicalRefUnderWildcard(t *testing.T) {
+	p := compile(t, `
+query:
+  redact_secrets: true
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	for _, ref := range []Ref{
+		{Version: "v1", Resource: "./secrets"},
+		{Version: "v1", Resource: "x/../secrets"},
+		{Version: "v1", Resource: "secrets/"},
+		{Version: "v1", Resource: ".."},
+		{Version: "v1", Resource: "."},
+		{Version: "v1", Resource: "SECRETS"},
+		{Version: "v1", Resource: ""},
+		{Group: "bad/group", Version: "v1", Resource: "secrets"},
+		{Version: "../v1", Resource: "secrets"},
+	} {
+		t.Run(refString(ref), func(t *testing.T) {
+			for _, verb := range []Verb{VerbList, VerbGet} {
+				name := ""
+				if verb == VerbGet {
+					name = "some-name"
+				}
+				d := p.Decide(ref, verb, "stage", name)
+				if d.Allowed {
+					t.Fatalf("Decide(%+v, %s) = allowed; a ref that cannot name a real "+
+						"Kubernetes resource must not reach the API server", ref, verb)
+				}
+				if d.Reason == "" {
+					t.Error("a denial must carry a human-readable reason")
+				}
+			}
+		})
+	}
+}
+
+// The validation must cost a legitimate cluster nothing: core resources,
+// grouped ones, the metrics mirror and CRDs on an alpha version all stay
+// allowed.
+func TestDecideAllowsEveryLegitimateGVRUnderWildcard(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	for _, ref := range []Ref{
+		{Version: "v1", Resource: "pods"},
+		{Group: "apps", Version: "v1", Resource: "deployments"},
+		{Group: "metrics.k8s.io", Version: "v1beta1", Resource: "pods"},
+		{Group: "monitoring.coreos.com", Version: "v1", Resource: "prometheusrules"},
+		{Group: "example.io", Version: "v1alpha1", Resource: "widgets"},
+	} {
+		t.Run(refString(ref), func(t *testing.T) {
+			if d := p.Decide(ref, VerbList, "stage", ""); !d.Allowed {
+				t.Fatalf("Decide(%+v) = %+v, want allowed", ref, d)
+			}
+			if !p.AllowsAnyList(ref.Group, ref.Version, ref.Resource) {
+				t.Errorf("AllowsAnyList(%+v) = false, want true", ref)
+			}
+			if !p.AllowsAnyGet(ref.Group, ref.Version, ref.Resource) {
+				t.Errorf("AllowsAnyGet(%+v) = false, want true", ref)
+			}
+		})
+	}
+}
+
+// The capability reporter publishes what these answer. Under a wildcard they
+// would otherwise say yes to any string at all, cataloguing GVRs that cannot
+// exist.
+func TestAllowsAnyRejectsAnInvalidGVRUnderWildcard(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	if p.AllowsAnyList("", "v1", "./secrets") {
+		t.Error("AllowsAnyList must refuse a non-canonical resource")
+	}
+	if p.AllowsAnyGet("bad/group", "v1", "secrets") {
+		t.Error("AllowsAnyGet must refuse a group that is not a DNS subdomain")
+	}
+}
+
+// The executor bounds its metric labels on this flag, so it has to say which
+// kind of rule matched -- not merely that something did.
+func TestDecisionReportsWhetherAWildcardRuleMatched(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: named-pods
+      resources: [pods]
+    - id: everything
+      resources: ["*"]
+`)
+	if d := p.Decide(podsRef, VerbList, "stage", ""); !d.Allowed || d.WildcardRule {
+		t.Errorf("Decide(pods) = %+v, want allowed by the rule that names it", d)
+	}
+	if d := p.Decide(crdRef, VerbList, "stage", ""); !d.Allowed || !d.WildcardRule {
+		t.Errorf("Decide(crd) = %+v, want allowed with WildcardRule set", d)
+	}
+}
+
+func TestUnredactedWildcardRuleIDs(t *testing.T) {
+	exposed := compile(t, `
+query:
+  redact_secrets: false
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	ids := exposed.UnredactedWildcardRuleIDs()
+	if len(ids) != 1 || ids[0] != "everything" {
+		t.Fatalf("UnredactedWildcardRuleIDs = %v, want [everything]: a wildcard rule with "+
+			"visible Secret values is the widest policy this agent can hold and must warn", ids)
+	}
+
+	redacted := compile(t, `
+query:
+  redact_secrets: true
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	if got := redacted.UnredactedWildcardRuleIDs(); len(got) != 0 {
+		t.Errorf("UnredactedWildcardRuleIDs = %v, want none when redact_secrets is on", got)
+	}
+}
