@@ -395,3 +395,146 @@ func TestCompileRejectsInvalidConfig(t *testing.T) {
 		t.Fatal("Compile must reject a pattern with a non-trailing star")
 	}
 }
+
+var crdRef = Ref{Group: "monitoring.coreos.com", Version: "v1", Resource: "prometheusrules"}
+
+func TestWildcardAllowsUnknownCRD(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	for _, verb := range []Verb{VerbList, VerbGet} {
+		name := ""
+		if verb == VerbGet {
+			name = "some-rule"
+		}
+		if d := p.Decide(crdRef, verb, "stage", name); !d.Allowed {
+			t.Errorf("Decide(%s) = %+v, want allowed", verb, d)
+		}
+	}
+}
+
+func TestWildcardStillHonoursNamespace(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: stage-all
+      namespace: stage
+      resources: ["*"]
+`)
+	if p.Decide(crdRef, VerbList, "prod", "").Allowed {
+		t.Error("a namespace-scoped wildcard must not answer another namespace")
+	}
+	// A cluster-scoped read carries no namespace and is granted only by a rule
+	// that names none -- unchanged by the wildcard.
+	if p.Decide(nodesRef, VerbList, "", "").Allowed {
+		t.Error("a namespace-scoped wildcard must not answer a cluster-scoped read")
+	}
+}
+
+func TestWildcardStillHonoursVerbs(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+      verbs: [list]
+`)
+	if !p.Decide(crdRef, VerbList, "stage", "").Allowed {
+		t.Error("list must be allowed")
+	}
+	if p.Decide(crdRef, VerbGet, "stage", "some-rule").Allowed {
+		t.Error("get must be denied when only list is granted")
+	}
+}
+
+// Name patterns must reach the Decision so the executor filters LIST rows
+// against the same rule that permitted the query.
+func TestWildcardCarriesNamePatterns(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+      names: ["be-*"]
+`)
+	d := p.Decide(podsRef, VerbList, "stage", "")
+	if !d.Allowed {
+		t.Fatalf("Decide = %+v, want allowed", d)
+	}
+	if !MatchesName("be-api", d.NamePatterns) {
+		t.Error("be-api must match")
+	}
+	if MatchesName("fe-web", d.NamePatterns) {
+		t.Error("fe-web must not match")
+	}
+}
+
+func TestWildcardDeniedWhenQueryDisabled(t *testing.T) {
+	p := compile(t, `
+query:
+  enabled: false
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	if p.Decide(crdRef, VerbList, "stage", "").Allowed {
+		t.Error("query.enabled=false must still refuse everything")
+	}
+}
+
+func TestWildcardMakesCapabilityReportAllowAnyGVR(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	if !p.AllowsAnyList("example.io", "v1alpha1", "widgets") {
+		t.Error("AllowsAnyList must report true for an unknown GVR under a wildcard")
+	}
+	if !p.AllowsAnyGet("example.io", "v1alpha1", "widgets") {
+		t.Error("AllowsAnyGet must report true for an unknown GVR under a wildcard")
+	}
+}
+
+func TestWildcardRuleIDs(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: named-pods
+      resources: [pods]
+    - id: everything
+      resources: ["*"]
+`)
+	ids := p.WildcardRuleIDs()
+	if len(ids) != 1 || ids[0] != "everything" {
+		t.Fatalf("WildcardRuleIDs = %v, want [everything]", ids)
+	}
+
+	off := compile(t, `
+query:
+  enabled: false
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	if len(off.WildcardRuleIDs()) != 0 {
+		t.Error("a disabled policy permits nothing and must report no wildcard rules")
+	}
+}
+
+// A rule with no id still has to be nameable in the startup warning.
+func TestWildcardRuleIDsFallBackToIndex(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - resources: ["*"]
+`)
+	ids := p.WildcardRuleIDs()
+	if len(ids) != 1 || ids[0] != "#0" {
+		t.Fatalf("WildcardRuleIDs = %v, want [#0]", ids)
+	}
+}
