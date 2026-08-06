@@ -91,9 +91,22 @@ func Compile(root *pkgconfig.Config) (*Policy, error) {
 		refs := make([]Ref, 0, len(r.Resources))
 		wildcard := false
 		for _, name := range r.Resources {
-			if strings.TrimSpace(name) == pkgconfig.ResourceWildcard {
+			trimmed := strings.TrimSpace(name)
+			if trimmed == pkgconfig.ResourceWildcard {
 				wildcard = true
 				continue
+			}
+			// k8sresource.Parse tolerates a partial wildcard like "apps/*" or
+			// "apps/v1/*" -- it reads as an ordinary GVR whose Resource field
+			// happens to be "*", with a nil error -- and would otherwise
+			// compile into a Ref that matches nothing. This is the path that
+			// also catches an inherited collect.state rule: QueryRules walks
+			// every effective rule regardless of origin, so a wildcard typo
+			// left in a disabled collect.state section reaches here too, not
+			// only entries written directly under query.rules.
+			if strings.Contains(trimmed, pkgconfig.ResourceWildcard) {
+				return nil, fmt.Errorf("query rule %s: %q is not a supported resource: only the bare %q is a wildcard, not a partial form",
+					label, name, pkgconfig.ResourceWildcard)
 			}
 			d, err := k8sresource.Parse(name)
 			if err != nil {
@@ -200,6 +213,12 @@ func (p *Policy) Decide(ref Ref, verb Verb, namespace, name string) Decision {
 // ever succeed" -- and is deliberately coarser than Decide: a per-GVR boolean
 // cannot express a namespace-scoped policy, so Decide stays authoritative at
 // request time.
+//
+// A wildcard rule changes this coarseness's scale, not its shape: even a
+// namespace-scoped wildcard answers true for every GVR the capability
+// reporter discovers, so the published catalogue reads as "policy allows
+// this" cluster-wide, while Decide still refuses every namespace but the one
+// the rule names.
 func (p *Policy) AllowsAnyList(group, version, resource string) bool {
 	return p.allowsAny(Ref{Group: group, Version: version, Resource: resource}, VerbList)
 }

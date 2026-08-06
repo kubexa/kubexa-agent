@@ -297,7 +297,22 @@ func (c *Config) validateQuery() []string {
 			continue
 		}
 		for _, name := range rule.Resources {
-			if strings.TrimSpace(name) == ResourceWildcard {
+			trimmed := strings.TrimSpace(name)
+			if trimmed == ResourceWildcard {
+				continue
+			}
+			// k8sresource.Parse tolerates a partial wildcard like "apps/*" or
+			// "apps/v1/*" -- parseGVR reads it as an ordinary two- or
+			// three-part GVR whose Resource field happens to be "*", and
+			// returns it with a nil error. That compiles into a rule that
+			// matches no real GVR, which is the exact failure
+			// validatePattern's comment calls out: a policy the owner
+			// believes is in force and is not. Only the bare "*" is a
+			// wildcard; reject every other form containing one.
+			if strings.Contains(trimmed, ResourceWildcard) {
+				violations = append(violations, fmt.Sprintf(
+					"query rule %s: %q is not a supported resource: only the bare %q is a wildcard, not a partial form",
+					label, name, ResourceWildcard))
 				continue
 			}
 			if _, err := k8sresource.Parse(name); err != nil {
@@ -317,6 +332,31 @@ func (c *Config) validateQuery() []string {
 			case "list", "get":
 			default:
 				violations = append(violations, fmt.Sprintf("query rule %s: unsupported verb %q (want list or get)", label, v))
+			}
+		}
+	}
+
+	// QueryRules inherits collect.state.rules verbatim when query.rules is
+	// empty, but StateCollectConfig.validate returns early -- and skips its
+	// own rules entirely -- whenever collect.state.enabled is false. Without
+	// this, a wildcard sitting in a disabled state section's rules would
+	// never be checked by anything: not collect.state's own validation
+	// (skipped, disabled), not the loop above (it walks c.Query.Rules, which
+	// is empty here). It would reach Compile unvalidated and compile into a
+	// real, live grant. The wildcard is a query.rules-only spelling -- reject
+	// it on the way in, regardless of collect.state's enabled/disabled state.
+	if len(c.Query.Rules) == 0 {
+		for i, rule := range c.Collect.State.Rules {
+			label := rule.ID
+			if label == "" {
+				label = fmt.Sprintf("#%d", i)
+			}
+			for _, name := range rule.Resources {
+				if strings.TrimSpace(name) == ResourceWildcard {
+					violations = append(violations, fmt.Sprintf(
+						"collect.state.rules %s: %q is not supported here; the wildcard is a query.rules-only spelling",
+						label, name))
+				}
 			}
 		}
 	}

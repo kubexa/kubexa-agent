@@ -538,3 +538,77 @@ query:
 		t.Fatalf("WildcardRuleIDs = %v, want [#0]", ids)
 	}
 }
+
+// A wildcard rule carves out nothing, secrets included. This is the one
+// behaviour someone would later be tempted to "fix" with a carve-out, so it
+// gets its own assertion rather than living only implied by the CRD test.
+func TestWildcardHasNoCarveOutForSecrets(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	if !p.Decide(secretsRef, VerbList, "stage", "").Allowed {
+		t.Error("a wildcard rule must not carve out secrets")
+	}
+}
+
+// A wildcard sitting in a disabled collect.state section's rules must not
+// reach Compile as a live grant. StateCollectConfig.validate skips entirely
+// when collect.state.enabled is false, so this is caught by validateQuery's
+// own inheritance-aware check (Compile calls root.ValidateQuery() first) --
+// not by anything collect-side.
+func TestCompileRejectsWildcardInheritedFromDisabledState(t *testing.T) {
+	var cfg pkgconfig.Config
+	src := `
+collect:
+  state:
+    enabled: false
+    rules:
+      - resources: ["*"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, err := Compile(&cfg); err == nil {
+		t.Fatal("Compile must reject a wildcard inherited from a disabled collect.state.rules")
+	}
+}
+
+// k8sresource.Parse tolerates a partial wildcard ("apps/*", "apps/v1/*") as
+// an ordinary GVR whose Resource field happens to be "*", with a nil error.
+// Compile must reject it rather than silently compiling a rule that matches
+// no real GVR -- and must do so however the entry reached the effective rule
+// set, including through collect.state inheritance.
+func TestCompileRejectsPartialWildcardForms(t *testing.T) {
+	for _, spec := range []string{"apps/v1/*", "apps/*", "*/*", "v1/*"} {
+		t.Run(spec, func(t *testing.T) {
+			var cfg pkgconfig.Config
+			src := "query:\n  rules:\n    - resources: [\"" + spec + "\"]\n"
+			if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if _, err := Compile(&cfg); err == nil {
+				t.Fatalf("Compile must reject partial wildcard %q", spec)
+			}
+		})
+	}
+}
+
+func TestCompileRejectsPartialWildcardInheritedFromState(t *testing.T) {
+	var cfg pkgconfig.Config
+	src := `
+collect:
+  state:
+    enabled: false
+    rules:
+      - resources: ["apps/v1/*"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, err := Compile(&cfg); err == nil {
+		t.Fatal("Compile must reject a partial wildcard inherited from collect.state.rules")
+	}
+}
