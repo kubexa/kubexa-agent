@@ -603,3 +603,40 @@ func TestQueryRuleRejectsPartialWildcardForms(t *testing.T) {
 		})
 	}
 }
+
+// The partial forms have to be caught here too, and attributed here. Checking
+// only the bare "*" in the inheritance-aware branch left "apps/v1/*" to
+// policy.Compile, which labels every effective rule "query rule #N" -- sending
+// the operator to a section they never wrote in while their actual mistake
+// sits under collect.state.rules.
+func TestStateRulesRejectPartialWildcardAndSayWhere(t *testing.T) {
+	for _, spec := range []string{"apps/v1/*", "apps/*", "*/*", "v1/*"} {
+		t.Run(spec, func(t *testing.T) {
+			var cfg Config
+			src := `
+collect:
+  state:
+    enabled: false
+    rules:
+      - resources: ["` + spec + `"]
+`
+			if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate must reject partial wildcard %q in collect.state.rules", spec)
+			}
+			if !strings.Contains(err.Error(), "collect.state.rules") {
+				t.Errorf("violation = %q, want it to name collect.state.rules", err.Error())
+			}
+			if strings.Contains(err.Error(), "query rule") {
+				t.Errorf("violation = %q, must not blame query.rules for an entry the "+
+					"operator wrote under collect.state.rules", err.Error())
+			}
+			if !strings.Contains(err.Error(), spec) {
+				t.Errorf("violation = %q, want it to name %q", err.Error(), spec)
+			}
+		})
+	}
+}

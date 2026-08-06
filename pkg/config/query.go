@@ -352,10 +352,25 @@ func (c *Config) validateQuery() []string {
 				label = fmt.Sprintf("#%d", i)
 			}
 			for _, name := range rule.Resources {
-				if strings.TrimSpace(name) == ResourceWildcard {
+				trimmed := strings.TrimSpace(name)
+				if trimmed == ResourceWildcard {
 					violations = append(violations, fmt.Sprintf(
 						"collect.state.rules %s: %q is not supported here; the wildcard is a query.rules-only spelling",
 						label, name))
+					continue
+				}
+				// The partial forms ("apps/v1/*") are rejected here too, and
+				// for the same reason the loop above rejects them: Parse reads
+				// them as an ordinary GVR whose Resource happens to be "*", so
+				// they compile into a rule matching nothing. Checking only the
+				// bare "*" here left them to Compile, which reports every
+				// effective rule as a "query rule" -- naming a section the
+				// operator never wrote in, while their actual mistake sits
+				// under collect.state.rules.
+				if strings.Contains(trimmed, ResourceWildcard) {
+					violations = append(violations, fmt.Sprintf(
+						"collect.state.rules %s: %q is not a supported resource: only the bare %q is a wildcard, not a partial form, and the wildcard itself is a query.rules-only spelling",
+						label, name, ResourceWildcard))
 				}
 			}
 		}
