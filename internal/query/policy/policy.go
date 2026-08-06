@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
 	pkgconfig "github.com/kubexa/kubexa-agent/pkg/config"
 	"github.com/kubexa/kubexa-agent/pkg/config/k8sresource"
 )
@@ -44,6 +46,13 @@ type Decision struct {
 	// the same rule that permitted the query -- see MatchesName's comment for
 	// why re-consulting the policy per row would be a data-exposure bug.
 	NamePatterns []string
+	// WildcardRule reports that the authorizing rule was a wildcard
+	// (resources: ["*"]) rather than one naming this resource. It changes
+	// nothing about what is permitted; it tells the caller that ref.Resource
+	// was chosen by the requester, not by the owner's config, so anything
+	// keyed on it must stay bounded. The executor uses it to decide whether
+	// the resource is safe to use as a Prometheus label -- see metrics.go.
+	WildcardRule bool
 	// Reason explains a denial in terms the operator can act on. Empty when
 	// allowed.
 	Reason string
@@ -173,6 +182,9 @@ func (p *Policy) Decide(ref Ref, verb Verb, namespace, name string) Decision {
 	if p == nil || !p.enabled {
 		return Decision{Reason: "live resource query is disabled in this agent's configuration"}
 	}
+	if err := validateRef(ref); err != nil {
+		return Decision{Reason: err.Error()}
+	}
 	for _, r := range p.rules {
 		if !r.matchesResource(ref) {
 			continue
@@ -201,6 +213,7 @@ func (p *Policy) Decide(ref Ref, verb Verb, namespace, name string) Decision {
 			LabelSelector: r.labelSelector,
 			FieldSelector: r.fieldSelector,
 			NamePatterns:  r.names,
+			WildcardRule:  r.wildcard,
 		}
 	}
 	return Decision{Reason: fmt.Sprintf(
@@ -233,6 +246,13 @@ func (p *Policy) allowsAny(ref Ref, verb Verb) bool {
 	if p == nil || !p.enabled {
 		return false
 	}
+	// The same validation Decide applies, for the same reason: with a wildcard
+	// rule in force these would otherwise answer true for any string at all,
+	// and the capability reporter would publish a catalogue entry for a GVR
+	// that cannot exist.
+	if err := validateRef(ref); err != nil {
+		return false
+	}
 	for _, r := range p.rules {
 		if !r.matchesResource(ref) {
 			continue
@@ -245,6 +265,43 @@ func (p *Policy) allowsAny(ref Ref, verb Verb) bool {
 		}
 	}
 	return false
+}
+
+// validateRef rejects a ref whose segments cannot name a real Kubernetes
+// resource. It runs before any rule is consulted, so no rule can permit one.
+//
+// Why the policy and not the executor: before a rule could say
+// resources: ["*"], every ref that got past this gate had to EQUAL a Ref
+// compiled from the owner's config, so the only group/version/resource strings
+// reaching the code downstream came from a finite, config-derived set. A
+// wildcard rule removes that guarantee -- an arbitrary wire-supplied string
+// now reaches code written on the assumption that it is canonical -- and the
+// answer to "may this be read" is this package's to give.
+//
+// The disclosure this closes: the dynamic client builds its URL with
+// path.Join, which does not validate the resource segment, so a ref of
+// {"", "v1", "./secrets"} (equally "x/../secrets" or "secrets/") reaches the
+// real /api/v1/namespaces/<ns>/secrets endpoint and returns real Secrets --
+// while state.SanitizeUnstructured redacts on an exact
+// pluralResource == "secrets" compare and therefore leaves .data intact.
+// redact_secrets: true would have been silently bypassed.
+func validateRef(ref Ref) error {
+	if errs := validation.IsDNS1123Label(ref.Resource); len(errs) > 0 {
+		return fmt.Errorf("resource %q is not a valid Kubernetes resource name: %s",
+			ref.Resource, errs[0])
+	}
+	if errs := validation.IsDNS1123Label(ref.Version); len(errs) > 0 {
+		return fmt.Errorf("version %q is not a valid Kubernetes API version: %s",
+			ref.Version, errs[0])
+	}
+	// The core group is spelled as the empty string, which is not a subdomain.
+	if ref.Group != "" {
+		if errs := validation.IsDNS1123Subdomain(ref.Group); len(errs) > 0 {
+			return fmt.Errorf("group %q is not a valid Kubernetes API group: %s",
+				ref.Group, errs[0])
+		}
+	}
+	return nil
 }
 
 func (r compiledRule) matchesResource(ref Ref) bool {
@@ -277,6 +334,22 @@ func (p *Policy) WildcardRuleIDs() []string {
 		}
 	}
 	return out
+}
+
+// UnredactedWildcardRuleIDs names the wildcard rules whose grant includes
+// readable Secret values -- the exact condition the startup warning in
+// cmd/agent fires on, expressed here so it can be tested.
+//
+// A wildcard rule covers secrets like everything else; with redact_secrets
+// off, their values leave the cluster. Either half alone is a deliberate
+// choice an operator may well have made, so nothing is reported unless both
+// hold. Redaction on returns nothing: the wildcard is then no wider than the
+// operator asked for.
+func (p *Policy) UnredactedWildcardRuleIDs() []string {
+	if p == nil || p.redactSecrets {
+		return nil
+	}
+	return p.WildcardRuleIDs()
 }
 
 // matchesNamespace implements the cluster-scoped rule from the design: a
