@@ -18,6 +18,15 @@ serviceAccount:
 
 rbac:
   create: true
+  # Grant read on every apiGroup and resource, CRDs included. This is the
+  # companion to a query rule with `resources: ["*"]`: that rule tells the
+  # agent the platform may read anything, and without this the API server
+  # still answers RBAC_DENIED for every type the generated rules do not name.
+  #
+  # Off by default, and deliberately NOT derived from query.rules: the agent's
+  # config can be supplied as a mounted file this chart never sees, in which
+  # case the template would find no rules and silently render the narrow role.
+  readAll: false
   # Extra ClusterRole rules appended to the generated role.
   extraRules: []
   # The generated ClusterRole grants read access to the resource block below
@@ -206,6 +215,12 @@ query:
   # object the listing itself does not already reach. It must NOT be written
   # here directly: doing so would make this list non-empty and silently drop
   # the inherited object rules.
+  #
+  # A rule may name `"*"` as its only resource, which permits every
+  # group/version/resource including CRDs. It covers secrets too -- set
+  # redactSecrets: true unless you specifically need values readable. Pair it
+  # with rbac.readAll above, or the API server refuses everything the
+  # generated role does not already name.
   rules: []
   #  - namespace: stage
   #    resources: [pods]

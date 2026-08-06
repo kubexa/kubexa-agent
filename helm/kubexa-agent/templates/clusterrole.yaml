@@ -6,6 +6,16 @@ metadata:
   labels:
     {{- include "kubexa-agent.labels" . | nindent 4 }}
 rules:
+  {{- if .Values.rbac.readAll }}
+  # Companion to a query rule with `resources: ["*"]`: the agent's own policy
+  # may permit every resource, but the API server still refuses each type the
+  # enumerated rules below do not name -- RBAC_DENIED with nothing in the
+  # agent's config to explain it. Read-only; the agent never writes.
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+
   # Cluster identity and discovery
   - apiGroups: [""]
     resources: ["namespaces"]
