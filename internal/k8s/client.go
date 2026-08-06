@@ -549,7 +549,15 @@ func newQueryClientsFromRest(restCfg *rest.Config) (*QueryClients, error) {
 		// (a large cluster with many CRDs lands in the low hundreds), so
 		// reaching it means abuse or something equally unexpected, and neither
 		// is a reason to break a legitimate cluster's live queries. The
-		// degradation is one extra client construction per call.
+		// degradation is one extra client construction per call; client-go's
+		// transport cache is global, so the TLS connection pool is still
+		// shared.
+		//
+		// There is no eviction, so a filled cache stays filled: an abuser who
+		// gets there first leaves every legitimate GroupVersion on the
+		// uncached path for the process's lifetime. That is accepted -- an LRU
+		// here would buy back one allocation per request and cost a policy
+		// nobody can reason about during an incident.
 		if len(cache) < maxCachedRESTClients {
 			cache[gv] = c
 		}
