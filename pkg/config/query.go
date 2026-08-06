@@ -78,6 +78,30 @@ func (c *Config) QueryRedactSecrets() bool {
 // mirrors are still distinguishable from one another.
 const metricsUsageRuleID = "kubexa-usage-metrics"
 
+// ResourceWildcard is the one entry a query rule's Resources may carry that is
+// not a resource name: it permits every group/version/resource, CRDs included.
+//
+// It exists only here, on the query path. collect.state, collect.logs and
+// collect.metrics rules drive one informer or one scrape loop per resource and
+// need a concrete list to open; a live query is request-driven, so a wildcard
+// there means only "do not check the requested resource against a list".
+//
+// The spelling is the bare "*" and nothing else. A partial form like "apps/*"
+// is not supported and never should be: parseGVR reads a two-part entry as
+// version/resource, so "apps/*" and "v1/pods" are the same shape and "apps"
+// would be taken for a version.
+const ResourceWildcard = "*"
+
+// hasWildcard reports whether a rule permits every resource.
+func hasWildcard(resources []string) bool {
+	for _, name := range resources {
+		if strings.TrimSpace(name) == ResourceWildcard {
+			return true
+		}
+	}
+	return false
+}
+
 // corePodsGVR and coreNodesGVR are what a rule's Resources entries must
 // resolve to (via k8sresource.Parse, which understands every alias -- "pods",
 // "pod", "v1/pods") for that rule to be mirrored into a metrics.k8s.io grant.
@@ -100,16 +124,20 @@ func permitsListing(verbs []string) bool {
 	return false
 }
 
-// ruleTargets reports whether any of a rule's Resources entries resolves to
-// want. Entries that fail to parse are skipped rather than treated as a
-// match or an error: a rule that is otherwise fine should not lose its
-// metrics mirror over an unrelated typo elsewhere in the same Resources
-// list. This is safe to do quietly because it is not the last word --
-// policy.Compile walks the same effective rule set (query.rules, or the
+// ruleTargets reports whether a rule targets want -- either because one of its
+// Resources entries resolves to it, or because the rule carries the wildcard
+// and so targets everything. Entries that fail to parse are skipped rather
+// than treated as a match or an error: a rule that is otherwise fine should
+// not lose its metrics mirror over an unrelated typo elsewhere in the same
+// Resources list. This is safe to do quietly because it is not the last word
+// -- policy.Compile walks the same effective rule set (query.rules, or the
 // inherited collect.state.rules) and hard-fails on an unparseable resource,
 // and cmd/agent/main.go treats that as fatal, so a genuinely malformed entry
 // still stops the agent rather than being silently ignored.
 func ruleTargets(resources []string, want schema.GroupVersionResource) bool {
+	if hasWildcard(resources) {
+		return true
+	}
 	for _, name := range resources {
 		d, err := k8sresource.Parse(name)
 		if err != nil {
@@ -176,6 +204,19 @@ func metricsUsageRules(rules []QueryRule) []QueryRule {
 		if r.FieldSelector != "" {
 			blockedPods = blockedPods || hitPods
 			blockedNodes = blockedNodes || hitNodes
+			continue
+		}
+
+		if hasWildcard(r.Resources) {
+			// The rule permits metrics.k8s.io/v1beta1/pods and /nodes
+			// directly, and owner rules are evaluated before every appended
+			// mirror, so a mirror of this rule could never be reached.
+			//
+			// Later rules deliberately keep theirs: a namespace-scoped
+			// wildcard leaves other namespaces to the rules that name them,
+			// and those rules are reachable. Nothing is blocked here -- the
+			// blocking above exists for field selectors, which change which
+			// rule answers; a wildcard does not.
 			continue
 		}
 
@@ -256,6 +297,24 @@ func (c *Config) validateQuery() []string {
 			continue
 		}
 		for _, name := range rule.Resources {
+			trimmed := strings.TrimSpace(name)
+			if trimmed == ResourceWildcard {
+				continue
+			}
+			// k8sresource.Parse tolerates a partial wildcard like "apps/*" or
+			// "apps/v1/*" -- parseGVR reads it as an ordinary two- or
+			// three-part GVR whose Resource field happens to be "*", and
+			// returns it with a nil error. That compiles into a rule that
+			// matches no real GVR, which is the exact failure
+			// validatePattern's comment calls out: a policy the owner
+			// believes is in force and is not. Only the bare "*" is a
+			// wildcard; reject every other form containing one.
+			if strings.Contains(trimmed, ResourceWildcard) {
+				violations = append(violations, fmt.Sprintf(
+					"query rule %s: %q is not a supported resource: only the bare %q is a wildcard, not a partial form",
+					label, name, ResourceWildcard))
+				continue
+			}
 			if _, err := k8sresource.Parse(name); err != nil {
 				violations = append(violations, fmt.Sprintf("query rule %s: %v", label, err))
 			}
@@ -273,6 +332,46 @@ func (c *Config) validateQuery() []string {
 			case "list", "get":
 			default:
 				violations = append(violations, fmt.Sprintf("query rule %s: unsupported verb %q (want list or get)", label, v))
+			}
+		}
+	}
+
+	// QueryRules inherits collect.state.rules verbatim when query.rules is
+	// empty, but StateCollectConfig.validate returns early -- and skips its
+	// own rules entirely -- whenever collect.state.enabled is false. Without
+	// this, a wildcard sitting in a disabled state section's rules would
+	// never be checked by anything: not collect.state's own validation
+	// (skipped, disabled), not the loop above (it walks c.Query.Rules, which
+	// is empty here). It would reach Compile unvalidated and compile into a
+	// real, live grant. The wildcard is a query.rules-only spelling -- reject
+	// it on the way in, regardless of collect.state's enabled/disabled state.
+	if len(c.Query.Rules) == 0 {
+		for i, rule := range c.Collect.State.Rules {
+			label := rule.ID
+			if label == "" {
+				label = fmt.Sprintf("#%d", i)
+			}
+			for _, name := range rule.Resources {
+				trimmed := strings.TrimSpace(name)
+				if trimmed == ResourceWildcard {
+					violations = append(violations, fmt.Sprintf(
+						"collect.state.rules %s: %q is not supported here; the wildcard is a query.rules-only spelling",
+						label, name))
+					continue
+				}
+				// The partial forms ("apps/v1/*") are rejected here too, and
+				// for the same reason the loop above rejects them: Parse reads
+				// them as an ordinary GVR whose Resource happens to be "*", so
+				// they compile into a rule matching nothing. Checking only the
+				// bare "*" here left them to Compile, which reports every
+				// effective rule as a "query rule" -- naming a section the
+				// operator never wrote in, while their actual mistake sits
+				// under collect.state.rules.
+				if strings.Contains(trimmed, ResourceWildcard) {
+					violations = append(violations, fmt.Sprintf(
+						"collect.state.rules %s: %q is not a supported resource: only the bare %q is a wildcard, not a partial form, and the wildcard itself is a query.rules-only spelling",
+						label, name, ResourceWildcard))
+				}
 			}
 		}
 	}

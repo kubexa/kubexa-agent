@@ -130,11 +130,13 @@ func (e *Executor) execute(ctx context.Context, q *agentv1.ResourceQuery) *agent
 	// asserts the API client recorded zero calls for a denied request.
 	decision := e.policy.Decide(ref, verb, q.GetNamespace(), q.GetName())
 	if !decision.Allowed {
-		// unknownResource, not ref.Resource: nothing has validated the string
-		// off the wire at this point. See metrics.go for why recording it
-		// would be an unbounded, permanent allocation inside the customer's
-		// cluster. Everything past this gate matched a rule the owner wrote,
-		// so those paths keep the real resource.
+		// unknownResource, not ref.Resource. A denied query's resource is
+		// whatever the wire asked for, bounded by nothing -- Decide rejects a
+		// ref that is not a syntactically valid identifier, but "syntactically
+		// valid" still spans every DNS-1123 label there is. See metrics.go for
+		// why recording it would be an unbounded, permanent allocation inside
+		// the customer's cluster. metricResource applies the same reasoning to
+		// the allowed-but-failed path under a wildcard rule.
 		e.metrics.observe(string(verb), unknownResource, view, "policy_denied", 0, 0)
 		// Logged at debug, not warn: a denial is the policy working, not a
 		// fault. It is here so an operator debugging "why can't I see this
@@ -150,7 +152,7 @@ func (e *Executor) execute(ctx context.Context, q *agentv1.ResourceQuery) *agent
 		}
 	}
 	if verb == policy.VerbGet && q.GetName() == "" {
-		e.metrics.observe(string(verb), ref.Resource, view, "internal", 0, 0)
+		e.metrics.observe(string(verb), metricResource(ref, decision, false), view, "internal", 0, 0)
 		return &agentv1.ResourceQueryResult{
 			Error: queryError(agentv1.QueryErrorCode_QUERY_ERROR_INTERNAL, "get requires a name"),
 		}
@@ -158,7 +160,8 @@ func (e *Executor) execute(ctx context.Context, q *agentv1.ResourceQuery) *agent
 
 	release, ok := e.gate.acquire(ctx)
 	if !ok {
-		e.metrics.observe(string(verb), ref.Resource, view, "resource_exhausted", 0, 0)
+		e.metrics.observe(string(verb), metricResource(ref, decision, false), view,
+			"resource_exhausted", 0, 0)
 		return &agentv1.ResourceQueryResult{
 			Error: queryError(agentv1.QueryErrorCode_QUERY_ERROR_RESOURCE_EXHAUSTED,
 				"too many concurrent queries for this agent; retry shortly"),
@@ -180,13 +183,29 @@ func (e *Executor) execute(ctx context.Context, q *agentv1.ResourceQuery) *agent
 		res = e.list(ctx, ref, decision, q)
 	}
 	outcome := "ok"
-	if res.GetError() != nil {
+	succeeded := res.GetError() == nil
+	if !succeeded {
 		outcome = strings.ToLower(strings.TrimPrefix(
 			res.GetError().GetCode().String(), "QUERY_ERROR_"))
 	}
-	e.metrics.observe(string(verb), ref.Resource, view, outcome,
+	e.metrics.observe(string(verb), metricResource(ref, decision, succeeded), view, outcome,
 		time.Since(start).Seconds(), len(res.GetPayload()))
 	return res
+}
+
+// metricResource picks the resource label for one query's metrics.
+//
+// It answers a cardinality question, not a correctness one: a label value the
+// requester can choose freely is a permanent allocation in a Prometheus
+// collector, which never evicts children. A ref that matched a rule naming it
+// comes from the owner's finite config; a ref that matched a WILDCARD rule
+// came off the wire, and only a successful call proves the API server knows
+// that resource. See metrics.go for the full reasoning behind the placeholder.
+func metricResource(ref policy.Ref, decision policy.Decision, succeeded bool) string {
+	if decision.WildcardRule && !succeeded {
+		return unknownResource
+	}
+	return ref.Resource
 }
 
 func (e *Executor) list(

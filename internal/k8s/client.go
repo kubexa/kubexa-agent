@@ -439,6 +439,12 @@ func podMetricFrom(item metricsv1beta1.PodMetrics) PodMetric {
 	}
 }
 
+// maxCachedRESTClients caps how many per-GroupVersion REST clients the
+// live-query path keeps. See the comment at the cache write in
+// newQueryClientsFromRest for why a cap is needed and why exceeding it
+// degrades instead of failing.
+const maxCachedRESTClients = 512
+
 // QueryClients bundles the two Kubernetes clients the live-query path needs.
 //
 // Both are built from the same REST config but with their own QPS/burst
@@ -532,7 +538,29 @@ func newQueryClientsFromRest(restCfg *rest.Config) (*QueryClients, error) {
 		if err != nil {
 			return nil, fmt.Errorf("k8s query client: rest client for %s: %w", gv, err)
 		}
-		cache[gv] = c
+		// Cache only while the cache is small. group/version arrive on the
+		// wire, and a query rule of resources: ["*"] permits any of them, so
+		// without a ceiling a loop of queries naming fresh GroupVersions grows
+		// this map -- and the transports its clients hold -- until the pod is
+		// OOM-killed inside the customer's cluster.
+		//
+		// Past the cap the client is built and returned UNCACHED rather than
+		// refused: the cap is far above any real cluster's group/version count
+		// (a large cluster with many CRDs lands in the low hundreds), so
+		// reaching it means abuse or something equally unexpected, and neither
+		// is a reason to break a legitimate cluster's live queries. The
+		// degradation is one extra client construction per call; client-go's
+		// transport cache is global, so the TLS connection pool is still
+		// shared.
+		//
+		// There is no eviction, so a filled cache stays filled: an abuser who
+		// gets there first leaves every legitimate GroupVersion on the
+		// uncached path for the process's lifetime. That is accepted -- an LRU
+		// here would buy back one allocation per request and cost a policy
+		// nobody can reason about during an incident.
+		if len(cache) < maxCachedRESTClients {
+			cache[gv] = c
+		}
 		return c, nil
 	}
 

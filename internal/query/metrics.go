@@ -2,16 +2,28 @@ package query
 
 import "github.com/prometheus/client_golang/prometheus"
 
-// unknownResource is the resource label recorded for a query that never got
-// past the policy gate.
+// unknownResource is the resource label recorded whenever ref.Resource is a
+// string the requester chose rather than one the cluster owner or the API
+// server vouched for. Two paths qualify.
 //
-// ref.Resource arrives on the wire and is attacker-chosen until a policy rule
-// matches it. Feeding it unvalidated into a CounterVec and two HistogramVecs
-// lets anyone who can reach the stream mint a metric child per bogus string,
-// and Prometheus collectors never evict children -- the agent's RSS would
-// climb until the pod is OOM-killed, inside the customer's cluster. A fixed
-// placeholder keeps the denial series bounded; an allowed query keeps its real
-// resource, whose cardinality is bounded by the owner's own rule set.
+// First, a query that never got past the policy gate. ref.Resource arrives on
+// the wire and is attacker-chosen until a policy rule matches it. Feeding it
+// unvalidated into a CounterVec and two HistogramVecs lets anyone who can
+// reach the stream mint a metric child per bogus string, and Prometheus
+// collectors never evict children -- the agent's RSS would climb until the pod
+// is OOM-killed, inside the customer's cluster.
+//
+// Second -- and this is what a rule of resources: ["*"] added -- a query the
+// policy ALLOWED but that failed. Matching a wildcard rule proves nothing
+// about the string: "aaa1" is a perfectly good DNS-1123 label, so the
+// syntactic validation in policy.Decide lets an unbounded family of them
+// through, and a loop over them would mint a child each. A wildcard query that
+// SUCCEEDED is different: the API server confirmed that resource exists, so
+// the label set is bounded by the cluster's own GVR count. A failure names
+// nothing real, so it is recorded here instead.
+//
+// A ref that matched a rule naming it explicitly always keeps its real
+// resource: that cardinality is bounded by the owner's own rule set.
 const unknownResource = "other"
 
 // recorders holds the query path's Prometheus instruments. All are optional:
