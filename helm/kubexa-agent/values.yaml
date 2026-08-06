@@ -221,6 +221,15 @@ query:
   # redactSecrets: true unless you specifically need values readable. Pair it
   # with rbac.readAll above, or the API server refuses everything the
   # generated role does not already name.
+  #
+  # UPGRADE NOTE (chart versions that added the `"*"` wildcard): only the bare
+  # `"*"` is a wildcard. A PARTIAL form -- `"apps/v1/*"`, `"apps/*"` -- is now
+  # rejected at startup and the agent exits, here and in collect.state.rules
+  # alike. Earlier versions accepted such an entry and silently matched
+  # nothing, so a rule you believed was in force never was. If your agent
+  # crash-loops after upgrading with a "not a supported resource" message,
+  # replace the partial form with the resources it was meant to name (or with
+  # the bare `"*"`).
   rules: []
   #  - namespace: stage
   #    resources: [pods]

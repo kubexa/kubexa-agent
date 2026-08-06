@@ -155,7 +155,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	// A wildcard rule permits every resource, secrets among them. Paired with
 	// visible Secret values it is the widest read policy the agent can hold,
 	// and an operator must not have to discover that from a screen.
-	if ids := queryPolicy.WildcardRuleIDs(); len(ids) > 0 && !cfg.QueryRedactSecrets() {
+	if ids := queryPolicy.UnredactedWildcardRuleIDs(); len(ids) > 0 {
 		log.Warn("live query policy permits every resource and Secret values are not redacted",
 			logger.F("rules", strings.Join(ids, ",")),
 			logger.F("remedy", "set query.redact_secrets: true, or name resources explicitly"),
