@@ -612,3 +612,143 @@ collect:
 		t.Fatal("Compile must reject a partial wildcard inherited from collect.state.rules")
 	}
 }
+
+// The security test for the wildcard rule. Before the wildcard existed, a ref
+// had to EQUAL one compiled from the owner's config, so nothing downstream
+// ever saw a string the requester chose. A wildcard rule matches any ref, and
+// the dynamic client's path.Join URL building happily normalises "./secrets"
+// into a request for the real Secrets endpoint -- while the redaction in
+// collector/state keys off an exact "secrets" compare and misses it. That is
+// full Secret values leaving a cluster configured with redact_secrets: true,
+// so the ref has to be rejected before any rule is consulted.
+func TestDecideRejectsNonCanonicalRefUnderWildcard(t *testing.T) {
+	p := compile(t, `
+query:
+  redact_secrets: true
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	for _, ref := range []Ref{
+		{Version: "v1", Resource: "./secrets"},
+		{Version: "v1", Resource: "x/../secrets"},
+		{Version: "v1", Resource: "secrets/"},
+		{Version: "v1", Resource: ".."},
+		{Version: "v1", Resource: "."},
+		{Version: "v1", Resource: "SECRETS"},
+		{Version: "v1", Resource: ""},
+		{Group: "bad/group", Version: "v1", Resource: "secrets"},
+		{Version: "../v1", Resource: "secrets"},
+	} {
+		t.Run(refString(ref), func(t *testing.T) {
+			for _, verb := range []Verb{VerbList, VerbGet} {
+				name := ""
+				if verb == VerbGet {
+					name = "some-name"
+				}
+				d := p.Decide(ref, verb, "stage", name)
+				if d.Allowed {
+					t.Fatalf("Decide(%+v, %s) = allowed; a ref that cannot name a real "+
+						"Kubernetes resource must not reach the API server", ref, verb)
+				}
+				if d.Reason == "" {
+					t.Error("a denial must carry a human-readable reason")
+				}
+			}
+		})
+	}
+}
+
+// The validation must cost a legitimate cluster nothing: core resources,
+// grouped ones, the metrics mirror and CRDs on an alpha version all stay
+// allowed.
+func TestDecideAllowsEveryLegitimateGVRUnderWildcard(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	for _, ref := range []Ref{
+		{Version: "v1", Resource: "pods"},
+		{Group: "apps", Version: "v1", Resource: "deployments"},
+		{Group: "metrics.k8s.io", Version: "v1beta1", Resource: "pods"},
+		{Group: "monitoring.coreos.com", Version: "v1", Resource: "prometheusrules"},
+		{Group: "example.io", Version: "v1alpha1", Resource: "widgets"},
+	} {
+		t.Run(refString(ref), func(t *testing.T) {
+			if d := p.Decide(ref, VerbList, "stage", ""); !d.Allowed {
+				t.Fatalf("Decide(%+v) = %+v, want allowed", ref, d)
+			}
+			if !p.AllowsAnyList(ref.Group, ref.Version, ref.Resource) {
+				t.Errorf("AllowsAnyList(%+v) = false, want true", ref)
+			}
+			if !p.AllowsAnyGet(ref.Group, ref.Version, ref.Resource) {
+				t.Errorf("AllowsAnyGet(%+v) = false, want true", ref)
+			}
+		})
+	}
+}
+
+// The capability reporter publishes what these answer. Under a wildcard they
+// would otherwise say yes to any string at all, cataloguing GVRs that cannot
+// exist.
+func TestAllowsAnyRejectsAnInvalidGVRUnderWildcard(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	if p.AllowsAnyList("", "v1", "./secrets") {
+		t.Error("AllowsAnyList must refuse a non-canonical resource")
+	}
+	if p.AllowsAnyGet("bad/group", "v1", "secrets") {
+		t.Error("AllowsAnyGet must refuse a group that is not a DNS subdomain")
+	}
+}
+
+// The executor bounds its metric labels on this flag, so it has to say which
+// kind of rule matched -- not merely that something did.
+func TestDecisionReportsWhetherAWildcardRuleMatched(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - id: named-pods
+      resources: [pods]
+    - id: everything
+      resources: ["*"]
+`)
+	if d := p.Decide(podsRef, VerbList, "stage", ""); !d.Allowed || d.WildcardRule {
+		t.Errorf("Decide(pods) = %+v, want allowed by the rule that names it", d)
+	}
+	if d := p.Decide(crdRef, VerbList, "stage", ""); !d.Allowed || !d.WildcardRule {
+		t.Errorf("Decide(crd) = %+v, want allowed with WildcardRule set", d)
+	}
+}
+
+func TestUnredactedWildcardRuleIDs(t *testing.T) {
+	exposed := compile(t, `
+query:
+  redact_secrets: false
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	ids := exposed.UnredactedWildcardRuleIDs()
+	if len(ids) != 1 || ids[0] != "everything" {
+		t.Fatalf("UnredactedWildcardRuleIDs = %v, want [everything]: a wildcard rule with "+
+			"visible Secret values is the widest policy this agent can hold and must warn", ids)
+	}
+
+	redacted := compile(t, `
+query:
+  redact_secrets: true
+  rules:
+    - id: everything
+      resources: ["*"]
+`)
+	if got := redacted.UnredactedWildcardRuleIDs(); len(got) != 0 {
+		t.Errorf("UnredactedWildcardRuleIDs = %v, want none when redact_secrets is on", got)
+	}
+}
