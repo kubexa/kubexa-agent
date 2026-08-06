@@ -150,7 +150,7 @@ func (e *Executor) execute(ctx context.Context, q *agentv1.ResourceQuery) *agent
 		}
 	}
 	if verb == policy.VerbGet && q.GetName() == "" {
-		e.metrics.observe(string(verb), ref.Resource, view, "internal", 0, 0)
+		e.metrics.observe(string(verb), metricResource(ref, decision, false), view, "internal", 0, 0)
 		return &agentv1.ResourceQueryResult{
 			Error: queryError(agentv1.QueryErrorCode_QUERY_ERROR_INTERNAL, "get requires a name"),
 		}
@@ -158,7 +158,8 @@ func (e *Executor) execute(ctx context.Context, q *agentv1.ResourceQuery) *agent
 
 	release, ok := e.gate.acquire(ctx)
 	if !ok {
-		e.metrics.observe(string(verb), ref.Resource, view, "resource_exhausted", 0, 0)
+		e.metrics.observe(string(verb), metricResource(ref, decision, false), view,
+			"resource_exhausted", 0, 0)
 		return &agentv1.ResourceQueryResult{
 			Error: queryError(agentv1.QueryErrorCode_QUERY_ERROR_RESOURCE_EXHAUSTED,
 				"too many concurrent queries for this agent; retry shortly"),
@@ -180,13 +181,29 @@ func (e *Executor) execute(ctx context.Context, q *agentv1.ResourceQuery) *agent
 		res = e.list(ctx, ref, decision, q)
 	}
 	outcome := "ok"
-	if res.GetError() != nil {
+	succeeded := res.GetError() == nil
+	if !succeeded {
 		outcome = strings.ToLower(strings.TrimPrefix(
 			res.GetError().GetCode().String(), "QUERY_ERROR_"))
 	}
-	e.metrics.observe(string(verb), ref.Resource, view, outcome,
+	e.metrics.observe(string(verb), metricResource(ref, decision, succeeded), view, outcome,
 		time.Since(start).Seconds(), len(res.GetPayload()))
 	return res
+}
+
+// metricResource picks the resource label for one query's metrics.
+//
+// It answers a cardinality question, not a correctness one: a label value the
+// requester can choose freely is a permanent allocation in a Prometheus
+// collector, which never evicts children. A ref that matched a rule naming it
+// comes from the owner's finite config; a ref that matched a WILDCARD rule
+// came off the wire, and only a successful call proves the API server knows
+// that resource. See metrics.go for the full reasoning behind the placeholder.
+func metricResource(ref policy.Ref, decision policy.Decision, succeeded bool) string {
+	if decision.WildcardRule && !succeeded {
+		return unknownResource
+	}
+	return ref.Resource
 }
 
 func (e *Executor) list(

@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"fmt"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -98,4 +99,56 @@ func TestNewQueryClientsDoesNotMutateTheCallerConfig(t *testing.T) {
 func restConfigForTest(t *testing.T) *rest.Config {
 	t.Helper()
 	return &rest.Config{Host: "https://127.0.0.1:6443"}
+}
+
+// group/version arrive on the wire, and a live-query rule of resources: ["*"]
+// permits any of them, so an unbounded cache is an OOM the requester controls.
+// Past the cap the client must still be BUILT and returned -- a real cluster
+// keeps working, it just stops caching -- so this asserts both halves: the map
+// stops growing (a second call for the same GroupVersion returns a different
+// client, proving nothing was stored) and the client is usable.
+func TestRESTForStopsCachingPastTheCap(t *testing.T) {
+	qc, err := newQueryClientsFromRest(restConfigForTest(t))
+	if err != nil {
+		t.Fatalf("newQueryClientsFromRest: %v", err)
+	}
+	first := schema.GroupVersion{Group: "group0.example.io", Version: "v1"}
+	for i := 0; i < maxCachedRESTClients; i++ {
+		gv := schema.GroupVersion{Group: fmt.Sprintf("group%d.example.io", i), Version: "v1"}
+		if _, err := qc.RESTFor(gv); err != nil {
+			t.Fatalf("RESTFor(%s): %v", gv, err)
+		}
+	}
+
+	over := schema.GroupVersion{Group: "overflow.example.io", Version: "v1"}
+	a, err := qc.RESTFor(over)
+	if err != nil {
+		t.Fatalf("RESTFor past the cap returned an error, want a working uncached client: %v", err)
+	}
+	b, err := qc.RESTFor(over)
+	if err != nil {
+		t.Fatalf("second RESTFor past the cap: %v", err)
+	}
+	if a == b {
+		t.Error("the cache kept growing past maxCachedRESTClients")
+	}
+	if got := b.Get().URL().Path; got != "/apis/overflow.example.io/v1" {
+		t.Errorf("uncached client path = %q, want /apis/overflow.example.io/v1", got)
+	}
+	if b.GetRateLimiter() != a.GetRateLimiter() {
+		t.Error("an uncached client must still share the query rate-limit budget")
+	}
+
+	// Everything cached before the cap is still served from the cache.
+	c1, err := qc.RESTFor(first)
+	if err != nil {
+		t.Fatalf("RESTFor(%s): %v", first, err)
+	}
+	c2, err := qc.RESTFor(first)
+	if err != nil {
+		t.Fatalf("RESTFor(%s): %v", first, err)
+	}
+	if c1 != c2 {
+		t.Error("a GroupVersion cached before the cap must still be reused")
+	}
 }
