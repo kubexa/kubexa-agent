@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -149,6 +150,16 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	if err != nil {
 		_ = q.Close()
 		return fmt.Errorf("query policy: %w", err)
+	}
+
+	// A wildcard rule permits every resource, secrets among them. Paired with
+	// visible Secret values it is the widest read policy the agent can hold,
+	// and an operator must not have to discover that from a screen.
+	if ids := queryPolicy.WildcardRuleIDs(); len(ids) > 0 && !cfg.QueryRedactSecrets() {
+		log.Warn("live query policy permits every resource and Secret values are not redacted",
+			logger.F("rules", strings.Join(ids, ",")),
+			logger.F("remedy", "set query.redact_secrets: true, or name resources explicitly"),
+		)
 	}
 
 	// The live-query path gets its own client pair for the same reason the
