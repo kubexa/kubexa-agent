@@ -417,3 +417,136 @@ query:
 		t.Errorf("Validate() error should contain query verb violation: %v", err)
 	}
 }
+
+func TestQueryRuleAcceptsResourceWildcard(t *testing.T) {
+	var cfg Config
+	src := `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := cfg.ValidateQuery(); err != nil {
+		t.Fatalf("ValidateQuery: %v", err)
+	}
+}
+
+func TestQueryRuleWildcardDoesNotExcuseOtherEntries(t *testing.T) {
+	var cfg Config
+	src := `
+query:
+  rules:
+    - id: everything
+      resources: ["*", "podz"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	err := cfg.ValidateQuery()
+	if err == nil {
+		t.Fatal("ValidateQuery must still reject podz alongside the wildcard")
+	}
+	if !strings.Contains(err.Error(), "podz") {
+		t.Errorf("violation = %q, want it to name podz", err.Error())
+	}
+}
+
+// A wildcard rule already permits metrics.k8s.io itself, and being an owner
+// rule it is evaluated before any appended mirror, so a mirror of it could
+// never be reached.
+func TestQueryRulesEmitNoMetricsMirrorForWildcard(t *testing.T) {
+	var cfg Config
+	src := `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	rules := cfg.QueryRules()
+	if len(rules) != 1 {
+		t.Fatalf("got %d rules, want 1 (the wildcard alone, no mirror): %+v", len(rules), rules)
+	}
+}
+
+// A namespace-scoped wildcard leaves other namespaces to the rules that name
+// them, and those rules must keep their metrics mirrors.
+func TestQueryRulesMirrorLaterRuleAfterScopedWildcard(t *testing.T) {
+	var cfg Config
+	src := `
+query:
+  rules:
+    - id: stage-all
+      namespace: stage
+      resources: ["*"]
+    - id: prod-pods
+      namespace: prod
+      resources: [pods]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var mirrored []string
+	for _, r := range cfg.QueryRules() {
+		if strings.HasPrefix(r.ID, metricsUsageRuleID) {
+			mirrored = append(mirrored, r.ID)
+		}
+	}
+	if len(mirrored) != 1 {
+		t.Fatalf("mirrors = %v, want exactly the prod-pods mirror", mirrored)
+	}
+	if !strings.Contains(mirrored[0], "prod-pods") {
+		t.Errorf("mirror = %q, want it to derive from prod-pods", mirrored[0])
+	}
+}
+
+// A field selector on a wildcard rule blocks later pods/nodes mirrors for the
+// same reason a field selector on a pods rule does: Decide ignores field
+// selectors when choosing a rule, so the wildcard still captures the object
+// LIST and a later rule's mirror would answer with more than the effective
+// object policy allows.
+func TestQueryRulesWildcardWithFieldSelectorBlocksLaterMirrors(t *testing.T) {
+	var cfg Config
+	src := `
+query:
+  rules:
+    - id: everything
+      resources: ["*"]
+      field_selector: metadata.name=api
+    - id: later-pods
+      resources: [pods]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, r := range cfg.QueryRules() {
+		if strings.HasPrefix(r.ID, metricsUsageRuleID) {
+			t.Fatalf("unexpected mirror %q after a field-selector wildcard", r.ID)
+		}
+	}
+}
+
+// collect.state validation goes through ParseResourceKind and must keep
+// rejecting the wildcard: a watch needs a concrete resource to open.
+func TestStateRulesStillRejectWildcard(t *testing.T) {
+	var cfg Config
+	src := `
+collect:
+  state:
+    enabled: true
+    rules:
+      - namespace: stage
+        resources: ["*"]
+`
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("collect.state.rules must reject the wildcard")
+	}
+}

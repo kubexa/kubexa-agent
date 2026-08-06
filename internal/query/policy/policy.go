@@ -59,8 +59,10 @@ type Policy struct {
 }
 
 type compiledRule struct {
+	id            string
 	namespace     string
 	namespaceSet  bool
+	wildcard      bool
 	resources     []Ref
 	names         []string
 	allowList     bool
@@ -87,7 +89,12 @@ func Compile(root *pkgconfig.Config) (*Policy, error) {
 			label = fmt.Sprintf("#%d", i)
 		}
 		refs := make([]Ref, 0, len(r.Resources))
+		wildcard := false
 		for _, name := range r.Resources {
+			if strings.TrimSpace(name) == pkgconfig.ResourceWildcard {
+				wildcard = true
+				continue
+			}
 			d, err := k8sresource.Parse(name)
 			if err != nil {
 				return nil, fmt.Errorf("query rule %s: %w", label, err)
@@ -120,8 +127,10 @@ func Compile(root *pkgconfig.Config) (*Policy, error) {
 		}
 
 		compiled = append(compiled, compiledRule{
+			id:            label,
 			namespace:     r.Namespace,
 			namespaceSet:  r.Namespace != "",
+			wildcard:      wildcard,
 			resources:     refs,
 			names:         append([]string(nil), r.Names...),
 			allowList:     allowList,
@@ -220,12 +229,35 @@ func (p *Policy) allowsAny(ref Ref, verb Verb) bool {
 }
 
 func (r compiledRule) matchesResource(ref Ref) bool {
+	if r.wildcard {
+		return true
+	}
 	for _, got := range r.resources {
 		if got == ref {
 			return true
 		}
 	}
 	return false
+}
+
+// WildcardRuleIDs names the compiled rules that permit every resource.
+//
+// It exists for one caller: the startup warning in cmd/agent. A wildcard rule
+// covers secrets like everything else, and paired with unredacted Secret
+// values that is the widest read policy this agent can hold -- not something an
+// operator should first learn from a screen. A disabled policy permits nothing,
+// so it reports nothing.
+func (p *Policy) WildcardRuleIDs() []string {
+	if p == nil || !p.enabled {
+		return nil
+	}
+	var out []string
+	for _, r := range p.rules {
+		if r.wildcard {
+			out = append(out, r.id)
+		}
+	}
+	return out
 }
 
 // matchesNamespace implements the cluster-scoped rule from the design: a
