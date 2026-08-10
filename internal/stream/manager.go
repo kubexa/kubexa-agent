@@ -594,7 +594,7 @@ func (m *streamManager) applyHandshakeConfig(hs *agentv1.HandshakeResponse) {
 }
 
 func (m *streamManager) startSessionWorkers(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
-	m.sessionWG.Add(3)
+	m.sessionWG.Add(4)
 	go func() {
 		defer m.sessionWG.Done()
 		m.sendLoop(ctx, stream)
@@ -607,6 +607,99 @@ func (m *streamManager) startSessionWorkers(ctx context.Context, stream agentv1.
 		defer m.sessionWG.Done()
 		m.drainBufferedQueue(ctx, stream)
 	}()
+	go func() {
+		defer m.sessionWG.Done()
+		m.heartbeatLoop(ctx, stream)
+	}()
+}
+
+// defaultHeartbeatInterval is used when the gateway states none. Thirty
+// seconds is short enough that a stalled agent is visible within a scrape
+// interval and long enough to cost nothing.
+const defaultHeartbeatInterval = 30 * time.Second
+
+// overloadedQueueFraction is how full the buffer has to be before the agent
+// calls itself overloaded. It is a report, not a threshold anything acts on.
+const overloadedQueueFraction = 0.8
+
+// heartbeatLoop reports the agent's health on the interval the gateway asked
+// for. Nothing sent one before this: agent.v1.Heartbeat has existed since the
+// protocol was written and the gateway's handler only ever saw messages from
+// the dev server.
+//
+// The counters it carries are CUMULATIVE since process start. A dropped
+// heartbeat then loses nothing, and the gateway advances its own Prometheus
+// counters by the difference.
+func (m *streamManager) heartbeatLoop(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
+	interval := defaultHeartbeatInterval
+	if sec := m.ConfigSnapshot().GetHeartbeatIntervalSec(); sec > 0 {
+		interval = time.Duration(sec) * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			msg := &agentv1.AgentMessage{
+				MessageId: uuid.NewString(),
+				Payload: &agentv1.AgentMessage_Heartbeat{
+					Heartbeat: &agentv1.Heartbeat{
+						TimestampUnixMs: time.Now().UnixMilli(),
+						Health:          m.healthSnapshot(),
+					},
+				},
+			}
+			// Sent straight down the stream rather than through the queue: a
+			// health report that waits behind the backlog it is reporting on
+			// is worthless, and it must not be replayed from disk after a
+			// restart either.
+			if err := stream.Send(msg); err != nil {
+				m.log.Err(err).Warn("heartbeat send failed")
+				m.abortSession()
+				return
+			}
+		}
+	}
+}
+
+// healthSnapshot reads the queue and the process-lifetime counters the
+// pre-validation paths maintain.
+func (m *streamManager) healthSnapshot() *agentv1.AgentHealth {
+	var depth, dropped int64
+	if m.queue != nil {
+		depth = m.queue.Depth()
+		dropped = m.queue.DroppedTotal()
+	}
+	truncated, tooOld, future, rateLimited := m.counters.Snapshot()
+	return &agentv1.AgentHealth{
+		QueueDepth:         depth,
+		DroppedMessages:    dropped,
+		Status:             m.healthStatus(depth),
+		TruncatedLines:     truncated,
+		DroppedTooOld:      tooOld,
+		DroppedFuture:      future,
+		DroppedRateLimited: rateLimited,
+	}
+}
+
+// healthStatus is a coarse self-report, not a measurement of anything the
+// agent acts on. It says "overloaded" only when the buffer is genuinely close
+// to full -- which needs a queue that knows its own capacity -- and "degraded"
+// while the gateway has it throttled.
+func (m *streamManager) healthStatus(depth int64) string {
+	if ca, ok := m.queue.(queue.CapacityAware); ok {
+		if capacity := ca.Capacity(); capacity > 0 &&
+			float64(depth) >= overloadedQueueFraction*float64(capacity) {
+			return "overloaded"
+		}
+	}
+	if m.IsThrottled() {
+		return "degraded"
+	}
+	return "healthy"
 }
 
 // waitSession blocks until all session workers exit or the process context is cancelled.
