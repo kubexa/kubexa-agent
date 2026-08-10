@@ -10,8 +10,8 @@ import (
 
 // highCardinalityLabelKeys are stripped from exported pod labels.
 var highCardinalityLabelKeys = map[string]struct{}{
-	"pod-template-hash":          {},
-	"controller-revision-hash":   {},
+	"pod-template-hash":            {},
+	"controller-revision-hash":     {},
 	"batch.kubernetes.io/job-name": {},
 }
 
@@ -21,6 +21,10 @@ type ParsedLine struct {
 	Level     agentv1.LogLevel
 	Raw       []byte
 	Timestamp time.Time
+	// Truncated reports that the reader cut this line at the pushed
+	// max_line_bytes. It rides on the record through the joiner and reaches
+	// Loki as the structured-metadata key `truncated="true"`.
+	Truncated bool
 }
 
 // ParseLine parses a log line, extracting level, message, and timestamp when

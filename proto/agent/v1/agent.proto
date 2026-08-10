@@ -65,6 +65,15 @@ message AgentHealth {
   int64  queue_depth      = 1;
   int64  dropped_messages = 2;
   string status           = 3; // "healthy" | "degraded" | "overloaded"
+
+  // Pre-validation counters, CUMULATIVE since process start -- not deltas.
+  // A dropped heartbeat loses data permanently under a delta model and loses
+  // nothing under a cumulative one. The gateway advances its own counters by
+  // the difference and treats a decrease as an agent restart.
+  int64 truncated_lines      = 4;
+  int64 dropped_too_old      = 5;
+  int64 dropped_future       = 6;
+  int64 dropped_rate_limited = 7;
 }
 
 // ─── Gateway → Agent ────────────────────────────────────────────────────────
@@ -112,6 +121,17 @@ message ConfigUpdate {
   ConfigSnapshot config         = 2;
 }
 
+// ConfigSnapshot merge semantics, and they are load-bearing:
+//
+//   Message-typed fields are a PATCH -- nil means "unchanged".
+//   Repeated fields keep their existing meaning, because proto3 cannot
+//   distinguish an absent repeated field from an empty one.
+//
+// Without that rule each sender erases the other. kubexa-backend's
+// clusterwatch reconciler sends a ConfigUpdate carrying only `watchers`, and
+// the ingest-rules pusher sends one carrying only `ingest_rules`; a receiver
+// that replaced the whole snapshot would let whichever arrived last delete
+// the other's configuration.
 message ConfigSnapshot {
   repeated LogCollectorConfig  log_collectors   = 1;
   repeated WatcherConfig       watchers         = 2;
@@ -119,6 +139,29 @@ message ConfigSnapshot {
   int32                        heartbeat_interval_sec = 4;
   int32                        batch_size             = 5;
   int32                        flush_interval_ms      = 6;
+  IngestRules                  ingest_rules           = 7;
+}
+
+// IngestRules are the limits the platform's log pipeline actually enforces,
+// pushed so the agent never has to guess them. Before this message the agent
+// hardcoded 256 KB and matched Loki's max_line_size default by coincidence
+// rather than by agreement.
+//
+// EVERY FIELD IS "0 = no rule pushed": the agent keeps its own compiled
+// default. That is deliberately the same behaviour as a gateway too old to
+// send this message at all, so there is one fallback path, not two.
+//
+// per_stream_* are the tenant's plan values. Unlike a tenant-wide ingestion
+// rate -- which is the sum across every cluster the tenant runs and therefore
+// unknowable to any single agent -- one Loki stream lives entirely on one
+// agent: the chart pins replicas to 1 and there is no leader election
+// (helm/kubexa-agent/values.yaml). So this one is exactly enforceable here.
+message IngestRules {
+  int64 max_line_bytes         = 1; // Loki max_line_size
+  int64 max_sample_age_ms      = 2; // Loki reject_old_samples_max_age
+  int64 max_future_skew_ms     = 3; // Loki creation_grace_period
+  int64 per_stream_rate_bytes  = 4;
+  int64 per_stream_burst_bytes = 5;
 }
 
 message LogCollectorConfig {
