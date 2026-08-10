@@ -28,6 +28,10 @@ message LogEntry {
   string workload       = 10;      // owning workload name, "" when uncontrolled
   string workload_kind  = 11;      // Deployment | StatefulSet | DaemonSet | Job | CronJob
   string node_name      = 12;
+  // The agent cut this line at the pushed max_line_bytes. Surfaced by
+  // kubexa-consumer as the structured-metadata key `truncated="true"`, so a
+  // reader can tell a cut line from a short one.
+  bool   truncated      = 13;
 }
 
 enum LogLevel {
