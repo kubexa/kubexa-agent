@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/kubexa/kubexa-agent/internal/collector/logs/checkpoint"
+	"github.com/kubexa/kubexa-agent/internal/ingestrules"
 	"github.com/kubexa/kubexa-agent/internal/k8s"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
@@ -367,9 +368,23 @@ func (c *Collector) handleLogLine(ctx context.Context, target streamTarget, pars
 	}
 	if parsed.Truncated {
 		c.metrics.incTruncated(target.pod.Namespace, target.pod.Name)
+		c.counters.IncTruncated()
 	}
 
-	entry := buildLogEntry(target, parsed, c.workloads.Resolve(ctx, target.pod))
+	// The per-stream limiter runs BEFORE the queue write: the whole point is
+	// that bytes Loki would answer 429 to never reach the wire or the disk
+	// buffer. It is correct here in a way a tenant-wide limiter could not be --
+	// one Loki stream lives entirely on this one agent.
+	workload := c.workloads.Resolve(ctx, target.pod)
+	key := ingestrules.StreamKey(target.pod.Namespace, target.pod.Name, target.container,
+		LevelLabel(parsed.Level), workload.Name, workload.Kind)
+	if !c.limiter.Allow(key, len(parsed.Raw), rules, time.Now()) {
+		c.metrics.incDropped(target.pod.Namespace, target.pod.Name, "rate_limited")
+		c.counters.IncRateLimited()
+		return nil
+	}
+
+	entry := buildLogEntry(target, parsed, workload)
 
 	msg := &agentv1.AgentMessage{
 		MessageId: uuid.NewString(),

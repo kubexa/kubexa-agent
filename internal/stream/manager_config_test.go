@@ -5,10 +5,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
-	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
+	"github.com/kubexa/kubexa-agent/internal/ingestrules"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	"github.com/kubexa/kubexa-agent/pkg/config/k8sresource"
+	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
 
 // fakeReconciler is a WatchReconciler test double that records every
@@ -47,9 +49,14 @@ func (f *fakeReconciler) lastDesired() []k8sresource.Descriptor {
 // metrics) since none of that is reachable from this code path.
 func newConfigTestManager(t *testing.T, rec WatchReconciler) *streamManager {
 	t.Helper()
+	// rules is not optional: the manager is the store's only writer and Set
+	// panics on a nil receiver, which is the right behaviour -- a silently
+	// swallowed rule push would be worse than a crash. New() guarantees one;
+	// this literal has to as well.
 	return &streamManager{
 		log:        logger.New("stream-config-test"),
 		reconciler: rec,
+		rules:      ingestrules.NewStore(),
 	}
 }
 
@@ -152,11 +159,18 @@ func TestConfigUpdateReconcilesUnionOfWatcherResources(t *testing.T) {
 // instruction — "nobody is watching anything, stop everything" — not a
 // malformed message to skip. Ignoring it would leave informers running
 // forever after the last viewer left.
+//
+// The message is ONE watcher carrying no resources, which is exactly what the
+// gateway sends: clusterwatch's syncGroup always emits a single WatcherConfig
+// and empties its Resources list. It used to be written as zero watchers,
+// which no producer has ever sent and which now means something else --
+// "this update is not about watchers", the shape a rules-only ConfigUpdate
+// takes. See TestRulesOnlyConfigUpdateLeavesWatchesAlone.
 func TestEmptyWatcherConfigReconcilesToEmpty(t *testing.T) {
 	rec := &fakeReconciler{}
 	m := newConfigTestManager(t, rec)
 
-	m.handleGatewayMessage(context.Background(), configMessage(t, nil))
+	m.handleGatewayMessage(context.Background(), configMessage(t, [][]string{{}}))
 
 	if rec.calls != 1 {
 		t.Fatalf("Reconcile called %d times, want 1", rec.calls)
@@ -211,4 +225,143 @@ func TestConfigUpdateSkipsUnparsableResourceButKeepsRest(t *testing.T) {
 func TestConfigUpdateWithNilReconcilerDoesNotPanic(t *testing.T) {
 	m := newConfigTestManager(t, nil)
 	m.handleGatewayMessage(context.Background(), configMessage(t, [][]string{{"v1/pods"}}))
+}
+
+// TestRulesOnlyConfigUpdateLeavesWatchesAlone is the other side of
+// ConfigSnapshot's patch semantics. The ingest-rule pusher sends an update
+// carrying only ingest_rules; reconciling that would compute an empty desired
+// set and tear down every demand-driven informer the cluster is watching.
+func TestRulesOnlyConfigUpdateLeavesWatchesAlone(t *testing.T) {
+	rec := &fakeReconciler{}
+	m := newConfigTestManager(t, rec)
+
+	m.handleGatewayMessage(context.Background(), &agentv1.GatewayMessage{
+		Payload: &agentv1.GatewayMessage_Config{Config: &agentv1.ConfigUpdate{
+			ConfigVersion: "rules-only",
+			Config: &agentv1.ConfigSnapshot{
+				IngestRules: &agentv1.IngestRules{MaxLineBytes: 4096},
+			},
+		}},
+	})
+
+	if rec.callCount() != 0 {
+		t.Fatalf("a rules-only update must not reconcile watches, called %d times", rec.callCount())
+	}
+	if got := m.rules.Get().MaxLineBytes; got != 4096 {
+		t.Fatalf("the pushed rules were not applied, MaxLineBytes = %d", got)
+	}
+}
+
+// TestWatchersOnlyConfigUpdateLeavesRulesAlone completes the pair: a
+// clusterwatch update carries no ingest_rules, and nil means unchanged. Without
+// that rule the two senders would erase each other's configuration, whichever
+// arrived last.
+func TestWatchersOnlyConfigUpdateLeavesRulesAlone(t *testing.T) {
+	rec := &fakeReconciler{}
+	m := newConfigTestManager(t, rec)
+	m.rules.Set(ingestrules.Rules{MaxLineBytes: 4096, PerStreamRate: 99})
+
+	m.handleGatewayMessage(context.Background(), configMessage(t, [][]string{{"v1/pods"}}))
+
+	if rec.callCount() != 1 {
+		t.Fatalf("a watchers update must still reconcile, called %d times", rec.callCount())
+	}
+	got := m.rules.Get()
+	if got.MaxLineBytes != 4096 || got.PerStreamRate != 99 {
+		t.Fatalf("a watchers-only update erased the rules: %+v", got)
+	}
+}
+
+// TestHandshakeWithoutRulesRestoresTheDefaults. Rules survive a reconnect only
+// if the new gateway states them. Carrying a previous session's rules into a
+// session with a gateway that pushes none would shape traffic against limits
+// nobody currently claims.
+func TestHandshakeWithoutRulesRestoresTheDefaults(t *testing.T) {
+	m := newConfigTestManager(t, &fakeReconciler{})
+	m.rules.Set(ingestrules.Rules{MaxLineBytes: 4096, MaxSampleAge: time.Hour})
+
+	m.applyHandshakeConfig(&agentv1.HandshakeResponse{
+		Accepted:  true,
+		SessionId: "s1",
+		Config:    &agentv1.ConfigSnapshot{},
+	})
+
+	if got, want := m.rules.Get(), ingestrules.Defaults(); got != want {
+		t.Fatalf("a handshake with no rules must restore the defaults\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+// TestQueuedMessageAgeFilter checks the rule at the only place it can be
+// checked. A record queued during a three-day outage was fresh when collected
+// and is stale when sent, so age is a send-time property.
+func TestQueuedMessageAgeFilter(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	rules := ingestrules.Rules{MaxSampleAge: time.Hour, MaxFutureSkew: 10 * time.Minute}
+
+	cases := []struct {
+		name   string
+		ts     time.Time
+		reason string // "" = keep
+	}{
+		{"fresh", now.Add(-time.Minute), ""},
+		{"at the age boundary", now.Add(-time.Hour), ""},
+		{"too old", now.Add(-2 * time.Hour), "too_old"},
+		{"slightly ahead", now.Add(time.Minute), ""},
+		{"at the skew boundary", now.Add(10 * time.Minute), ""},
+		{"too far ahead", now.Add(time.Hour), "future"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := logMessageAt(tc.ts)
+			if got := ageDropReason(msg, rules, now); got != tc.reason {
+				t.Errorf("want %q, got %q", tc.reason, got)
+			}
+		})
+	}
+}
+
+// TestQueuedMessageAgeFilterOffByDefault: age filtering was not happening
+// before this feature and must not start on its own when the gateway pushes
+// nothing.
+func TestQueuedMessageAgeFilterOffByDefault(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	msg := logMessageAt(now.Add(-100 * 24 * time.Hour))
+	if got := ageDropReason(msg, ingestrules.Defaults(), now); got != "" {
+		t.Fatalf("with no rule pushed nothing may be dropped, got %q", got)
+	}
+}
+
+// TestAgeFilterJudgesABatchByItsOldestEntry. A batch is dropped whole, so a
+// single fresh entry must not carry a week of stale ones past the gate.
+func TestAgeFilterJudgesABatchByItsOldestEntry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	rules := ingestrules.Rules{MaxSampleAge: time.Hour}
+	msg := &agentv1.AgentMessage{Payload: &agentv1.AgentMessage_Logs{
+		Logs: &agentv1.LogBatch{Entries: []*agentv1.LogEntry{
+			{Timestamp: now.Add(-time.Minute).UnixNano()},
+			{Timestamp: now.Add(-48 * time.Hour).UnixNano()},
+		}},
+	}}
+	if got := ageDropReason(msg, rules, now); got != "too_old" {
+		t.Fatalf("want too_old, got %q", got)
+	}
+}
+
+// TestAgeFilterIgnoresNonLogPayloads: state events and metrics have their own
+// freshness semantics and Loki's reject_old_samples does not apply to them.
+func TestAgeFilterIgnoresNonLogPayloads(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	rules := ingestrules.Rules{MaxSampleAge: time.Hour}
+	msg := &agentv1.AgentMessage{Payload: &agentv1.AgentMessage_Heartbeat{
+		Heartbeat: &agentv1.Heartbeat{TimestampUnixMs: now.Add(-72 * time.Hour).UnixMilli()},
+	}}
+	if got := ageDropReason(msg, rules, now); got != "" {
+		t.Fatalf("only log batches are age-filtered, got %q", got)
+	}
+}
+
+func logMessageAt(ts time.Time) *agentv1.AgentMessage {
+	return &agentv1.AgentMessage{Payload: &agentv1.AgentMessage_Logs{
+		Logs: &agentv1.LogBatch{Entries: []*agentv1.LogEntry{{Timestamp: ts.UnixNano()}}},
+	}}
 }

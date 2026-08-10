@@ -93,6 +93,10 @@ type streamManager struct {
 	// the only component that sees the gateway's messages; the log collector
 	// reads it on the collection path and drainBufferedQueue on the send path.
 	rules *ingestrules.Store
+	// counters are the cumulative pre-validation totals the heartbeat reports.
+	// Shared with the log collector, which records truncation and rate limiting
+	// while this side records age drops.
+	counters *ingestrules.Counters
 
 	// reconciler applies gateway watch config to the demand-driven informer
 	// set. Set once at construction and read-only afterward, so it needs no
@@ -163,6 +167,7 @@ func New(
 	reconciler WatchReconciler,
 	responder QueryResponder,
 	rules *ingestrules.Store,
+	counters *ingestrules.Counters,
 ) (Manager, error) {
 	if cfg == nil {
 		return nil, errors.New("config is nil")
@@ -190,6 +195,7 @@ func New(
 		sendCh:        make(chan *agentv1.AgentMessage, defaultSendChannelSize),
 		state:         StateIdle,
 		rules:         rules,
+		counters:      counters,
 	}
 	// The manager is the store's only writer and Set panics on a nil receiver,
 	// so a caller that passes none gets a private store rather than a crash on
@@ -560,20 +566,31 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 		)
 	}
 
-	if hs.GetConfig() != nil {
-		m.configSnap.Store(hs.GetConfig())
-		// Resolved even when ingest_rules is nil: FromProto(nil) is the
-		// defaults, so a gateway that pushes nothing explicitly restores the
-		// agent's own values rather than leaving a previous session's rules in
-		// place across a reconnect to a different gateway.
-		m.rules.Set(ingestrules.FromProto(hs.GetConfig().GetIngestRules()))
-		m.log.Info("applied gateway config snapshot",
-			logger.F("session_id", hs.GetSessionId()),
-			logger.F("max_line_bytes", m.rules.Get().MaxLineBytes),
-		)
-	}
+	m.applyHandshakeConfig(hs)
 
 	return hs.GetSessionId(), nil
+}
+
+// applyHandshakeConfig installs the seed configuration a handshake carries.
+//
+// The rules are set on EVERY handshake, including one carrying no config at
+// all: FromProto(nil) is the agent's own defaults, so reconnecting to a
+// gateway that states nothing restores them rather than leaving a previous
+// session's rules in place. Rules that outlive the gateway that issued them
+// would shape traffic against limits nobody currently claims.
+//
+// configSnap is only replaced when the handshake actually carries a snapshot,
+// because a nil there means "no config", not "empty config".
+func (m *streamManager) applyHandshakeConfig(hs *agentv1.HandshakeResponse) {
+	m.rules.Set(ingestrules.FromProto(hs.GetConfig().GetIngestRules()))
+	if hs.GetConfig() == nil {
+		return
+	}
+	m.configSnap.Store(hs.GetConfig())
+	m.log.Info("applied gateway config snapshot",
+		logger.F("session_id", hs.GetSessionId()),
+		logger.F("max_line_bytes", m.rules.Get().MaxLineBytes),
+	)
 }
 
 func (m *streamManager) startSessionWorkers(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
@@ -709,7 +726,27 @@ func (m *streamManager) handleGatewayMessage(ctx context.Context, msg *agentv1.G
 		m.log.Info("received gateway config update",
 			logger.F("version", p.Config.GetConfigVersion()),
 		)
-		m.reconcileWatchConfig(ctx, p.Config.GetConfig())
+		// ConfigSnapshot's message-typed fields are a PATCH: nil means
+		// unchanged. Replacing the stored snapshot wholesale would let a
+		// watchers-only update from the gateway's clusterwatch reconciler
+		// erase the rules, and a rules-only update erase the watchers.
+		if rules := p.Config.GetConfig().GetIngestRules(); rules != nil {
+			m.rules.Set(ingestrules.FromProto(rules))
+			m.log.Info("applied pushed ingest rules",
+				logger.F("max_line_bytes", rules.GetMaxLineBytes()),
+				logger.F("per_stream_rate_bytes", rules.GetPerStreamRateBytes()),
+			)
+		}
+		// A watchers-less update is not "stop watching everything" -- it is an
+		// update about something else. This test is exact, not a heuristic:
+		// kubexa-backend's clusterwatch reconciler always sends exactly one
+		// WatcherConfig entry (internal/clusterwatch/reconciler.go, syncGroup),
+		// carrying an empty Resources list when the desired set is empty. So
+		// "tear everything down" arrives as one entry with no resources, never
+		// as zero entries.
+		if len(p.Config.GetConfig().GetWatchers()) > 0 {
+			m.reconcileWatchConfig(ctx, p.Config.GetConfig())
+		}
 	case *agentv1.GatewayMessage_Shutdown:
 		m.log.Warn("gateway requested shutdown",
 			logger.F("reason", p.Shutdown.GetReason()),
@@ -835,6 +872,39 @@ func shouldDeliverQueuedMessage(cfg *config.Config, msg *agentv1.AgentMessage) b
 	return true
 }
 
+// ageDropReason reports why a queued log batch must not be sent, or "" to send
+// it. Only log batches are checked: state events and metrics have their own
+// freshness semantics and Loki's reject_old_samples does not apply to them.
+//
+// The check lives at drain, not at collection, because age is a SEND-time
+// property: a record queued during a three-day outage was fresh when it was
+// collected. Loki would reject these anyway -- dropping them here saves the
+// bandwidth and, unlike a rejection, produces a number the agent can report.
+//
+// A batch is judged by its OLDEST entry, and dropped whole. The collection
+// path writes one entry per message, so in practice that is the same thing;
+// judging by the newest would let one fresh entry carry a week of stale ones
+// past the gate.
+func ageDropReason(msg *agentv1.AgentMessage, r ingestrules.Rules, now time.Time) string {
+	if r.MaxSampleAge <= 0 && r.MaxFutureSkew <= 0 {
+		return ""
+	}
+	logs := msg.GetLogs()
+	if logs == nil || len(logs.GetEntries()) == 0 {
+		return ""
+	}
+	for _, e := range logs.GetEntries() {
+		ts := time.Unix(0, e.GetTimestamp())
+		if r.MaxSampleAge > 0 && now.Sub(ts) > r.MaxSampleAge {
+			return "too_old"
+		}
+		if r.MaxFutureSkew > 0 && ts.Sub(now) > r.MaxFutureSkew {
+			return "future"
+		}
+	}
+	return ""
+}
+
 func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
 	batchSize := m.cfg.Buffer.BatchSize
 	if batchSize <= 0 {
@@ -867,6 +937,13 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				ackIDs = append(ackIDs, item.ID)
 				continue
 			}
+			if reason := ageDropReason(&msg, m.rules.Get(), time.Now()); reason != "" {
+				m.countAgeDrop(reason)
+				// Acked, not nacked: the record is not retryable. It will only
+				// get older, and a nack would replay it forever.
+				ackIDs = append(ackIDs, item.ID)
+				continue
+			}
 			if err := stream.Send(&msg); err != nil {
 				_ = m.queue.Nack([]string{item.ID})
 				m.log.Err(err).Warn("failed to send buffered message")
@@ -883,6 +960,20 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 		if len(ackIDs) > 0 {
 			_ = m.queue.Ack(ackIDs)
 		}
+	}
+}
+
+// countAgeDrop records one age-filtered record under its reason, on both the
+// agent's own metrics and the cumulative counters the heartbeat reports.
+func (m *streamManager) countAgeDrop(reason string) {
+	switch reason {
+	case "too_old":
+		m.counters.IncTooOld()
+	case "future":
+		m.counters.IncFuture()
+	}
+	if m.streamMetrics != nil {
+		m.streamMetrics.IncStreamError("age_" + reason)
 	}
 }
 

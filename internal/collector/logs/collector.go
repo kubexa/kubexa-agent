@@ -82,7 +82,11 @@ type Collector struct {
 	// manager, which is what updates them; a nil store answers the agent's own
 	// defaults, so a Collector built without one behaves as before the gateway
 	// pushed anything.
-	rules *ingestrules.Store
+	rules   *ingestrules.Store
+	limiter *ingestrules.Limiter
+	// counters are the process-lifetime totals the heartbeat reports. Shared
+	// with the stream manager so one number per reason reaches the gateway.
+	counters *ingestrules.Counters
 	// writeTimeout is the same per-write budget queueWriter was built with. A
 	// stream's deferred joiner flush reads it to size its own detached
 	// context, so that budget stays consistent with actual queue writes
@@ -114,6 +118,9 @@ type Options struct {
 	// Rules is the shared ingest-rule store. Optional: nil falls back to the
 	// agent's compiled defaults.
 	Rules *ingestrules.Store
+	// Counters are the shared heartbeat counters. Optional: nil records
+	// nothing.
+	Counters *ingestrules.Counters
 }
 
 // New constructs a log Collector.
@@ -183,6 +190,8 @@ func New(opts Options) (*Collector, error) {
 		checkpoints:  cpStore,
 		sleep:        sleep,
 		rules:        opts.Rules,
+		limiter:      ingestrules.NewLimiter(),
+		counters:     opts.Counters,
 	}, nil
 }
 
@@ -264,6 +273,13 @@ func (c *Collector) run(ctx context.Context) {
 	ticker := time.NewTicker(c.cfg.ResyncPeriod)
 	defer ticker.Stop()
 
+	// The rate-limiter's bucket map is keyed by stream, and a stream identity
+	// includes the pod name -- so every rollout and every crash loop mints
+	// entries that will never be used again. Without this sweep the map grows
+	// for the life of the process.
+	evict := time.NewTicker(ingestrules.BucketTTL / 2)
+	defer evict.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -271,6 +287,8 @@ func (c *Collector) run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			c.resync(ctx)
+		case now := <-evict.C:
+			c.limiter.Evict(now.Add(-ingestrules.BucketTTL))
 		}
 	}
 }

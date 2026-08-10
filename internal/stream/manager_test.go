@@ -11,6 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubexa/kubexa-agent/internal/logger"
+	agentmetrics "github.com/kubexa/kubexa-agent/internal/metrics"
+	"github.com/kubexa/kubexa-agent/internal/queue"
+	"github.com/kubexa/kubexa-agent/pkg/buildinfo"
+	"github.com/kubexa/kubexa-agent/pkg/config"
+	"github.com/kubexa/kubexa-agent/pkg/protoversion"
+	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -19,13 +26,6 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
-	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
-	"github.com/kubexa/kubexa-agent/internal/logger"
-	agentmetrics "github.com/kubexa/kubexa-agent/internal/metrics"
-	"github.com/kubexa/kubexa-agent/internal/queue"
-	"github.com/kubexa/kubexa-agent/pkg/buildinfo"
-	"github.com/kubexa/kubexa-agent/pkg/config"
-	"github.com/kubexa/kubexa-agent/pkg/protoversion"
 )
 
 const testBufSize = 1 << 20
@@ -99,7 +99,7 @@ func newTestManager(t *testing.T, cfg *config.Config, q queue.Queue, lis *bufcon
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	_, streamMetrics, connMetrics := newTestAgentMetrics(t, reg)
-	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil, nil, nil)
+	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
