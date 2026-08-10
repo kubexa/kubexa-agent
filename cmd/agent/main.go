@@ -22,6 +22,7 @@ import (
 	metricscollector "github.com/kubexa/kubexa-agent/internal/collector/metrics"
 	"github.com/kubexa/kubexa-agent/internal/collector/state"
 	"github.com/kubexa/kubexa-agent/internal/health"
+	"github.com/kubexa/kubexa-agent/internal/ingestrules"
 	"github.com/kubexa/kubexa-agent/internal/k8s"
 	"github.com/kubexa/kubexa-agent/internal/k8s/k8sconfig"
 	"github.com/kubexa/kubexa-agent/internal/logger"
@@ -185,7 +186,17 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		return fmt.Errorf("query executor: %w", err)
 	}
 
-	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy)
+	// One rule store, shared. The stream manager is its only writer (it is the
+	// only component that sees the gateway's messages) and the log collector
+	// reads it. Created here because the collectors are built before the
+	// manager and both need the same instance.
+	rulesStore := ingestrules.NewStore()
+	// One counter set, shared the same way: the collector records truncation
+	// and rate limiting, the stream manager records age drops, and the
+	// heartbeat reports one number per reason.
+	ruleCounters := ingestrules.NewCounters()
+
+	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy, rulesStore, ruleCounters)
 	if err != nil {
 		_ = q.Close()
 		return fmt.Errorf("collectors: %w", err)
@@ -213,6 +224,8 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		agentMetrics.Connection(),
 		reconciler,
 		queryExecutor,
+		rulesStore,
+		ruleCounters,
 	)
 	if err != nil {
 		_ = q.Close()
@@ -319,6 +332,8 @@ func buildCollectors(
 	reg prometheus.Registerer,
 	log *logger.Logger,
 	queryPolicy *policy.Policy,
+	rules *ingestrules.Store,
+	counters *ingestrules.Counters,
 ) ([]Collector, error) {
 	var collectors []Collector
 
@@ -333,6 +348,10 @@ func buildCollectors(
 			},
 			Logger:     logger.New("log-collector", logger.WithAgentID(cfg.Agent.AgentID)),
 			Registerer: reg,
+			// The stream manager is the store's only writer; the collector
+			// reads whatever the gateway last pushed.
+			Rules:    rules,
+			Counters: counters,
 		})
 		if err != nil {
 			return nil, err

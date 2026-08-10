@@ -9,15 +9,16 @@ import (
 	"sync"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/proto"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/kubexa/kubexa-agent/internal/collector/logs/checkpoint"
+	"github.com/kubexa/kubexa-agent/internal/ingestrules"
 	"github.com/kubexa/kubexa-agent/internal/k8s"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	"github.com/kubexa/kubexa-agent/internal/queue"
@@ -77,15 +78,24 @@ type Collector struct {
 	agentMeta *commonv1.AgentMetadata
 	sem       *semaphore.Weighted
 	workloads *workloadResolver
+	// rules are the ingest rules the gateway pushed. Shared with the stream
+	// manager, which is what updates them; a nil store answers the agent's own
+	// defaults, so a Collector built without one behaves as before the gateway
+	// pushed anything.
+	rules   *ingestrules.Store
+	limiter *ingestrules.Limiter
+	// counters are the process-lifetime totals the heartbeat reports. Shared
+	// with the stream manager so one number per reason reaches the gateway.
+	counters *ingestrules.Counters
 	// writeTimeout is the same per-write budget queueWriter was built with. A
 	// stream's deferred joiner flush reads it to size its own detached
 	// context, so that budget stays consistent with actual queue writes
 	// instead of a separately guessed constant.
 	writeTimeout time.Duration
 
-	streamsMu    sync.Mutex
-	streams      map[streamKey]*streamHandle
-	checkpoints  checkpoint.Store
+	streamsMu   sync.Mutex
+	streams     map[streamKey]*streamHandle
+	checkpoints checkpoint.Store
 
 	runCtx context.Context
 	cancel context.CancelFunc
@@ -96,15 +106,21 @@ type Collector struct {
 
 // Options configures a Collector instance.
 type Options struct {
-	Config        Config
-	Kube          k8s.Client
-	Queue         queue.Queue
-	AgentMeta     *commonv1.AgentMetadata
-	Logger        *logger.Logger
-	Registerer    prometheus.Registerer
+	Config          Config
+	Kube            k8s.Client
+	Queue           queue.Queue
+	AgentMeta       *commonv1.AgentMetadata
+	Logger          *logger.Logger
+	Registerer      prometheus.Registerer
 	WriteTimeout    time.Duration
 	Sleep           func(context.Context, time.Duration) error
 	CheckpointStore checkpoint.Store
+	// Rules is the shared ingest-rule store. Optional: nil falls back to the
+	// agent's compiled defaults.
+	Rules *ingestrules.Store
+	// Counters are the shared heartbeat counters. Optional: nil records
+	// nothing.
+	Counters *ingestrules.Counters
 }
 
 // New constructs a log Collector.
@@ -161,18 +177,21 @@ func New(opts Options) (*Collector, error) {
 	}
 
 	return &Collector{
-		cfg:         cfg,
-		kube:        opts.Kube,
-		writer:      &queueWriter{q: opts.Queue, timeout: writeTimeout},
-		log:         log,
-		metrics:     metrics,
-		agentMeta:   proto.Clone(meta).(*commonv1.AgentMetadata),
+		cfg:          cfg,
+		kube:         opts.Kube,
+		writer:       &queueWriter{q: opts.Queue, timeout: writeTimeout},
+		log:          log,
+		metrics:      metrics,
+		agentMeta:    proto.Clone(meta).(*commonv1.AgentMetadata),
 		sem:          semaphore.NewWeighted(cfg.MaxConcurrentStreams),
 		workloads:    newWorkloadResolver(opts.Kube.Clientset(), workloadResolverTTL),
 		writeTimeout: writeTimeout,
 		streams:      make(map[streamKey]*streamHandle),
 		checkpoints:  cpStore,
 		sleep:        sleep,
+		rules:        opts.Rules,
+		limiter:      ingestrules.NewLimiter(),
+		counters:     opts.Counters,
 	}, nil
 }
 
@@ -254,6 +273,13 @@ func (c *Collector) run(ctx context.Context) {
 	ticker := time.NewTicker(c.cfg.ResyncPeriod)
 	defer ticker.Stop()
 
+	// The rate-limiter's bucket map is keyed by stream, and a stream identity
+	// includes the pod name -- so every rollout and every crash loop mints
+	// entries that will never be used again. Without this sweep the map grows
+	// for the life of the process.
+	evict := time.NewTicker(ingestrules.BucketTTL / 2)
+	defer evict.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -261,6 +287,8 @@ func (c *Collector) run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			c.resync(ctx)
+		case now := <-evict.C:
+			c.limiter.Evict(now.Add(-ingestrules.BucketTTL))
 		}
 	}
 }

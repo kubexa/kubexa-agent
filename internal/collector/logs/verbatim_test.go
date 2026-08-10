@@ -44,7 +44,7 @@ func TestParseLineThenJoinerFoldsAJavaStackTraceIntoOneRecord(t *testing.T) {
 	for _, line := range apiLines {
 		parsed := ParseLine(line, now)
 		if out := j.Add(parsed, now); len(out) != 0 {
-			t.Fatalf("trace record emitted early: %q", out)
+			t.Fatalf("trace record emitted early: %+v", out)
 		}
 	}
 

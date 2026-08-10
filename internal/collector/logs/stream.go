@@ -1,7 +1,6 @@
 package logs
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -11,10 +10,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	corev1 "k8s.io/api/core/v1"
 	"google.golang.org/protobuf/proto"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/kubexa/kubexa-agent/internal/collector/logs/checkpoint"
+	"github.com/kubexa/kubexa-agent/internal/ingestrules"
 	"github.com/kubexa/kubexa-agent/internal/k8s"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
@@ -80,9 +80,9 @@ type streamHandle struct {
 }
 
 type errorBudget struct {
-	mu       sync.Mutex
-	errors   []time.Time
-	circuit  time.Time
+	mu      sync.Mutex
+	errors  []time.Time
+	circuit time.Time
 }
 
 func (b *errorBudget) record(now time.Time) bool {
@@ -267,9 +267,16 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 	}
 	defer func() { _ = reader.Close() }()
 
-	scanner := bufio.NewScanner(reader)
-	const maxLineSize = 256 * 1024
-	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
+	// The line cap is read once per stream rather than per line: a rule change
+	// mid-stream takes effect on the next reconnect, and the authoritative cut
+	// in handleLogLine reads the current rules on every record anyway.
+	//
+	// The reader's cap carries headroom for the Kubernetes log API's own
+	// timestamp prefix, which ParseLine strips before anything reaches Loki.
+	// Capping the transport line at exactly max_line_bytes would cut a payload
+	// that is itself within the limit, and mark it truncated for bytes the
+	// limit was never about.
+	lr := newLineReader(reader, readerCap(c.rules.Get().MaxLineBytes))
 
 	// One joiner per container stream. Lines from two containers interleave in
 	// time, so a shared joiner would attach one program's frames to another's
@@ -277,13 +284,21 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 	join := newJoiner(maxJoinedBytes, maxJoinHold)
 	defer c.flushJoiner(ctx, log, target, join)
 
-	for scanner.Scan() {
+	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		line := scanner.Text()
+		raw, truncated, err := lr.next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		line := string(raw)
 		c.metrics.addBytes(len(line))
 		parsed := ParseLine(line, time.Now().UTC())
+		parsed.Truncated = truncated
 		if parsed.Message == "" && len(parsed.Raw) == 0 {
 			continue
 		}
@@ -297,9 +312,6 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 			}
 			cursor.markProcessed(record.Timestamp)
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return err
 	}
 	if target.rule.follow {
 		return io.EOF
@@ -346,11 +358,55 @@ func buildLogEntry(target streamTarget, parsed ParsedLine, workload workloadRef)
 		Workload:     workload.Name,
 		WorkloadKind: workload.Kind,
 		NodeName:     target.pod.Spec.NodeName,
+		Truncated:    parsed.Truncated,
 	}
 }
 
+// maxK8sLogPrefixBytes bounds the "2006-01-02T15:04:05.999999999Z " prefix the
+// pods/log API puts in front of every line. RFC3339Nano is at most 35 bytes
+// (offset form, full nanoseconds) plus the separating space; 64 is comfortable
+// headroom on a cap measured in hundreds of kilobytes.
+const maxK8sLogPrefixBytes = 64
+
+// readerCap converts the payload limit into the transport-line limit the
+// reader enforces. A non-positive limit stays non-positive: zero means "no rule
+// pushed" and must not become a cap of 64.
+func readerCap(maxLineBytes int) int {
+	if maxLineBytes <= 0 {
+		return maxLineBytes
+	}
+	return maxLineBytes + maxK8sLogPrefixBytes
+}
+
 func (c *Collector) handleLogLine(ctx context.Context, target streamTarget, parsed ParsedLine) error {
-	entry := buildLogEntry(target, parsed, c.workloads.Resolve(ctx, target.pod))
+	// The authoritative cut. The reader caps a single line, but the joiner
+	// concatenates a stack trace from many of them (maxJoinedBytes is 64 KB),
+	// so a joined record can exceed a max_line_bytes configured below that.
+	// Only here are the bytes that will actually ship.
+	rules := c.rules.Get()
+	if rules.MaxLineBytes > 0 && len(parsed.Raw) > rules.MaxLineBytes {
+		parsed.Raw = trimToRune(parsed.Raw[:rules.MaxLineBytes], true)
+		parsed.Truncated = true
+	}
+	if parsed.Truncated {
+		c.metrics.incTruncated(target.pod.Namespace, target.pod.Name)
+		c.counters.IncTruncated()
+	}
+
+	// The per-stream limiter runs BEFORE the queue write: the whole point is
+	// that bytes Loki would answer 429 to never reach the wire or the disk
+	// buffer. It is correct here in a way a tenant-wide limiter could not be --
+	// one Loki stream lives entirely on this one agent.
+	workload := c.workloads.Resolve(ctx, target.pod)
+	key := ingestrules.StreamKey(target.pod.Namespace, target.pod.Name, target.container,
+		LevelLabel(parsed.Level), workload.Name, workload.Kind)
+	if !c.limiter.Allow(key, len(parsed.Raw), rules, time.Now()) {
+		c.metrics.incDropped(target.pod.Namespace, target.pod.Name, "rate_limited")
+		c.counters.IncRateLimited()
+		return nil
+	}
+
+	entry := buildLogEntry(target, parsed, workload)
 
 	msg := &agentv1.AgentMessage{
 		MessageId: uuid.NewString(),
