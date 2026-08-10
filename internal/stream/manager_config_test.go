@@ -365,3 +365,50 @@ func logMessageAt(ts time.Time) *agentv1.AgentMessage {
 		Logs: &agentv1.LogBatch{Entries: []*agentv1.LogEntry{{Timestamp: ts.UnixNano()}}},
 	}}
 }
+
+// TestHealthSnapshotCarriesTheCounters. The heartbeat is the only path these
+// numbers take off the agent, and the gateway advances Prometheus counters by
+// the DIFFERENCE between consecutive reports -- so a field left at zero here
+// does not merely lose a sample, it makes the next delta wrong.
+func TestHealthSnapshotCarriesTheCounters(t *testing.T) {
+	m := newConfigTestManager(t, &fakeReconciler{})
+	m.counters = ingestrules.NewCounters()
+	m.counters.IncTruncated()
+	m.counters.IncTooOld()
+	m.counters.IncTooOld()
+	m.counters.IncFuture()
+	m.counters.IncRateLimited()
+
+	h := m.healthSnapshot()
+	if h.GetTruncatedLines() != 1 || h.GetDroppedTooOld() != 2 ||
+		h.GetDroppedFuture() != 1 || h.GetDroppedRateLimited() != 1 {
+		t.Fatalf("counters lost on the way to the heartbeat: %+v", h)
+	}
+}
+
+// TestHealthSnapshotCountersAreCumulative: they must never decrease within one
+// process, because the gateway reads a decrease as an agent restart and adds
+// the whole reported value.
+func TestHealthSnapshotCountersAreCumulative(t *testing.T) {
+	m := newConfigTestManager(t, &fakeReconciler{})
+	m.counters = ingestrules.NewCounters()
+
+	m.counters.IncTooOld()
+	first := m.healthSnapshot().GetDroppedTooOld()
+	m.counters.IncTooOld()
+	second := m.healthSnapshot().GetDroppedTooOld()
+
+	if second <= first {
+		t.Fatalf("counters must accumulate, got %d then %d", first, second)
+	}
+}
+
+// TestHealthSnapshotWithoutCountersReportsZero: a manager wired without the
+// shared counters must report nothing, not panic.
+func TestHealthSnapshotWithoutCountersReportsZero(t *testing.T) {
+	m := newConfigTestManager(t, &fakeReconciler{})
+	h := m.healthSnapshot()
+	if h.GetTruncatedLines() != 0 || h.GetDroppedRateLimited() != 0 {
+		t.Fatalf("want zeroes, got %+v", h)
+	}
+}
