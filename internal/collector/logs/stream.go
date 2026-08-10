@@ -270,7 +270,13 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 	// The line cap is read once per stream rather than per line: a rule change
 	// mid-stream takes effect on the next reconnect, and the authoritative cut
 	// in handleLogLine reads the current rules on every record anyway.
-	lr := newLineReader(reader, c.rules.Get().MaxLineBytes)
+	//
+	// The reader's cap carries headroom for the Kubernetes log API's own
+	// timestamp prefix, which ParseLine strips before anything reaches Loki.
+	// Capping the transport line at exactly max_line_bytes would cut a payload
+	// that is itself within the limit, and mark it truncated for bytes the
+	// limit was never about.
+	lr := newLineReader(reader, readerCap(c.rules.Get().MaxLineBytes))
 
 	// One joiner per container stream. Lines from two containers interleave in
 	// time, so a shared joiner would attach one program's frames to another's
@@ -354,6 +360,22 @@ func buildLogEntry(target streamTarget, parsed ParsedLine, workload workloadRef)
 		NodeName:     target.pod.Spec.NodeName,
 		Truncated:    parsed.Truncated,
 	}
+}
+
+// maxK8sLogPrefixBytes bounds the "2006-01-02T15:04:05.999999999Z " prefix the
+// pods/log API puts in front of every line. RFC3339Nano is at most 35 bytes
+// (offset form, full nanoseconds) plus the separating space; 64 is comfortable
+// headroom on a cap measured in hundreds of kilobytes.
+const maxK8sLogPrefixBytes = 64
+
+// readerCap converts the payload limit into the transport-line limit the
+// reader enforces. A non-positive limit stays non-positive: zero means "no rule
+// pushed" and must not become a cap of 64.
+func readerCap(maxLineBytes int) int {
+	if maxLineBytes <= 0 {
+		return maxLineBytes
+	}
+	return maxLineBytes + maxK8sLogPrefixBytes
 }
 
 func (c *Collector) handleLogLine(ctx context.Context, target streamTarget, parsed ParsedLine) error {

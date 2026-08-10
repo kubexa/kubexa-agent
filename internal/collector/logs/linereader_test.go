@@ -4,6 +4,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestLineReaderSurvivesAnOverlongLine is the regression test for a real,
@@ -148,5 +149,45 @@ func TestLineReaderWithNoCapNeverTruncates(t *testing.T) {
 	}
 	if len(line) != len(long) {
 		t.Errorf("want %d bytes, got %d", len(long), len(line))
+	}
+}
+
+// TestReaderCapLeavesRoomForTheTimestampPrefix. The reader sees the transport
+// line, which the Kubernetes pods/log API prefixes with an RFC3339Nano
+// timestamp that ParseLine strips before anything reaches Loki. Capping the
+// transport line at exactly the payload limit would cut a payload that is
+// itself inside the limit -- and mark it truncated for bytes the limit was
+// never about.
+func TestReaderCapLeavesRoomForTheTimestampPrefix(t *testing.T) {
+	if got := readerCap(1000); got != 1000+maxK8sLogPrefixBytes {
+		t.Errorf("readerCap(1000) = %d, want %d", got, 1000+maxK8sLogPrefixBytes)
+	}
+	// Zero means "no rule pushed" and must not become a cap of 64.
+	if got := readerCap(0); got != 0 {
+		t.Errorf("readerCap(0) = %d, want 0", got)
+	}
+	if got := readerCap(-1); got != -1 {
+		t.Errorf("readerCap(-1) = %d, want -1", got)
+	}
+}
+
+// TestAPayloadAtTheLimitBehindAPrefixIsNotTruncated is the behaviour that
+// headroom buys, checked end to end through the reader and ParseLine rather
+// than on the arithmetic alone.
+func TestAPayloadAtTheLimitBehindAPrefixIsNotTruncated(t *testing.T) {
+	const limit = 200
+	payload := strings.Repeat("p", limit)
+	line := "2026-08-10T12:00:00.000000000Z " + payload + "\n"
+
+	lr := newLineReader(strings.NewReader(line), readerCap(limit))
+	raw, truncated, err := lr.next()
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if truncated {
+		t.Error("a payload at the limit must not be truncated by the prefix")
+	}
+	if got := ParseLine(string(raw), time.Now()); len(got.Raw) != limit {
+		t.Errorf("payload lost bytes: got %d, want %d", len(got.Raw), limit)
 	}
 }
