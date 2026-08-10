@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
-	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
+	"github.com/kubexa/kubexa-agent/internal/ingestrules"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	agentmetrics "github.com/kubexa/kubexa-agent/internal/metrics"
 	"github.com/kubexa/kubexa-agent/internal/queue"
@@ -22,6 +22,7 @@ import (
 	"github.com/kubexa/kubexa-agent/pkg/config"
 	"github.com/kubexa/kubexa-agent/pkg/config/k8sresource"
 	"github.com/kubexa/kubexa-agent/pkg/protoversion"
+	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
 
 const (
@@ -77,17 +78,21 @@ type streamManager struct {
 	streamMetrics *agentmetrics.StreamMetrics
 	connMetrics   *agentmetrics.ConnectionMetrics
 
-	cb      circuitBreaker
-	rng     *rand.Rand
-	sleep   sleeper
-	dial    dialFunc
+	cb    circuitBreaker
+	rng   *rand.Rand
+	sleep sleeper
+	dial  dialFunc
 
-	mu            sync.Mutex
-	state         ConnState
-	shutdownErr   error
-	sessionID     atomic.Value // string
-	ready         atomic.Bool
-	configSnap    atomic.Pointer[agentv1.ConfigSnapshot]
+	mu          sync.Mutex
+	state       ConnState
+	shutdownErr error
+	sessionID   atomic.Value // string
+	ready       atomic.Bool
+	configSnap  atomic.Pointer[agentv1.ConfigSnapshot]
+	// rules is the resolved ingest-rule set. The manager owns it because it is
+	// the only component that sees the gateway's messages; the log collector
+	// reads it on the collection path and drainBufferedQueue on the send path.
+	rules *ingestrules.Store
 
 	// reconciler applies gateway watch config to the demand-driven informer
 	// set. Set once at construction and read-only afterward, so it needs no
@@ -157,6 +162,7 @@ func New(
 	connMetrics *agentmetrics.ConnectionMetrics,
 	reconciler WatchReconciler,
 	responder QueryResponder,
+	rules *ingestrules.Store,
 ) (Manager, error) {
 	if cfg == nil {
 		return nil, errors.New("config is nil")
@@ -183,6 +189,13 @@ func New(
 		sleep:         defaultSleeper,
 		sendCh:        make(chan *agentv1.AgentMessage, defaultSendChannelSize),
 		state:         StateIdle,
+		rules:         rules,
+	}
+	// The manager is the store's only writer and Set panics on a nil receiver,
+	// so a caller that passes none gets a private store rather than a crash on
+	// the first handshake.
+	if m.rules == nil {
+		m.rules = ingestrules.NewStore()
 	}
 	m.sessionID.Store("")
 	m.dial = m.defaultDial
@@ -486,11 +499,11 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 		MessageId: uuid.NewString(),
 		Payload: &agentv1.AgentMessage_Handshake{
 			Handshake: &agentv1.HandshakeRequest{
-				AgentVersion:            buildinfo.Version,
-				ProtoVersion:            preferred,
-				SupportedProtoVersions:  supported,
-				ClusterId:               m.cfg.Agent.ClusterID,
-				TenantToken:             m.cfg.Agent.TenantToken,
+				AgentVersion:           buildinfo.Version,
+				ProtoVersion:           preferred,
+				SupportedProtoVersions: supported,
+				ClusterId:              m.cfg.Agent.ClusterID,
+				TenantToken:            m.cfg.Agent.TenantToken,
 				Caps: &agentv1.AgentCapabilities{
 					Logs:    m.cfg.Collect.Logs.Enabled,
 					State:   m.cfg.Collect.State.Enabled,
@@ -549,8 +562,14 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 
 	if hs.GetConfig() != nil {
 		m.configSnap.Store(hs.GetConfig())
+		// Resolved even when ingest_rules is nil: FromProto(nil) is the
+		// defaults, so a gateway that pushes nothing explicitly restores the
+		// agent's own values rather than leaving a previous session's rules in
+		// place across a reconnect to a different gateway.
+		m.rules.Set(ingestrules.FromProto(hs.GetConfig().GetIngestRules()))
 		m.log.Info("applied gateway config snapshot",
 			logger.F("session_id", hs.GetSessionId()),
+			logger.F("max_line_bytes", m.rules.Get().MaxLineBytes),
 		)
 	}
 

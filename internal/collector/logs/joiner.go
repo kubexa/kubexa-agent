@@ -49,6 +49,10 @@ func (j *joiner) Add(line ParsedLine, now time.Time) []ParsedLine {
 		return out
 	}
 	j.pending.Raw = []byte(joined)
+	// A joined record is truncated if ANY of its parts was. The pending record
+	// is the FIRST line, so without this the flag on a later frame -- the one
+	// that actually got cut -- would be dropped along with the evidence.
+	j.pending.Truncated = j.pending.Truncated || line.Truncated
 	return nil
 }
 

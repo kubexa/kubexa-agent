@@ -1,7 +1,6 @@
 package logs
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -11,8 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	corev1 "k8s.io/api/core/v1"
 	"google.golang.org/protobuf/proto"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/kubexa/kubexa-agent/internal/collector/logs/checkpoint"
 	"github.com/kubexa/kubexa-agent/internal/k8s"
@@ -80,9 +79,9 @@ type streamHandle struct {
 }
 
 type errorBudget struct {
-	mu       sync.Mutex
-	errors   []time.Time
-	circuit  time.Time
+	mu      sync.Mutex
+	errors  []time.Time
+	circuit time.Time
 }
 
 func (b *errorBudget) record(now time.Time) bool {
@@ -267,9 +266,10 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 	}
 	defer func() { _ = reader.Close() }()
 
-	scanner := bufio.NewScanner(reader)
-	const maxLineSize = 256 * 1024
-	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
+	// The line cap is read once per stream rather than per line: a rule change
+	// mid-stream takes effect on the next reconnect, and the authoritative cut
+	// in handleLogLine reads the current rules on every record anyway.
+	lr := newLineReader(reader, c.rules.Get().MaxLineBytes)
 
 	// One joiner per container stream. Lines from two containers interleave in
 	// time, so a shared joiner would attach one program's frames to another's
@@ -277,13 +277,21 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 	join := newJoiner(maxJoinedBytes, maxJoinHold)
 	defer c.flushJoiner(ctx, log, target, join)
 
-	for scanner.Scan() {
+	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		line := scanner.Text()
+		raw, truncated, err := lr.next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		line := string(raw)
 		c.metrics.addBytes(len(line))
 		parsed := ParseLine(line, time.Now().UTC())
+		parsed.Truncated = truncated
 		if parsed.Message == "" && len(parsed.Raw) == 0 {
 			continue
 		}
@@ -297,9 +305,6 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 			}
 			cursor.markProcessed(record.Timestamp)
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return err
 	}
 	if target.rule.follow {
 		return io.EOF
@@ -346,10 +351,24 @@ func buildLogEntry(target streamTarget, parsed ParsedLine, workload workloadRef)
 		Workload:     workload.Name,
 		WorkloadKind: workload.Kind,
 		NodeName:     target.pod.Spec.NodeName,
+		Truncated:    parsed.Truncated,
 	}
 }
 
 func (c *Collector) handleLogLine(ctx context.Context, target streamTarget, parsed ParsedLine) error {
+	// The authoritative cut. The reader caps a single line, but the joiner
+	// concatenates a stack trace from many of them (maxJoinedBytes is 64 KB),
+	// so a joined record can exceed a max_line_bytes configured below that.
+	// Only here are the bytes that will actually ship.
+	rules := c.rules.Get()
+	if rules.MaxLineBytes > 0 && len(parsed.Raw) > rules.MaxLineBytes {
+		parsed.Raw = trimToRune(parsed.Raw[:rules.MaxLineBytes], true)
+		parsed.Truncated = true
+	}
+	if parsed.Truncated {
+		c.metrics.incTruncated(target.pod.Namespace, target.pod.Name)
+	}
+
 	entry := buildLogEntry(target, parsed, c.workloads.Resolve(ctx, target.pod))
 
 	msg := &agentv1.AgentMessage{
