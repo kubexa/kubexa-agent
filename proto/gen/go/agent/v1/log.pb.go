@@ -137,9 +137,13 @@ type LogEntry struct {
 	// not re-emit it). Recovering this means
 	// tailing /var/log/pods from the node —
 	// its own sub-project, not a label.
-	Workload      string `protobuf:"bytes,10,opt,name=workload,proto3" json:"workload,omitempty"`                             // owning workload name, "" when uncontrolled
-	WorkloadKind  string `protobuf:"bytes,11,opt,name=workload_kind,json=workloadKind,proto3" json:"workload_kind,omitempty"` // Deployment | StatefulSet | DaemonSet | Job | CronJob
-	NodeName      string `protobuf:"bytes,12,opt,name=node_name,json=nodeName,proto3" json:"node_name,omitempty"`
+	Workload     string `protobuf:"bytes,10,opt,name=workload,proto3" json:"workload,omitempty"`                             // owning workload name, "" when uncontrolled
+	WorkloadKind string `protobuf:"bytes,11,opt,name=workload_kind,json=workloadKind,proto3" json:"workload_kind,omitempty"` // Deployment | StatefulSet | DaemonSet | Job | CronJob
+	NodeName     string `protobuf:"bytes,12,opt,name=node_name,json=nodeName,proto3" json:"node_name,omitempty"`
+	// The agent cut this line at the pushed max_line_bytes. Surfaced by
+	// kubexa-consumer as the structured-metadata key `truncated="true"`, so a
+	// reader can tell a cut line from a short one.
+	Truncated     bool `protobuf:"varint,13,opt,name=truncated,proto3" json:"truncated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -251,13 +255,20 @@ func (x *LogEntry) GetNodeName() string {
 	return ""
 }
 
+func (x *LogEntry) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
 var File_proto_agent_v1_log_proto protoreflect.FileDescriptor
 
 const file_proto_agent_v1_log_proto_rawDesc = "" +
 	"\n" +
 	"\x18proto/agent/v1/log.proto\x12\bagent.v1\"8\n" +
 	"\bLogBatch\x12,\n" +
-	"\aentries\x18\x01 \x03(\v2\x12.agent.v1.LogEntryR\aentries\"\xb4\x03\n" +
+	"\aentries\x18\x01 \x03(\v2\x12.agent.v1.LogEntryR\aentries\"\xd2\x03\n" +
 	"\bLogEntry\x12\x19\n" +
 	"\bpod_name\x18\x01 \x01(\tR\apodName\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x1c\n" +
@@ -270,7 +281,8 @@ const file_proto_agent_v1_log_proto_rawDesc = "" +
 	"\bworkload\x18\n" +
 	" \x01(\tR\bworkload\x12#\n" +
 	"\rworkload_kind\x18\v \x01(\tR\fworkloadKind\x12\x1b\n" +
-	"\tnode_name\x18\f \x01(\tR\bnodeName\x1a9\n" +
+	"\tnode_name\x18\f \x01(\tR\bnodeName\x12\x1c\n" +
+	"\ttruncated\x18\r \x01(\bR\ttruncated\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\t\x10\n" +
