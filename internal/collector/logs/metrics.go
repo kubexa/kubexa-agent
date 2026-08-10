@@ -12,13 +12,14 @@ const (
 
 // metrics holds Prometheus instrumentation for the log collector.
 type metrics struct {
-	linesTotal       *prometheus.CounterVec
-	droppedTotal     *prometheus.CounterVec
-	activeStreams    prometheus.Gauge
-	streamErrorsTotal          *prometheus.CounterVec
-	bytesProcessedTotal        prometheus.Counter
-	checkpointWritesTotal      prometheus.Counter
-	checkpointErrorsTotal      *prometheus.CounterVec
+	linesTotal            *prometheus.CounterVec
+	droppedTotal          *prometheus.CounterVec
+	truncatedTotal        *prometheus.CounterVec
+	activeStreams         prometheus.Gauge
+	streamErrorsTotal     *prometheus.CounterVec
+	bytesProcessedTotal   prometheus.Counter
+	checkpointWritesTotal prometheus.Counter
+	checkpointErrorsTotal *prometheus.CounterVec
 }
 
 func newMetrics(reg prometheus.Registerer) (*metrics, error) {
@@ -34,6 +35,14 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 				Help:      "Total log lines processed by the log collector.",
 			},
 			[]string{"namespace", "pod", "level"},
+		),
+		truncatedTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricNamespace,
+				Name:      "log_collector_truncated_total",
+				Help:      "Log lines cut at the gateway's max_line_bytes.",
+			},
+			[]string{"namespace", "pod"},
 		),
 		droppedTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -85,6 +94,7 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 	collectors := []prometheus.Collector{
 		m.linesTotal,
 		m.droppedTotal,
+		m.truncatedTotal,
 		m.activeStreams,
 		m.streamErrorsTotal,
 		m.bytesProcessedTotal,
@@ -104,6 +114,13 @@ func (m *metrics) incLines(namespace, pod, level string) {
 		return
 	}
 	m.linesTotal.WithLabelValues(namespace, pod, level).Inc()
+}
+
+func (m *metrics) incTruncated(namespace, pod string) {
+	if m == nil {
+		return
+	}
+	m.truncatedTotal.WithLabelValues(namespace, pod).Inc()
 }
 
 func (m *metrics) incDropped(namespace, pod, reason string) {

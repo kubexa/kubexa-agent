@@ -23,7 +23,7 @@ func TestJoinerFoldsContinuationLines(t *testing.T) {
 	}
 	out := j.Add(plain("next record", now), now)
 	if len(out) != 1 || string(out[0].Raw) != "panic: boom\n\tat main.go:12" {
-		t.Fatalf("joined = %q", out)
+		t.Fatalf("joined = %+v", out)
 	}
 }
 
@@ -35,7 +35,7 @@ func TestJoinerNeverJoinsJSONLines(t *testing.T) {
 	j.Add(plain(`{"msg":"a"}`, now), now)
 	out := j.Add(plain("  indented but the previous line was JSON", now), now)
 	if len(out) != 1 || string(out[0].Raw) != `{"msg":"a"}` {
-		t.Fatalf("JSON record was extended: %q", out)
+		t.Fatalf("JSON record was extended: %+v", out)
 	}
 }
 
@@ -56,7 +56,7 @@ func TestJoinerFlushesAfterTheHoldWindow(t *testing.T) {
 	j.Add(plain("panic: boom", now), now)
 	out := j.Add(plain("\tat main.go:12", now), now.Add(2*time.Second))
 	if len(out) != 1 || string(out[0].Raw) != "panic: boom" {
-		t.Fatalf("held record was not flushed on the hold window: %q", out)
+		t.Fatalf("held record was not flushed on the hold window: %+v", out)
 	}
 }
 
@@ -70,7 +70,7 @@ func TestJoinerDoesNotJoinAnUnindentedAtLine(t *testing.T) {
 	j.Add(plain("connection lost", now), now)
 	out := j.Add(plain("at least 3 retries remain", now), now)
 	if len(out) != 1 || string(out[0].Raw) != "connection lost" {
-		t.Fatalf("joined an ordinary line: %q", out)
+		t.Fatalf("joined an ordinary line: %+v", out)
 	}
 }
 
