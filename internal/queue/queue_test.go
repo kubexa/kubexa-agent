@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -1126,5 +1127,298 @@ func TestCloseFlushRespectsRefCap(t *testing.T) {
 	wantDropped := int64(enqueued) - wantCap
 	if got := q.DroppedTotal(); got != wantDropped {
 		t.Errorf("DroppedTotal() = %d, want %d", got, wantDropped)
+	}
+}
+
+// segmentFileNums lists the WAL segment numbers present in dir, ascending.
+func segmentFileNums(t *testing.T, dir string) []int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read spill dir: %v", err)
+	}
+	var nums []int
+	for _, e := range entries {
+		if n, ok := parseSegmentName(e.Name()); ok {
+			nums = append(nums, n)
+		}
+	}
+	sort.Ints(nums)
+	return nums
+}
+
+func segmentFileCount(t *testing.T, dir string) int {
+	t.Helper()
+	return len(segmentFileNums(t, dir))
+}
+
+// bigSpillConfig forces every item straight to disk and gives the WAL room for
+// several segments.
+func bigSpillConfig(dir string) *config.BufferConfig {
+	return &config.BufferConfig{
+		MaxMemoryBytes: 1 << 10,
+		SpillDir:       dir,
+		MaxDiskBytes:   512 << 20,
+		BatchSize:      64,
+	}
+}
+
+// drainAndAck dequeues and acks until the queue is empty.
+func drainAndAck(t *testing.T, q Queue) {
+	t.Helper()
+	ctx := context.Background()
+	for {
+		batch, err := q.DequeueBatch(ctx, 64)
+		if err != nil {
+			t.Fatalf("DequeueBatch() error = %v", err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		ids := make([]string, len(batch))
+		for i, it := range batch {
+			ids[i] = it.ID
+		}
+		if err := q.Ack(ids); err != nil {
+			t.Fatalf("Ack() error = %v", err)
+		}
+		if q.Depth() == 0 {
+			break
+		}
+	}
+}
+
+// Fill several segments, ack everything, and the closed segments must go.
+func TestCompactionRemovesFullyAckedSegments(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	q := newTestQueue(t, bigSpillConfig(dir))
+	ctx := context.Background()
+
+	payload := make([]byte, segmentMaxBytes/4)
+	for i := 0; i < 8; i++ {
+		if err := q.Enqueue(ctx, item(fmt.Sprintf("big-%d", i), payload)); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+	if got := segmentFileCount(t, dir); got < 2 {
+		t.Fatalf("only %d segments; test needs rotation to have happened", got)
+	}
+
+	drainAndAck(t, q)
+
+	if got := segmentFileCount(t, dir); got != 1 {
+		t.Errorf("%d segment files remain after acking everything, want 1 "+
+			"(only the active write segment)", got)
+	}
+}
+
+// One unacked item in the lowest segment must pin the whole prefix, even when
+// every later segment is fully acked. Deleting a hole would delete an ack
+// whose item survives, resurrecting a delivered item on the next restart.
+func TestCompactionKeepsThePrefixPinnedByOneItem(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	q := newTestQueue(t, bigSpillConfig(dir))
+	ctx := context.Background()
+
+	payload := make([]byte, segmentMaxBytes/4)
+	for i := 0; i < 8; i++ {
+		if err := q.Enqueue(ctx, item(fmt.Sprintf("big-%d", i), payload)); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+	before := segmentFileCount(t, dir)
+	if before < 2 {
+		t.Fatalf("only %d segments; test needs rotation to have happened", before)
+	}
+
+	// Take the oldest item and never ack it; ack everything after it.
+	first, err := q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+	if len(first) != 1 {
+		t.Fatalf("got %d items, want 1", len(first))
+	}
+	drainAndAck(t, q)
+
+	if got := segmentFileCount(t, dir); got != before {
+		t.Errorf("%d segment files remain, want all %d: one unacked item in the "+
+			"lowest segment must pin the entire prefix", got, before)
+	}
+}
+
+// A pinned segment in the middle must stop compaction dead. Everything after
+// it is fully acked and not the active segment, so an "unreferenced means
+// deletable" reading would punch a hole and delete the acks belonging to the
+// items still pinned behind it.
+func TestCompactionPunchesNoHolePastAPinnedSegment(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	q := newTestBufferedQueue(t, bigSpillConfig(dir), nil)
+	ctx := context.Background()
+
+	payload := make([]byte, segmentMaxBytes/4)
+	for i := 0; i < 10; i++ {
+		if err := q.Enqueue(ctx, item(fmt.Sprintf("big-%d", i), payload)); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+	before := segmentFileNums(t, dir)
+	if len(before) < 4 {
+		t.Fatalf("segments on disk = %v, want at least 4 so a pinned middle "+
+			"segment has fully-acked segments both before and after it", before)
+	}
+
+	// Pick the first item that landed in segment 1 and never ack it.
+	q.mu.Lock()
+	var pinnedID string
+	for _, ref := range q.diskRefs {
+		if ref.Segment == 1 {
+			pinnedID = ref.ID
+			break
+		}
+	}
+	q.mu.Unlock()
+	if pinnedID == "" {
+		t.Fatalf("no reference landed in segment 1; refs = %v", before)
+	}
+
+	for {
+		batch, err := q.DequeueBatch(ctx, 64)
+		if err != nil {
+			t.Fatalf("DequeueBatch() error = %v", err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		ids := make([]string, 0, len(batch))
+		for _, it := range batch {
+			if it.ID == pinnedID {
+				continue
+			}
+			ids = append(ids, it.ID)
+		}
+		if err := q.Ack(ids); err != nil {
+			t.Fatalf("Ack() error = %v", err)
+		}
+		if q.Depth() == 0 {
+			break
+		}
+	}
+
+	got := segmentFileNums(t, dir)
+	want := before[1:] // only segment 0, the prefix below the pin, may go
+	if len(got) != len(want) {
+		t.Fatalf("segments on disk = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("segments on disk = %v, want %v: compaction must stop at "+
+				"the pinned segment and never skip past it", got, want)
+		}
+	}
+}
+
+// The active write segment is being appended to right now; its absence from
+// refsPerSegment says nothing about whether it is needed.
+func TestRemoveSegmentRefusesTheActiveWriteSegment(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	q := newTestBufferedQueue(t, bigSpillConfig(dir), nil)
+	ctx := context.Background()
+
+	payload := make([]byte, segmentMaxBytes/4)
+	for i := 0; i < 5; i++ {
+		if err := q.Enqueue(ctx, item(fmt.Sprintf("big-%d", i), payload)); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+
+	active := q.disk.activeSegment()
+	if active == 0 {
+		t.Fatalf("no rotation happened; active segment is still 0")
+	}
+	if err := q.disk.removeSegment(active); err == nil {
+		t.Fatalf("removeSegment(active=%d) returned nil, want a refusal", active)
+	}
+	nums := segmentFileNums(t, dir)
+	if len(nums) == 0 || nums[len(nums)-1] != active {
+		t.Fatalf("active segment %d is gone from %v", active, nums)
+	}
+}
+
+// After compaction and a restart, unacked items must still be recoverable and
+// acked items must stay gone.
+func TestCompactionSurvivesRestart(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := bigSpillConfig(dir)
+	reg := prometheus.NewRegistry()
+	q, err := New(cfg, logger.New("queue-test"), newTestQueueMetrics(t, reg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx := context.Background()
+
+	payload := make([]byte, segmentMaxBytes/4)
+	for i := 0; i < 8; i++ {
+		if err := q.Enqueue(ctx, item(fmt.Sprintf("big-%d", i), payload)); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+
+	// Ack the first four, leave the rest.
+	batch, err := q.DequeueBatch(ctx, 4)
+	if err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+	acked := map[string]bool{}
+	ids := make([]string, len(batch))
+	for i, it := range batch {
+		ids[i] = it.ID
+		acked[it.ID] = true
+	}
+	if err := q.Ack(ids); err != nil {
+		t.Fatalf("Ack() error = %v", err)
+	}
+	if err := q.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reg2 := prometheus.NewRegistry()
+	q2, err := New(cfg, logger.New("queue-test"), newTestQueueMetrics(t, reg2))
+	if err != nil {
+		t.Fatalf("reopen New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = q2.Close() })
+
+	seen := map[string]bool{}
+	for {
+		b, err := q2.DequeueBatch(ctx, 64)
+		if err != nil {
+			t.Fatalf("DequeueBatch() error = %v", err)
+		}
+		if len(b) == 0 {
+			break
+		}
+		for _, it := range b {
+			if acked[it.ID] {
+				t.Errorf("acked item %q came back after restart", it.ID)
+			}
+			seen[it.ID] = true
+		}
+		if q2.Depth() == 0 {
+			break
+		}
+	}
+	if len(seen) != 4 {
+		t.Errorf("recovered %d unacked items, want 4", len(seen))
 	}
 }
