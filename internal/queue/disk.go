@@ -61,6 +61,11 @@ type diskStore struct {
 	readMu      sync.Mutex
 	readClosed  bool
 	readHandles map[int]*os.File
+	// removeFile unlinks one segment file. It is os.Remove everywhere except
+	// in tests that need the unlink to fail on demand: a chmod-based failure
+	// is not available to a process running as root, which CI may well be.
+	// Guarded by mu.
+	removeFile func(path string) error
 }
 
 // newDiskStore opens or creates spill storage under dir.
@@ -82,16 +87,19 @@ func newDiskStore(dir string, maxBytes int64, log *logger.Logger, metrics *agent
 	ds.refreshTotalBytes()
 	if metrics != nil {
 		metrics.SetDiskBytes(float64(ds.totalBytes))
-		// Seeded here, not on the first compaction: a healthy agent that has
-		// not yet had anything to reclaim would otherwise report zero segments
-		// while its disk fills, which is the one moment the gauge exists for.
-		metrics.SetSegments(float64(ds.segmentCount()))
 	}
+	// Seeded here, not on the first compaction: a healthy agent that has not
+	// yet had anything to reclaim would otherwise report zero segments while
+	// its disk fills, which is the one moment the gauge exists for.
+	ds.updateSegmentsGauge()
 	return ds, nil
 }
 
 func (ds *diskStore) openLatestSegment() error {
-	nums := ds.segmentNums()
+	nums, err := ds.segmentNums()
+	if err != nil {
+		return err
+	}
 	if len(nums) == 0 {
 		return ds.createSegment(0)
 	}
@@ -145,9 +153,7 @@ func (ds *diskStore) createSegment(num int) error {
 	if info, err := f.Stat(); err == nil {
 		ds.segmentSize = info.Size()
 	}
-	if ds.metrics != nil {
-		ds.metrics.SetSegments(float64(ds.segmentCount()))
-	}
+	ds.updateSegmentsGauge()
 	return nil
 }
 
@@ -369,6 +375,12 @@ func (ds *diskStore) removeSegment(num int) error {
 		ds.mu.Unlock()
 		return fmt.Errorf("refusing to remove segment %d: the active write segment is %d", num, active)
 	}
+	// Captured under the lock so a test can inject a failing unlink without
+	// racing the writer. Nothing but a test ever sets it.
+	remove := ds.removeFile
+	if remove == nil {
+		remove = os.Remove
+	}
 	ds.mu.Unlock()
 
 	// Before the unlink, so no reader is left holding a handle to a deleted
@@ -383,7 +395,7 @@ func (ds *diskStore) removeSegment(num int) error {
 		}
 		return fmt.Errorf("stat segment %q: %w", path, err)
 	}
-	if err := os.Remove(path); err != nil {
+	if err := remove(path); err != nil {
 		return fmt.Errorf("remove segment %q: %w", path, err)
 	}
 
@@ -397,18 +409,26 @@ func (ds *diskStore) removeSegment(num int) error {
 
 	if ds.metrics != nil {
 		ds.metrics.SetDiskBytes(float64(total))
-		ds.metrics.SetSegments(float64(ds.segmentCount()))
 	}
+	ds.updateSegmentsGauge()
 	return nil
 }
 
 // segmentNums lists the WAL segment numbers present in the spill directory,
 // ascending. It reads the directory rather than any in-memory state, so it also
 // sees segments written by an earlier process.
-func (ds *diskStore) segmentNums() []int {
+//
+// The error is returned rather than folded into an empty slice because the two
+// are not interchangeable anywhere this is used: "the directory could not be
+// read" and "the directory holds no segments" lead to opposite decisions, and
+// silently choosing the second is how a transient failure turns into a store
+// that reopens segment 0 underneath existing higher-numbered files -- which
+// removeSegment's `num >= segmentNum` guard then refuses to compact, for the
+// lifetime of the process, with nothing logged anywhere.
+func (ds *diskStore) segmentNums() ([]int, error) {
 	entries, err := os.ReadDir(ds.dir)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("read spill dir %q: %w", ds.dir, err)
 	}
 	var nums []int
 	for _, e := range entries {
@@ -420,25 +440,49 @@ func (ds *diskStore) segmentNums() []int {
 		}
 	}
 	sort.Ints(nums)
-	return nums
+	return nums, nil
 }
 
-// segmentCount returns how many WAL segment files exist on disk.
-func (ds *diskStore) segmentCount() int {
-	return len(ds.segmentNums())
+// updateSegmentsGauge republishes the on-disk segment count.
+//
+// A directory that cannot be read leaves the previous value in place. Setting
+// the gauge to zero there would report "no segments on disk" -- the healthiest
+// possible reading -- at the exact moment the store has lost sight of its own
+// spill directory.
+func (ds *diskStore) updateSegmentsGauge() {
+	if ds.metrics == nil {
+		return
+	}
+	nums, err := ds.segmentNums()
+	if err != nil {
+		return
+	}
+	ds.metrics.SetSegments(float64(len(nums)))
 }
 
 // lowestSegmentOnDisk returns the oldest segment file present, if any.
 //
 // This is where compaction has to start after a restart. The recovered
 // references cannot supply it: when every record in the WAL was already acked,
-// recovery returns nothing at all while the files are still sitting there.
-func (ds *diskStore) lowestSegmentOnDisk() (int, bool) {
-	nums := ds.segmentNums()
-	if len(nums) == 0 {
-		return 0, false
+// recovery returns nothing at all while the files are still sitting there. A
+// read failure is reported, never reported as "no segments": that would seed
+// the cursor above every file in the directory and strand all of them.
+func (ds *diskStore) lowestSegmentOnDisk() (int, bool, error) {
+	nums, err := ds.segmentNums()
+	if err != nil {
+		return 0, false, err
 	}
-	return nums[0], true
+	if len(nums) == 0 {
+		return 0, false, nil
+	}
+	return nums[0], true, nil
+}
+
+// isClosed reports whether close() has run.
+func (ds *diskStore) isClosed() bool {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	return ds.closed
 }
 
 // recover replays all segments and returns references to items not yet

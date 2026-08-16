@@ -1,10 +1,12 @@
 package queue
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1673,25 +1675,67 @@ func TestSegmentsGaugeTracksTheDirectory(t *testing.T) {
 		t.Fatalf("Ack() error = %v", err)
 	}
 
-	want := float64(len(segmentFileNums(t, dir)))
-	if got := queueGauge(t, reg, "kubexa_queue_segments"); got != want {
-		t.Errorf("segments gauge after compaction = %v, want %v", got, want)
+	// Derived from the setup, not read back out of the directory afterwards:
+	// everything written above is acked, so the only segment that may survive
+	// is the one being written to. Taking the expectation from the state under
+	// test would let a broken gauge agree with a broken directory.
+	const wantAfter = 1
+	if got := segmentFileNums(t, dir); len(got) != wantAfter {
+		t.Fatalf("segments on disk = %v, want %d after acking everything", got, wantAfter)
+	}
+	if got := queueGauge(t, reg, "kubexa_queue_segments"); got != wantAfter {
+		t.Errorf("segments gauge after compaction = %v, want %v", got, float64(wantAfter))
 	}
 }
 
-// Removal failure is logged on the transition, not on every attempt: this runs
-// from both reclaim points, so a spill directory that has gone read-only would
-// otherwise emit a warning per ack and per dequeue into the same pipeline that
-// carries the real diagnostics.
-func TestCompactionFailureLogsTheTransitionNotEveryAttempt(t *testing.T) {
+// syncBuffer collects log output for assertions.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+const (
+	compactFailMsg     = "WAL segment reclamation is failing"
+	compactRecoveryMsg = "WAL segment reclamation recovered"
+)
+
+// Removal failure is announced on the transition, not on every attempt. The
+// warning runs from both reclaim points, so on a spill directory that has gone
+// read-only, one line per attempt is a line per ack and per dequeue -- hundreds
+// of megabytes a day into the same pipeline that carries the real diagnostics.
+//
+// The unlink is failed through diskStore's removeFile seam rather than through
+// directory permissions: a chmod does not stop root, so a permissions-based
+// version of this test passes vacuously wherever CI runs as root, which is the
+// environment that matters. The assertions are on the emitted log lines, not on
+// the internal flag, so making the warning unconditional again fails this test.
+func TestCompactionFailureWarnsOnceAndAnnouncesRecovery(t *testing.T) {
 	t.Parallel()
 
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: directory permissions would not stop the unlink")
-	}
-
 	dir := t.TempDir()
-	q := newTestBufferedQueue(t, bigSpillConfig(dir), nil)
+	logs := &syncBuffer{}
+	q, err := New(bigSpillConfig(dir), logger.New("queue-test", logger.WithWriter(logs)),
+		newTestQueueMetrics(t, prometheus.NewRegistry()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = q.Close() })
+	bq, ok := q.(*bufferedQueue)
+	if !ok {
+		t.Fatalf("New() returned %T, want *bufferedQueue", q)
+	}
 	ctx := context.Background()
 
 	payload := make([]byte, segmentMaxBytes/4)
@@ -1699,6 +1743,10 @@ func TestCompactionFailureLogsTheTransitionNotEveryAttempt(t *testing.T) {
 		if err := q.Enqueue(ctx, item(fmt.Sprintf("big-%d", i), payload)); err != nil {
 			t.Fatalf("Enqueue(%d) error = %v", i, err)
 		}
+	}
+	before := segmentFileNums(t, dir)
+	if len(before) < 2 {
+		t.Fatalf("segments on disk = %v, want at least 2", before)
 	}
 	batch, err := q.DequeueBatch(ctx, 64)
 	if err != nil {
@@ -1709,68 +1757,152 @@ func TestCompactionFailureLogsTheTransitionNotEveryAttempt(t *testing.T) {
 		ids[i] = it.ID
 	}
 
-	// A directory without write permission fails the unlink, not the appends:
-	// the segment files are already open.
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("chmod spill dir: %v", err)
-	}
-	restored := false
-	defer func() {
-		if !restored {
-			_ = os.Chmod(dir, 0o750)
-		}
-	}()
+	bq.disk.mu.Lock()
+	bq.disk.removeFile = func(string) error { return fmt.Errorf("injected unlink failure") }
+	bq.disk.mu.Unlock()
 
+	// The ack itself succeeds; only the reclamation behind it fails.
 	if err := q.Ack(ids); err != nil {
 		t.Fatalf("Ack() error = %v", err)
 	}
-	q.mu.Lock()
-	failing, failures := q.compactFailing, q.compactFailures
-	q.mu.Unlock()
-	if !failing {
-		t.Skip("the unlink succeeded despite the directory mode; nothing to assert")
+	if got := segmentFileNums(t, dir); len(got) != len(before) {
+		t.Fatalf("segments on disk = %v, want all %d still there: the injected "+
+			"failure did not take effect, so this test proves nothing", got, len(before))
 	}
-	if failures != 1 {
-		t.Errorf("compactFailures = %d after one compaction, want 1", failures)
+	if n := strings.Count(logs.String(), compactFailMsg); n != 1 {
+		t.Fatalf("failure announced %d times after the first failing compaction, want 1", n)
 	}
 
-	// Further attempts keep counting but must not re-announce. Acking ids
-	// that are no longer inflight is a no-op for the ack loop and still runs
-	// compaction, which is the retry under test.
+	// Acking ids that are no longer inflight is a no-op for the ack loop and
+	// still runs compaction, which is the retry under test.
 	for i := 0; i < 3; i++ {
 		if err := q.Ack(ids); err != nil {
 			t.Fatalf("repeat Ack() error = %v", err)
 		}
 	}
-	q.mu.Lock()
-	stillFailing, moreFailures := q.compactFailing, q.compactFailures
-	q.mu.Unlock()
-	if !stillFailing {
-		t.Errorf("compactFailing = false while removal is still failing")
+	bq.mu.Lock()
+	failures := bq.compactFailures
+	bq.mu.Unlock()
+	if failures < 4 {
+		t.Fatalf("compactFailures = %d after 4 failing compactions, want at least 4: "+
+			"the retries did not happen", failures)
 	}
-	if moreFailures <= failures {
-		t.Errorf("compactFailures = %d, want it to keep counting past %d", moreFailures, failures)
+	if n := strings.Count(logs.String(), compactFailMsg); n != 1 {
+		t.Errorf("failure announced %d times across %d failed attempts, want 1",
+			n, failures)
+	}
+	if n := strings.Count(logs.String(), compactRecoveryMsg); n != 0 {
+		t.Errorf("recovery announced %d times while removal is still failing, want 0", n)
 	}
 
-	// Recovery has to clear the state, or the next real failure goes unlogged.
-	if err := os.Chmod(dir, 0o750); err != nil {
-		t.Fatalf("restore spill dir mode: %v", err)
+	bq.disk.mu.Lock()
+	bq.disk.removeFile = nil
+	bq.disk.mu.Unlock()
+
+	if err := q.Ack(ids); err != nil {
+		t.Fatalf("Ack() after recovery error = %v", err)
 	}
-	restored = true
-	if err := q.Enqueue(ctx, item("after", payload)); err != nil {
-		t.Fatalf("Enqueue(after) error = %v", err)
+	if got := segmentFileNums(t, dir); len(got) != 1 {
+		t.Fatalf("segments on disk = %v, want just the active one once removal works", got)
 	}
-	last, err := q.DequeueBatch(ctx, 1)
+	if n := strings.Count(logs.String(), compactRecoveryMsg); n != 1 {
+		t.Errorf("recovery announced %d times, want exactly 1", n)
+	}
+	if n := strings.Count(logs.String(), compactFailMsg); n != 1 {
+		t.Errorf("failure announced %d times in total, want 1", n)
+	}
+}
+
+// A spill directory that cannot be read is not a spill directory with no
+// segments. Folding the two together makes a transient failure reopen segment 0
+// underneath existing files, which disables compaction for the lifetime of the
+// process with nothing logged anywhere.
+func TestSegmentListingDistinguishesUnreadableFromEmpty(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	reg := prometheus.NewRegistry()
+	ds, err := newDiskStore(dir, 512<<20, logger.New("queue-test"), newTestQueueMetrics(t, reg))
 	if err != nil {
-		t.Fatalf("DequeueBatch() error = %v", err)
+		t.Fatalf("newDiskStore() error = %v", err)
 	}
-	if err := q.Ack([]string{last[0].ID}); err != nil {
-		t.Fatalf("Ack() error = %v", err)
+
+	// An empty directory: no segments, no error. (createSegment has made one.)
+	nums, err := ds.segmentNums()
+	if err != nil {
+		t.Fatalf("segmentNums() on a readable dir error = %v", err)
 	}
-	q.mu.Lock()
-	recovered := !q.compactFailing
-	q.mu.Unlock()
-	if !recovered {
-		t.Errorf("compactFailing stayed true after removal started working again")
+	if len(nums) != 1 {
+		t.Fatalf("segmentNums() = %v, want the one segment newDiskStore created", nums)
 	}
+	seeded := queueGauge(t, reg, "kubexa_queue_segments")
+	if seeded != 1 {
+		t.Fatalf("segments gauge = %v, want 1", seeded)
+	}
+
+	// Now make it unreadable for any user, root included.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove spill dir: %v", err)
+	}
+
+	if _, err := ds.segmentNums(); err == nil {
+		t.Errorf("segmentNums() on an unreadable dir returned nil error")
+	}
+	if _, ok, err := ds.lowestSegmentOnDisk(); err == nil {
+		t.Errorf("lowestSegmentOnDisk() returned (ok=%v, nil error) on an "+
+			"unreadable dir; reporting \"no segments\" here seeds the compaction "+
+			"cursor above every file in the directory", ok)
+	}
+
+	// The gauge must keep its last good value rather than report the healthiest
+	// possible number at the moment the store lost sight of its directory.
+	ds.updateSegmentsGauge()
+	if got := queueGauge(t, reg, "kubexa_queue_segments"); got != seeded {
+		t.Errorf("segments gauge = %v after the dir became unreadable, want it "+
+			"left at %v", got, seeded)
+	}
+}
+
+// A clean shutdown must not look like data loss. Items still referenced when
+// Close runs are durable and unacked -- the next start replays them -- so a
+// DequeueBatch after Close must not count them as unreadable drops, and must
+// not block waiting for a store that will never answer.
+func TestDequeueAfterCloseIsNotDataLoss(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	reg := prometheus.NewRegistry()
+	q, err := New(bigSpillConfig(dir), logger.New("queue-test"), newTestQueueMetrics(t, reg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx := context.Background()
+
+	payload := make([]byte, segmentMaxBytes/4)
+	for i := 0; i < 4; i++ {
+		if err := q.Enqueue(ctx, item(fmt.Sprintf("big-%d", i), payload)); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+	if q.Depth() == 0 {
+		t.Fatalf("Depth() = 0, want the spilled items pending")
+	}
+	if err := q.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	// A regression here hangs rather than fails, so bound it.
+	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	batch, err := q.DequeueBatch(deadline, 64)
+	if err != nil {
+		t.Fatalf("DequeueBatch() after Close error = %v, want a clean empty result", err)
+	}
+	if len(batch) != 0 {
+		t.Fatalf("DequeueBatch() after Close returned %d items", len(batch))
+	}
+	if got := q.DroppedTotal(); got != 0 {
+		t.Errorf("DroppedTotal() = %d after a clean shutdown, want 0", got)
+	}
+	assertCounter(t, reg, "kubexa_queue_disk_read_errors_total", 0)
 }
