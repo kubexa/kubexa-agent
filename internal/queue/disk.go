@@ -31,6 +31,11 @@ var (
 	errCorruptRecord   = errors.New("corrupt WAL record")
 	errInvalidMagic    = errors.New("invalid WAL magic")
 	errNotAnItemRecord = errors.New("record at offset is not an item record")
+	// errStoreClosed is returned by every operation once close() has run. It is
+	// a sentinel because callers need to tell an ordinary shutdown apart from a
+	// real failure: compaction races Close by design, and a bare error there
+	// would log a spurious warning on every clean stop.
+	errStoreClosed = errors.New("disk store closed")
 	// ErrDiskFull indicates the spill directory has reached max_disk_bytes.
 	ErrDiskFull = errors.New("disk spill limit exceeded")
 )
@@ -77,29 +82,16 @@ func newDiskStore(dir string, maxBytes int64, log *logger.Logger, metrics *agent
 	ds.refreshTotalBytes()
 	if metrics != nil {
 		metrics.SetDiskBytes(float64(ds.totalBytes))
+		// Seeded here, not on the first compaction: a healthy agent that has
+		// not yet had anything to reclaim would otherwise report zero segments
+		// while its disk fills, which is the one moment the gauge exists for.
+		metrics.SetSegments(float64(ds.segmentCount()))
 	}
 	return ds, nil
 }
 
 func (ds *diskStore) openLatestSegment() error {
-	entries, err := os.ReadDir(ds.dir)
-	if err != nil {
-		return fmt.Errorf("read spill dir: %w", err)
-	}
-
-	var nums []int
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		n, ok := parseSegmentName(e.Name())
-		if !ok {
-			continue
-		}
-		nums = append(nums, n)
-	}
-	sort.Ints(nums)
-
+	nums := ds.segmentNums()
 	if len(nums) == 0 {
 		return ds.createSegment(0)
 	}
@@ -152,6 +144,9 @@ func (ds *diskStore) createSegment(num int) error {
 	ds.segmentSize = 0
 	if info, err := f.Stat(); err == nil {
 		ds.segmentSize = info.Size()
+	}
+	if ds.metrics != nil {
+		ds.metrics.SetSegments(float64(ds.segmentCount()))
 	}
 	return nil
 }
@@ -229,7 +224,7 @@ func (ds *diskStore) appendRecord(recType byte, body []byte) (int, int64, error)
 	defer ds.mu.Unlock()
 
 	if ds.closed {
-		return 0, 0, errors.New("disk store closed")
+		return 0, 0, errStoreClosed
 	}
 	if ds.maxBytes > 0 && ds.totalBytes+int64(5+len(body)) > ds.maxBytes {
 		return 0, 0, fmt.Errorf("%w (%d bytes)", ErrDiskFull, ds.maxBytes)
@@ -309,7 +304,7 @@ func (ds *diskStore) readHandle(segment int) (*os.File, error) {
 	defer ds.readMu.Unlock()
 
 	if ds.readClosed {
-		return nil, errors.New("disk store closed")
+		return nil, errStoreClosed
 	}
 	if f, ok := ds.readHandles[segment]; ok {
 		return f, nil
@@ -367,7 +362,7 @@ func (ds *diskStore) removeSegment(num int) error {
 	ds.mu.Lock()
 	if ds.closed {
 		ds.mu.Unlock()
-		return errors.New("disk store closed")
+		return errStoreClosed
 	}
 	if num >= ds.segmentNum {
 		active := ds.segmentNum
@@ -402,26 +397,48 @@ func (ds *diskStore) removeSegment(num int) error {
 
 	if ds.metrics != nil {
 		ds.metrics.SetDiskBytes(float64(total))
+		ds.metrics.SetSegments(float64(ds.segmentCount()))
 	}
 	return nil
 }
 
-// segmentCount returns how many WAL segment files exist on disk.
-func (ds *diskStore) segmentCount() int {
+// segmentNums lists the WAL segment numbers present in the spill directory,
+// ascending. It reads the directory rather than any in-memory state, so it also
+// sees segments written by an earlier process.
+func (ds *diskStore) segmentNums() []int {
 	entries, err := os.ReadDir(ds.dir)
 	if err != nil {
-		return 0
+		return nil
 	}
-	n := 0
+	var nums []int
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		if _, ok := parseSegmentName(e.Name()); ok {
-			n++
+		if n, ok := parseSegmentName(e.Name()); ok {
+			nums = append(nums, n)
 		}
 	}
-	return n
+	sort.Ints(nums)
+	return nums
+}
+
+// segmentCount returns how many WAL segment files exist on disk.
+func (ds *diskStore) segmentCount() int {
+	return len(ds.segmentNums())
+}
+
+// lowestSegmentOnDisk returns the oldest segment file present, if any.
+//
+// This is where compaction has to start after a restart. The recovered
+// references cannot supply it: when every record in the WAL was already acked,
+// recovery returns nothing at all while the files are still sitting there.
+func (ds *diskStore) lowestSegmentOnDisk() (int, bool) {
+	nums := ds.segmentNums()
+	if len(nums) == 0 {
+		return 0, false
+	}
+	return nums[0], true
 }
 
 // recover replays all segments and returns references to items not yet
