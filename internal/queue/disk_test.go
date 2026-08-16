@@ -3,6 +3,8 @@ package queue
 import (
 	"errors"
 	"io/fs"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -231,4 +233,141 @@ func TestReadItemConcurrentWithWrites(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func TestRecoverReturnsRefsInEnqueueOrder(t *testing.T) {
+	dir := t.TempDir()
+	ds, err := newDiskStore(dir, 64<<20, logger.New("disk-test"), nil)
+	if err != nil {
+		t.Fatalf("newDiskStore() error = %v", err)
+	}
+
+	first := testItem("first", 64)
+	first.EnqueuedAt = time.Unix(1755000000, 0).UTC()
+	second := testItem("second", 64)
+	second.EnqueuedAt = time.Unix(1755000100, 0).UTC()
+	third := testItem("third", 64)
+	third.EnqueuedAt = time.Unix(1755000200, 0).UTC()
+
+	for _, it := range []Item{third, first, second} {
+		if _, _, err := ds.appendItem(it); err != nil {
+			t.Fatalf("appendItem(%s) error = %v", it.ID, err)
+		}
+	}
+	if err := ds.appendAck("second"); err != nil {
+		t.Fatalf("appendAck() error = %v", err)
+	}
+	if err := ds.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+
+	reopened, err := newDiskStore(dir, 64<<20, logger.New("disk-test"), nil)
+	if err != nil {
+		t.Fatalf("reopen error = %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.close() })
+
+	refs, err := reopened.recover()
+	if err != nil {
+		t.Fatalf("recover() error = %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("recovered %d refs, want 2 (the acked one must be gone)", len(refs))
+	}
+	if refs[0].ID != "first" || refs[1].ID != "third" {
+		t.Errorf("refs in order %q,%q; want first,third (sorted by EnqueuedAt)",
+			refs[0].ID, refs[1].ID)
+	}
+	// A recovered ref must be readable through the location it carries.
+	got, err := reopened.readItem(refs[0].Segment, refs[0].Offset)
+	if err != nil {
+		t.Fatalf("readItem(recovered ref) error = %v", err)
+	}
+	if got.ID != "first" {
+		t.Errorf("ref location points at %q, want %q", got.ID, "first")
+	}
+}
+
+// The regression guard for the bug this whole change exists to fix: replay
+// must not copy payloads into the heap. 32 items of 1 MiB is 32 MiB of
+// payload; a 4 MiB ceiling gives an 8x margin over ref overhead while still
+// failing loudly if payloads come back.
+func TestRecoverDoesNotMaterializePayloads(t *testing.T) {
+	dir := t.TempDir()
+	ds, err := newDiskStore(dir, 512<<20, logger.New("disk-test"), nil)
+	if err != nil {
+		t.Fatalf("newDiskStore() error = %v", err)
+	}
+	const (
+		count      = 32
+		payloadLen = 1 << 20
+	)
+	for i := 0; i < count; i++ {
+		if _, _, err := ds.appendItem(testItem("big-"+string(rune('a'+i)), payloadLen)); err != nil {
+			t.Fatalf("appendItem(%d) error = %v", i, err)
+		}
+	}
+	if err := ds.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+
+	reopened, err := newDiskStore(dir, 512<<20, logger.New("disk-test"), nil)
+	if err != nil {
+		t.Fatalf("reopen error = %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.close() })
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	refs, err := reopened.recover()
+	if err != nil {
+		t.Fatalf("recover() error = %v", err)
+	}
+
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(refs)
+
+	if len(refs) != count {
+		t.Fatalf("recovered %d refs, want %d", len(refs), count)
+	}
+	growth := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	const ceiling = 4 << 20
+	if growth > ceiling {
+		t.Errorf("recover() grew the live heap by %d bytes for %d MiB of payload; "+
+			"want under %d. Payloads are being retained again.",
+			growth, (count*payloadLen)>>20, ceiling)
+	}
+}
+
+func TestRecoverSkipsSegmentDeletedUnderneath(t *testing.T) {
+	dir := t.TempDir()
+	ds, err := newDiskStore(dir, 64<<20, logger.New("disk-test"), nil)
+	if err != nil {
+		t.Fatalf("newDiskStore() error = %v", err)
+	}
+	if _, _, err := ds.appendItem(testItem("only", 64)); err != nil {
+		t.Fatalf("appendItem() error = %v", err)
+	}
+	if err := ds.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+	if err := os.Remove(dir + "/" + segmentFilename(0)); err != nil {
+		t.Fatalf("remove segment: %v", err)
+	}
+
+	reopened, err := newDiskStore(dir, 64<<20, logger.New("disk-test"), nil)
+	if err != nil {
+		t.Fatalf("reopen error = %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.close() })
+	refs, err := reopened.recover()
+	if err != nil {
+		t.Fatalf("recover() error = %v", err)
+	}
+	if len(refs) != 0 {
+		t.Errorf("recovered %d refs from an empty spill dir, want 0", len(refs))
+	}
 }
