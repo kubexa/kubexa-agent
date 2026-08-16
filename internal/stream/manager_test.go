@@ -1256,3 +1256,128 @@ func TestDrainAckFailureEndsTheSessionWithAReason(t *testing.T) {
 		t.Error("the session context is still live: the workers were never released")
 	}
 }
+
+// poisonConnectClient refuses one message id for the life of the test and
+// records every other id it is handed. It is the shape of a real poison item:
+// the gateway rejects that one record and takes everything else.
+type poisonConnectClient struct {
+	agentv1.AgentService_ConnectClient
+	poisonID string
+
+	mu        sync.Mutex
+	delivered map[string]int
+	refusals  int
+}
+
+func (p *poisonConnectClient) Send(msg *agentv1.AgentMessage) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if msg.GetMessageId() == p.poisonID {
+		p.refusals++
+		return errors.New("stream broken")
+	}
+	p.delivered[msg.GetMessageId()]++
+	return nil
+}
+
+func (p *poisonConnectClient) deliveryCount(id string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.delivered[id]
+}
+
+// runDrainRound runs one drain pass and returns when the pass is over: either
+// the drain returned on its own (the send failure that ends the session), or
+// the queue has settled everything and the drain is only waiting for more work.
+func runDrainRound(ctx context.Context, t *testing.T, sm *streamManager, stream agentv1.AgentService_ConnectClient, settled func() bool) {
+	t.Helper()
+
+	roundCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sm.drainBufferedQueue(roundCtx, stream)
+	}()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-done:
+			return
+		case <-deadline:
+			t.Fatal("drain round did not finish")
+		case <-time.After(5 * time.Millisecond):
+			if settled() {
+				cancel()
+				<-done
+				return
+			}
+		}
+	}
+}
+
+// One undeliverable item must cost one item. The send-failure path nacked the
+// failed item AND the whole untried remainder of the batch, and every nack
+// charged an attempt, so six rounds against a poison item at the head of the
+// batch retired all of it: measured 10/10 into dropped_total, up to
+// buffer.batch_size (default 100) healthy items destroyed per poison one.
+func TestOnePoisonItemDoesNotRetireTheBatchBehindIt(t *testing.T) {
+	t.Parallel()
+
+	const batchSize = 10
+	const poisonID = "id-0"
+
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = batchSize
+	// Spill-backed: every item is a disk reference holding a segment claim, so
+	// the rounds have to hand back exactly the claims they released.
+	q := newTestDiskQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(ctx, t, q, batchSize)
+	observer := queueObserver(t, q)
+	stream := &poisonConnectClient{poisonID: poisonID, delivered: make(map[string]int)}
+
+	settled := func() bool { return q.Depth() == 0 && observer.InflightLen() == 0 }
+
+	// Far more rounds than the queue's own cap needs: the assertion is what
+	// survives, not how many rounds it takes.
+	const maxRounds = 40
+	rounds := 0
+	for ; rounds < maxRounds && !settled(); rounds++ {
+		runDrainRound(ctx, t, sm, stream, settled)
+	}
+	if rounds >= maxRounds {
+		t.Fatalf("queue never settled after %d drain rounds", rounds)
+	}
+
+	for i := 1; i < batchSize; i++ {
+		id := fmt.Sprintf("id-%d", i)
+		if got := stream.deliveryCount(id); got != 1 {
+			t.Errorf("%s delivered %d times, want exactly 1 -- it was retired on attempts it never used", id, got)
+		}
+	}
+	if got := stream.deliveryCount(poisonID); got != 0 {
+		t.Errorf("poison item delivered %d times, want 0", got)
+	}
+	if got := q.DroppedTotal(); got != 1 {
+		t.Errorf("DroppedTotal() = %d, want exactly 1 -- one undeliverable item costs one item", got)
+	}
+	if got := observer.InflightLen(); got != 0 {
+		t.Errorf("InflightLen() = %d, want 0", got)
+	}
+	if got := observer.SegmentClaims(); got != 0 {
+		t.Errorf("SegmentClaims() = %d, want 0", got)
+	}
+	if got := observer.RefUnderflows(); got != 0 {
+		t.Errorf("RefUnderflows() = %d, want 0 -- a claim was released more than once", got)
+	}
+	if got := q.Depth(); got != 0 {
+		t.Errorf("Depth() = %d, want 0", got)
+	}
+}

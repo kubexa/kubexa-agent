@@ -31,6 +31,11 @@ var (
 	errCorruptRecord   = errors.New("corrupt WAL record")
 	errInvalidMagic    = errors.New("invalid WAL magic")
 	errNotAnItemRecord = errors.New("record at offset is not an item record")
+	// errRecordIDMismatch means the record read back at a reference's location
+	// belongs to a different item. The record is intact -- it is the reference
+	// that is wrong -- and delivering it anyway would send the wrong payload
+	// under a borrowed identity and ack an id nobody sent.
+	errRecordIDMismatch = errors.New("record at offset holds a different item")
 	// errStoreClosed is returned by every operation once close() has run. It is
 	// a sentinel because callers need to tell an ordinary shutdown apart from a
 	// real failure: compaction races Close by design, and a bare error there

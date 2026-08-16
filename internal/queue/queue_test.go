@@ -2101,3 +2101,199 @@ func TestRetirementAfterDeliveryIsNotCountedAsLoss(t *testing.T) {
 		t.Errorf("RefUnderflows() = %d, want 0 -- a claim was released more than once", got)
 	}
 }
+
+// An attempt count must record attempts that actually happened. An item that
+// was never handed to the wire -- everything queued behind the one item whose
+// send failed -- has used none of its six, and charging it one retires healthy
+// items on somebody else's failure: with a poison item at the head of a batch,
+// the whole batch was gone by round six.
+func TestNackUntriedChargesNoAttempt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  *config.BufferConfig
+	}{
+		{
+			// Everything spills, so the attempt count lives on the diskRef.
+			name: "disk",
+			cfg: &config.BufferConfig{
+				MaxMemoryBytes: 1,
+				SpillDir:       t.TempDir(),
+				MaxDiskBytes:   64 << 20,
+				BatchSize:      10,
+			},
+		},
+		{
+			// Resident item: the attempt count lives on the Item itself, and
+			// nothing in the disk path is exercised.
+			name: "memory",
+			cfg:  testBufferConfig(t, "", 64<<10),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			bq := newTestBufferedQueue(t, tc.cfg, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			if err := bq.Enqueue(ctx, item("untried", []byte("payload"))); err != nil {
+				t.Fatalf("Enqueue() error = %v", err)
+			}
+
+			// Well past the cap: an untried item may come round forever, because
+			// nothing about it has been tried yet.
+			const rounds = 3 * (maxDeliveryAttempts + 1)
+			for i := 0; i < rounds; i++ {
+				batch, err := bq.DequeueBatch(ctx, 1)
+				if err != nil {
+					t.Fatalf("DequeueBatch() round %d error = %v", i, err)
+				}
+				if len(batch) != 1 || batch[0].ID != "untried" {
+					t.Fatalf("round %d: got %v, want the item back -- it was retired on attempts it never used", i, batch)
+				}
+				if batch[0].Attempts != 0 {
+					t.Fatalf("round %d: Attempts = %d, want 0 -- the item was never sent", i, batch[0].Attempts)
+				}
+				if err := bq.NackUntried([]string{batch[0].ID}); err != nil {
+					t.Fatalf("NackUntried() round %d error = %v", i, err)
+				}
+			}
+
+			if got := bq.DroppedTotal(); got != 0 {
+				t.Errorf("DroppedTotal() = %d, want 0 -- nothing was ever attempted", got)
+			}
+			if got := bq.Depth(); got != 1 {
+				t.Errorf("Depth() = %d, want 1", got)
+			}
+			if got := bq.InflightLen(); got != 0 {
+				t.Errorf("InflightLen() = %d, want 0", got)
+			}
+			if got := bq.RefUnderflows(); got != 0 {
+				t.Errorf("RefUnderflows() = %d, want 0", got)
+			}
+
+			// The cap still exists for this item: once its sends really are
+			// attempted, it retires like any other poison record.
+			for i := 0; i <= maxDeliveryAttempts; i++ {
+				batch, err := bq.DequeueBatch(ctx, 1)
+				if err != nil {
+					t.Fatalf("DequeueBatch() attempt %d error = %v", i, err)
+				}
+				if len(batch) == 0 {
+					t.Fatalf("item retired after %d real attempts, want %d", i, maxDeliveryAttempts+1)
+				}
+				if err := bq.Nack([]string{batch[0].ID}); err != nil {
+					t.Fatalf("Nack() attempt %d error = %v", i, err)
+				}
+			}
+			if got := bq.Depth(); got != 0 {
+				t.Errorf("Depth() = %d, want 0 -- the attempt cap must still retire a genuinely poison item", got)
+			}
+			if got := bq.DroppedTotal(); got != 1 {
+				t.Errorf("DroppedTotal() = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// nack_total is documented as "negative-acknowledged (requeued) items" and is
+// read during exactly the incident it exists for. An item retired at the
+// attempt cap is not requeued -- it is gone, and dropped_total already says so.
+func TestRetirementIsNotCountedAsANack(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	cfg := &config.BufferConfig{
+		MaxMemoryBytes: 1,
+		SpillDir:       t.TempDir(),
+		MaxDiskBytes:   64 << 20,
+		BatchSize:      10,
+	}
+	bq := newTestBufferedQueue(t, cfg, reg)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := bq.Enqueue(ctx, item("poison", []byte("payload"))); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+
+	for i := 0; i <= maxDeliveryAttempts; i++ {
+		batch, err := bq.DequeueBatch(ctx, 1)
+		if err != nil {
+			t.Fatalf("DequeueBatch() round %d error = %v", i, err)
+		}
+		if len(batch) == 0 {
+			t.Fatalf("item retired after %d rounds, want %d", i, maxDeliveryAttempts+1)
+		}
+		if err := bq.Nack([]string{batch[0].ID}); err != nil {
+			t.Fatalf("Nack() round %d error = %v", i, err)
+		}
+	}
+
+	if got := bq.DroppedTotal(); got != 1 {
+		t.Fatalf("DroppedTotal() = %d, want 1 -- the item should be retired by now", got)
+	}
+	// Six requeues, then a retirement: the retirement belongs to dropped_total
+	// and nowhere else.
+	assertCounter(t, reg, "kubexa_queue_nack_total", maxDeliveryAttempts)
+	assertCounter(t, reg, "kubexa_queue_dropped_total", 1)
+}
+
+// A diskRef is a byte location. If one ever drifts -- a torn write, a bad
+// recovery, a future refactor -- the read still succeeds and hands back
+// whatever record happens to sit there: the wrong payload delivered under a
+// borrowed identity, and an ack that retires an id nobody sent. One comparison
+// turns it into an ordinary unreadable-record drop.
+func TestRefPointingAtAnotherRecordIsDroppedNotDelivered(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	cfg := &config.BufferConfig{
+		MaxMemoryBytes: 1,
+		SpillDir:       t.TempDir(),
+		MaxDiskBytes:   64 << 20,
+		BatchSize:      10,
+	}
+	bq := newTestBufferedQueue(t, cfg, reg)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, id := range []string{"a", "b"} {
+		if err := bq.Enqueue(ctx, item(id, []byte("payload-"+id))); err != nil {
+			t.Fatalf("Enqueue(%s) error = %v", id, err)
+		}
+	}
+
+	// Point a's reference at b's record: a perfectly valid item record, just
+	// not the one that was asked for.
+	bq.mu.Lock()
+	if len(bq.diskRefs) != 2 {
+		bq.mu.Unlock()
+		t.Fatalf("diskRefs = %d, want 2 -- both items must have spilled", len(bq.diskRefs))
+	}
+	bq.diskRefs[0].Segment = bq.diskRefs[1].Segment
+	bq.diskRefs[0].Offset = bq.diskRefs[1].Offset
+	bq.mu.Unlock()
+
+	batch, err := bq.DequeueBatch(ctx, 2)
+	if err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+	if len(batch) != 1 || batch[0].ID != "b" {
+		t.Fatalf("got %v, want just %q -- a reference that reads back a different item must not be delivered", batch, "b")
+	}
+	if got := string(batch[0].Payload); got != "payload-b" {
+		t.Errorf("payload = %q, want %q", got, "payload-b")
+	}
+	if got := bq.DroppedTotal(); got != 1 {
+		t.Errorf("DroppedTotal() = %d, want 1 -- the mismatched reference must be counted, not silently delivered", got)
+	}
+	assertCounter(t, reg, "kubexa_queue_disk_read_errors_total", 1)
+	if got := bq.RefUnderflows(); got != 0 {
+		t.Errorf("RefUnderflows() = %d, want 0", got)
+	}
+}
