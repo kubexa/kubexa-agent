@@ -1018,7 +1018,7 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 		}
 		var ackIDs []string
 		var skippedLogs int
-		for _, item := range items {
+		for idx, item := range items {
 			var msg agentv1.AgentMessage
 			if err := proto.Unmarshal(item.Payload, &msg); err != nil {
 				m.log.Err(err).Warn("skip invalid queued payload", logger.F("id", item.ID))
@@ -1038,7 +1038,20 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				continue
 			}
 			if err := stream.Send(&msg); err != nil {
-				_ = m.queue.Nack([]string{item.ID})
+				// The failed item AND everything after it are still ours: they
+				// were dequeued into the inflight map and nothing else will
+				// ever return them. Returning here without nacking stranded
+				// them until the process restarted, and with WAL compaction a
+				// stranded item pins its segment forever.
+				retryIDs := make([]string, 0, len(items)-idx)
+				for _, remaining := range items[idx:] {
+					retryIDs = append(retryIDs, remaining.ID)
+				}
+				// Nack before ack so no ID is handled twice: the two sets are
+				// disjoint, and this ordering keeps them so under any future
+				// edit.
+				m.settleNacks(retryIDs)
+				m.settleAcks(ackIDs)
 				m.log.Err(err).Warn("failed to send buffered message")
 				m.abortSession()
 				return
@@ -1050,8 +1063,69 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				logger.F("count", skippedLogs),
 			)
 		}
-		if len(ackIDs) > 0 {
-			_ = m.queue.Ack(ackIDs)
+		m.settleAcks(ackIDs)
+	}
+}
+
+// maxAckAttempts bounds the retry of a failed Ack.
+//
+// A second attempt is worth making because Ack compacts before it returns even
+// when it failed, so the disk that had no room for the ack record may have room
+// by the time the call comes back. A third would only spin: the retry is
+// immediate and takes the queue lock each time, and everything that could have
+// changed in between has already changed.
+const maxAckAttempts = 2
+
+// settleAcks acks ids and guarantees that none of them is left in the queue's
+// inflight map afterwards.
+//
+// Ack deliberately KEEPS the inflight entry when the ack could not be
+// persisted: the entry is what justifies holding the WAL segment claim, and
+// releasing it would let an ack that was never written be undone by a restart.
+// That is right at the queue layer, but it makes the entry releasable only by a
+// later Ack or a Nack -- so a caller that discards the error strands the entry,
+// its payload and its segment for the lifetime of the process.
+//
+// After the bounded retry the batch is nacked back into the queue instead. That
+// can redeliver a message the gateway already received, which is the cost of
+// at-least-once delivery and is what the queue has always promised; the
+// alternative is an entry nothing can ever release.
+func (m *streamManager) settleAcks(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	var err error
+	for attempt := 0; attempt < maxAckAttempts; attempt++ {
+		// Ack is idempotent over ids it has already retired -- it skips any id
+		// no longer inflight -- so a retry of the whole slice only re-attempts
+		// the tail the failed call stopped at.
+		if err = m.queue.Ack(ids); err == nil {
+			return
+		}
+	}
+	m.log.Err(err).Warn("could not persist acks, returning the batch to the queue",
+		logger.F("count", len(ids)),
+	)
+	if m.streamMetrics != nil {
+		m.streamMetrics.IncStreamError("queue_ack")
+	}
+	m.settleNacks(ids)
+}
+
+// settleNacks returns ids to the queue, logging the failure that leaves them
+// stranded. Nack removes every id from the inflight map before it does anything
+// that can fail, so an error here means the items were lost or the queue is
+// closed -- not that they are still in flight.
+func (m *streamManager) settleNacks(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	if err := m.queue.Nack(ids); err != nil {
+		m.log.Err(err).Warn("could not requeue buffered messages",
+			logger.F("count", len(ids)),
+		)
+		if m.streamMetrics != nil {
+			m.streamMetrics.IncStreamError("queue_nack")
 		}
 	}
 }

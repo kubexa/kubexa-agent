@@ -833,3 +833,191 @@ func TestConsecutiveTransientCriticalLog(t *testing.T) {
 		t.Fatal("expected reset after success")
 	}
 }
+
+// fakeConnectClient stands in for the generated stream client. Only Send is
+// reached by drainBufferedQueue, so the embedded interface is left nil: any
+// other call would panic loudly rather than silently pass.
+type fakeConnectClient struct {
+	agentv1.AgentService_ConnectClient
+	mu        sync.Mutex
+	sent      int
+	failAfter int
+	// stopAfter, when positive, calls stop once that many sends have been
+	// attempted. It ends the drain loop from the outside so a test that is
+	// asserting on what the loop settled cannot hang on a loop that keeps
+	// re-dequeuing what it just nacked.
+	stopAfter int
+	stop      func()
+}
+
+func (f *fakeConnectClient) Send(*agentv1.AgentMessage) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sent++
+	if f.stopAfter > 0 && f.sent == f.stopAfter && f.stop != nil {
+		f.stop()
+	}
+	if f.sent > f.failAfter {
+		return errors.New("stream broken")
+	}
+	return nil
+}
+
+func (f *fakeConnectClient) sendCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sent
+}
+
+// inflightObserver is how a test reads the queue's inflight map: InflightLen
+// is deliberately absent from the Queue interface.
+type inflightObserver interface{ InflightLen() int }
+
+func inflightLen(t *testing.T, q queue.Queue) int {
+	t.Helper()
+	observer, ok := q.(inflightObserver)
+	if !ok {
+		t.Fatal("queue does not expose InflightLen")
+	}
+	return observer.InflightLen()
+}
+
+// enqueueTestLogs puts n marshalled log messages on q, id-0..id-(n-1).
+func enqueueTestLogs(t *testing.T, ctx context.Context, q queue.Queue, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		msg := &agentv1.AgentMessage{
+			MessageId: fmt.Sprintf("id-%d", i),
+			Payload: &agentv1.AgentMessage_Logs{
+				Logs: &agentv1.LogBatch{
+					Entries: []*agentv1.LogEntry{
+						{Namespace: "stage", PodName: "be-1", Message: "queued"},
+					},
+				},
+			},
+		}
+		payload, err := proto.Marshal(msg)
+		if err != nil {
+			t.Fatalf("marshal(%d): %v", i, err)
+		}
+		if err := q.Enqueue(ctx, queue.Item{ID: msg.MessageId, Payload: payload}); err != nil {
+			t.Fatalf("Enqueue(%d): %v", i, err)
+		}
+	}
+}
+
+func newDrainTestManager(t *testing.T, cfg *config.Config, q queue.Queue) *streamManager {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	_, streamMetrics, connMetrics := newTestAgentMetrics(t, reg)
+	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sm := mgr.(*streamManager)
+	sm.ready.Store(true)
+	return sm
+}
+
+// A send that fails partway through a batch must leave nothing in flight:
+// items already on the wire get acked, the failed item and every item after
+// it get nacked. Returning early skipped both, stranding them in the queue's
+// inflight map until the process restarted -- and with WAL compaction a single
+// stranded item pins its segment forever.
+func TestDrainNacksTheRemainderOfAFailedBatch(t *testing.T) {
+	t.Parallel()
+
+	const batchSize = 6
+	const failAfter = 3
+
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = batchSize
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(t, ctx, q, batchSize)
+
+	sm.drainBufferedQueue(ctx, &fakeConnectClient{failAfter: failAfter})
+
+	if got := inflightLen(t, q); got != 0 {
+		t.Errorf("%d items left in flight after a failed send, want 0", got)
+	}
+	if got := q.Depth(); got != batchSize-failAfter {
+		t.Errorf("Depth() = %d, want %d (the failed item and everything after it)",
+			got, batchSize-failAfter)
+	}
+}
+
+// ackFailingQueue is a real queue whose Ack always fails, standing in for the
+// one failure that matters here: appendAck hitting a full disk. Ack keeps the
+// inflight entry when it cannot persist -- correct at the queue layer, since
+// the entry is what justifies holding the segment claim -- so it is the
+// caller's job to make sure something still settles the batch.
+type ackFailingQueue struct {
+	queue.Queue
+	ackCalls  atomic.Int32
+	nackCalls atomic.Int32
+	nackIDs   atomic.Int32
+}
+
+func (a *ackFailingQueue) Ack(ids []string) error {
+	a.ackCalls.Add(1)
+	return errors.New("persist ack: no space left on device")
+}
+
+func (a *ackFailingQueue) Nack(ids []string) error {
+	a.nackCalls.Add(1)
+	a.nackIDs.Add(int32(len(ids)))
+	return a.Queue.Nack(ids)
+}
+
+// Every send succeeds, so the whole batch is acked -- and every ack fails.
+// The queue keeps those entries inflight on purpose; if the caller then walks
+// away, they are stranded for the process lifetime, holding their payloads and
+// pinning their WAL segments. The drain must settle them anyway, and must not
+// retry a permanently failing ack forever.
+func TestDrainSettlesABatchWhoseAckCannotBePersisted(t *testing.T) {
+	t.Parallel()
+
+	const batchSize = 4
+
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = batchSize
+	inner := newTestQueue(t)
+	q := &ackFailingQueue{Queue: inner}
+	sm := newDrainTestManager(t, cfg, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(t, ctx, q, batchSize)
+
+	// Stop the loop from the send side once the batch is on the wire: the
+	// batch is nacked back into the queue, so a loop left running would
+	// re-dequeue it forever.
+	stream := &fakeConnectClient{failAfter: batchSize, stopAfter: batchSize, stop: cancel}
+	sm.drainBufferedQueue(ctx, stream)
+
+	if got := inflightLen(t, inner); got != 0 {
+		t.Errorf("%d items left in flight after a failed ack, want 0", got)
+	}
+	if got := q.Depth(); got != batchSize {
+		t.Errorf("Depth() = %d, want %d (an unpersisted ack must not lose the items)", got, batchSize)
+	}
+	if got := q.nackCalls.Load(); got != 1 {
+		t.Errorf("Nack called %d times, want 1", got)
+	}
+	if got := q.nackIDs.Load(); got != batchSize {
+		t.Errorf("Nack covered %d ids, want %d", got, batchSize)
+	}
+	// The bound: a full disk fails every ack, so the retry must give up.
+	if got := q.ackCalls.Load(); got < 1 || got > 3 {
+		t.Errorf("Ack called %d times, want a bounded 1..3", got)
+	}
+	if got := stream.sendCount(); got != batchSize {
+		t.Errorf("sent %d messages, want %d", got, batchSize)
+	}
+}
