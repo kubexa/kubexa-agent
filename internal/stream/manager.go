@@ -121,6 +121,11 @@ type streamManager struct {
 	// signals session goroutines to stop
 	sessionCancel context.CancelFunc
 	sessionWG     sync.WaitGroup
+	// sessionErr is why a worker aborted the session, or nil for an ordinary
+	// end. waitSession hands it to Run, which is the difference between
+	// reconnecting immediately and reconnecting through the backoff ladder.
+	// Guarded by sessionMu.
+	sessionErr error
 }
 
 type dialFunc func(ctx context.Context) (*grpc.ClientConn, agentv1.AgentServiceClient, error)
@@ -219,6 +224,12 @@ func (m *streamManager) Run(ctx context.Context) error {
 
 	m.log.Info("stream manager starting")
 	attempt := 0
+	// stalled records that the last session died because the queue could not
+	// settle its batch. It survives one iteration so the backoff ladder is not
+	// reset by the handshake of a session that is about to fail the same way:
+	// a ladder that restarts at its shortest rung on every attempt is not a
+	// backoff, it is a fixed interval.
+	stalled := false
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -294,7 +305,10 @@ func (m *streamManager) Run(ctx context.Context) error {
 		m.sessionID.Store(sessionID)
 		m.ready.Store(true)
 		m.cb.recordSuccess()
-		attempt = 0
+		if !stalled {
+			attempt = 0
+		}
+		stalled = false
 		m.transition(StateReady, "stream ready", nil)
 
 		m.startSessionWorkers(sessionCtx, stream)
@@ -315,6 +329,7 @@ func (m *streamManager) Run(ctx context.Context) error {
 				m.shutdownErr = err
 				return err
 			}
+			stalled = errors.Is(err, errDrainStalled)
 			if transient {
 				m.transition(StateTransientFailure, "session lost", err)
 				attempt = m.handleTransientFailure(ctx, attempt, "session", err)
@@ -716,16 +731,41 @@ func (m *streamManager) waitSession(parentCtx context.Context) error {
 	case <-parentCtx.Done():
 		return parentCtx.Err()
 	case <-done:
-		return nil
+		m.sessionMu.RLock()
+		defer m.sessionMu.RUnlock()
+		return m.sessionErr
 	}
 }
 
 // abortSession cancels the active session context so all session workers unblock.
 // It is safe to call multiple times and is invoked when any worker detects a
 // broken stream (e.g. gateway restart) before endSession runs.
+//
+// The session ends with no error, so Run reconnects at once. That is right for
+// a broken stream -- the dial that follows will report the real state of the
+// link -- and wrong for a failure the reconnect cannot fix, which is what
+// abortSessionErr is for.
 func (m *streamManager) abortSession() {
+	m.abortSessionErr(nil)
+}
+
+// abortSessionErr ends the session and records why.
+//
+// A non-nil reason travels back through waitSession, so Run takes its
+// transient-failure path and sleeps the backoff before reconnecting instead of
+// looping at the speed of a dial. Without it a worker that keeps failing for a
+// reason no reconnect can fix -- a full disk refusing every ack -- rebuilt the
+// session tens of times a second: a handshake storm at the gateway, and
+// sendLoop and the heartbeat interrupted with it.
+//
+// The first reason wins: later aborts are usually the same failure arriving
+// through the other workers as a cancelled context.
+func (m *streamManager) abortSessionErr(reason error) {
 	m.sessionMu.Lock()
 	cancel := m.sessionCancel
+	if reason != nil && m.sessionErr == nil {
+		m.sessionErr = reason
+	}
 	m.sessionMu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -740,6 +780,10 @@ func (m *streamManager) endSession() {
 	m.sessionCancel = nil
 	m.stream = nil
 	m.conn = nil
+	// Cleared here, after waitSession has already read it: the reason belongs
+	// to the session that is ending, and carrying it into the next one would
+	// back off against a failure that is over.
+	m.sessionErr = nil
 	m.sessionMu.Unlock()
 
 	if cancel != nil {
@@ -1016,43 +1060,229 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 		if len(items) == 0 {
 			continue
 		}
-		var ackIDs []string
+		// Two disjoint sets, because they are settled differently when the ack
+		// cannot be persisted. sentIDs were delivered and may be redelivered;
+		// terminalIDs were judged undeliverable here -- unparseable, disabled,
+		// too old -- and must never go back on the queue, which is exactly why
+		// they are acked rather than nacked in the normal path.
+		var sentIDs []string
+		var terminalIDs []string
 		var skippedLogs int
-		for _, item := range items {
+		for idx, item := range items {
 			var msg agentv1.AgentMessage
 			if err := proto.Unmarshal(item.Payload, &msg); err != nil {
 				m.log.Err(err).Warn("skip invalid queued payload", logger.F("id", item.ID))
-				ackIDs = append(ackIDs, item.ID)
+				terminalIDs = append(terminalIDs, item.ID)
 				continue
 			}
 			if !shouldDeliverQueuedMessage(m.cfg, &msg) {
 				skippedLogs++
-				ackIDs = append(ackIDs, item.ID)
+				terminalIDs = append(terminalIDs, item.ID)
 				continue
 			}
 			if reason := ageDropReason(&msg, m.rules.Get(), time.Now()); reason != "" {
 				m.countAgeDrop(reason)
 				// Acked, not nacked: the record is not retryable. It will only
 				// get older, and a nack would replay it forever.
-				ackIDs = append(ackIDs, item.ID)
+				terminalIDs = append(terminalIDs, item.ID)
 				continue
 			}
 			if err := stream.Send(&msg); err != nil {
-				_ = m.queue.Nack([]string{item.ID})
+				// The failed item AND everything after it are still ours: they
+				// were dequeued into the inflight map and nothing else will
+				// ever return them. Returning here without nacking stranded
+				// them until the process restarted, and with WAL compaction a
+				// stranded item pins its segment forever.
+				//
+				// They are handed back differently, though: Send was called
+				// for this one item only, so it is the only one that has used
+				// a delivery attempt. Charging the untried remainder let one
+				// poison item at the head retire the whole batch at the cap --
+				// measured 10 items dropped for 1 undeliverable one, up to
+				// buffer.batch_size (default 100) in production.
+				untriedIDs := make([]string, 0, len(items)-idx-1)
+				for _, remaining := range items[idx+1:] {
+					untriedIDs = append(untriedIDs, remaining.ID)
+				}
+				// Untried first, then the failure: each nack prepends to the
+				// front of the queue, so the LAST call ends up ahead. That
+				// restores the batch's own order, with the failed item back at
+				// the head. This drain goroutine is the queue's only consumer
+				// and it is about to end the session, so nothing dequeues
+				// between the two calls.
+				m.settleUntriedNacks(untriedIDs)
+				// Nack before ack so no ID is handled twice: the sets are
+				// disjoint, and this ordering keeps them so under any future
+				// edit.
+				m.settleNacks([]string{item.ID})
+				// The session is ending on the send error either way, so the
+				// settle result only matters for what it did, not what it
+				// reports: it has already returned or dropped everything.
+				_ = m.settleAcks(sentIDs, terminalIDs)
 				m.log.Err(err).Warn("failed to send buffered message")
 				m.abortSession()
 				return
 			}
-			ackIDs = append(ackIDs, item.ID)
+			sentIDs = append(sentIDs, item.ID)
 		}
 		if skippedLogs > 0 {
 			m.log.Info("discarded buffered log messages (logs collection disabled)",
 				logger.F("count", skippedLogs),
 			)
 		}
-		if len(ackIDs) > 0 {
-			_ = m.queue.Ack(ackIDs)
+		if err := m.settleAcks(sentIDs, terminalIDs); err != nil {
+			if errors.Is(err, queue.ErrClosed) {
+				// Shutdown. Nothing to back off from and nothing left to
+				// drain; the WAL replays whatever is still inflight.
+				return
+			}
+			// The acks could not be persisted, so the batch went back on the
+			// queue. Looping would dequeue and re-send the very same items at
+			// full speed -- measured at ~100k re-sends in 200ms, which is
+			// duplicate traffic to the gateway plus an agent log flooding the
+			// same pipeline as its own diagnostics.
+			//
+			// The session ends rather than the worker simply returning,
+			// because this is a per-session worker: nothing re-enters it, so a
+			// bare return would leave the queue undrained for the life of a
+			// session that might last hours. It ends WITH a reason, so Run
+			// takes its transient-failure path and sleeps the backoff ladder
+			// first -- an unadorned abort ends the session with no error at
+			// all, and Run reconnects at the speed of a dial: ~35 sessions a
+			// second, measured. No sleep is added here and no queue lock is
+			// held across the wait.
+			m.abortSessionErr(fmt.Errorf("%w: %v", errDrainStalled, err))
+			return
 		}
+	}
+}
+
+// maxAckAttempts bounds the retry of a failed Ack.
+//
+// A second attempt is worth making because Ack compacts before it returns even
+// when it failed, so the disk that had no room for the ack record may have room
+// by the time the call comes back. A third would only spin: the retry is
+// immediate and takes the queue lock each time, and everything that could have
+// changed in between has already changed.
+const maxAckAttempts = 2
+
+// errDrainStalled marks a session that ended because the queue could not
+// settle its batch. Run backs off on it rather than reconnecting at once: no
+// dial fixes a full disk, and the reconnect is not the retry -- the next
+// drain is.
+var errDrainStalled = errors.New("buffered queue could not settle its batch")
+
+// settleAcks acks both id sets and guarantees that none of them is left in the
+// queue's inflight map afterwards. It returns nil once the acks are persisted;
+// any error means the batch was settled the hard way and the caller must not
+// dequeue again straight away.
+//
+// Ack deliberately KEEPS the inflight entry when the ack could not be
+// persisted: the entry is what justifies holding the WAL segment claim, and
+// releasing it would let an ack that was never written be undone by a restart.
+// That is right at the queue layer, but it makes the entry releasable only by a
+// later Ack, Nack or Drop -- so a caller that discards the error strands the
+// entry, its payload and its segment for the lifetime of the process.
+//
+// After the bounded retry the two sets part ways: sent ids go back on the queue
+// through NackDelivered, which redelivers them exactly as Nack does but records
+// a later retirement as delivered-but-unrecorded rather than as data loss --
+// the gateway has that data. Terminal ids are dropped, because requeueing
+// something already judged undeliverable only replays it until it is judged
+// undeliverable again.
+func (m *streamManager) settleAcks(sentIDs, terminalIDs []string) error {
+	ids := make([]string, 0, len(sentIDs)+len(terminalIDs))
+	ids = append(ids, sentIDs...)
+	ids = append(ids, terminalIDs...)
+	if len(ids) == 0 {
+		return nil
+	}
+
+	var err error
+	for attempt := 0; attempt < maxAckAttempts; attempt++ {
+		// Ack is idempotent over ids it has already retired -- it skips any id
+		// no longer inflight -- so a retry of the whole slice only re-attempts
+		// the tail the failed call stopped at.
+		err = m.queue.Ack(ids)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, queue.ErrClosed) {
+			// Shutdown, not a fault. Nothing can be settled on a closed queue
+			// -- Nack and Drop refuse it too -- and the WAL replays whatever
+			// is left on the next start. Retrying or warning here only adds
+			// noise to every drain worker on the way out.
+			return err
+		}
+	}
+
+	m.log.Err(err).Warn("could not persist acks, settling the batch by hand",
+		logger.F("sent", len(sentIDs)),
+		logger.F("terminal", len(terminalIDs)),
+	)
+	if m.streamMetrics != nil {
+		m.streamMetrics.IncStreamError("queue_ack")
+	}
+	m.settleDeliveredNacks(sentIDs)
+	m.settleDrops(terminalIDs)
+	return err
+}
+
+// settleDeliveredNacks returns ids that reached the gateway but whose ack could
+// not be recorded. Same redelivery as settleNacks; the difference is that the
+// queue counts a retirement of one of these as delivered-but-unrecorded rather
+// than as a drop, so dropped_total keeps meaning "telemetry the agent lost".
+func (m *streamManager) settleDeliveredNacks(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	m.reportSettleFailure(m.queue.NackDelivered(ids), "could not requeue delivered messages", "queue_nack", len(ids))
+}
+
+// settleNacks returns ids to the queue for redelivery.
+//
+// Nack settles every id it is given -- requeued, retired at the attempt cap, or
+// counted as dropped when there is nowhere to put it -- so an error here says
+// some of them were lost, not that they are still in flight. The exception is a
+// closed queue, which refuses the call before touching anything: those ids do
+// stay in the map, and that is fine, because the process is on its way out and
+// the WAL replays them.
+func (m *streamManager) settleNacks(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	m.reportSettleFailure(m.queue.Nack(ids), "could not requeue buffered messages", "queue_nack", len(ids))
+}
+
+// settleUntriedNacks returns ids that were dequeued but never sent: the batch
+// queued behind the item whose send failed. Same redelivery as settleNacks, and
+// the same guarantee that every id is settled; the difference is that these are
+// charged no delivery attempt, because none was made on them.
+func (m *streamManager) settleUntriedNacks(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	m.reportSettleFailure(m.queue.NackUntried(ids), "could not requeue untried messages", "queue_nack", len(ids))
+}
+
+// settleDrops releases ids that must never be retried. Same closed-queue
+// exemption as settleNacks, for the same reason.
+func (m *streamManager) settleDrops(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	m.reportSettleFailure(m.queue.Drop(ids), "could not drop undeliverable buffered messages", "queue_drop", len(ids))
+}
+
+// reportSettleFailure logs and counts a settle call that failed, treating a
+// closed queue as the shutdown it is rather than as a fault.
+func (m *streamManager) reportSettleFailure(err error, msg, reason string, count int) {
+	if err == nil || errors.Is(err, queue.ErrClosed) {
+		return
+	}
+	m.log.Err(err).Warn(msg, logger.F("count", count))
+	if m.streamMetrics != nil {
+		m.streamMetrics.IncStreamError(reason)
 	}
 }
 

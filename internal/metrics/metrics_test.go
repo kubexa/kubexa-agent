@@ -56,6 +56,9 @@ func TestNewRegistersAllMetrics(t *testing.T) {
 		"kubexa_queue_ack_total":                      false,
 		"kubexa_queue_nack_total":                     false,
 		"kubexa_queue_disk_bytes":                     false,
+		"kubexa_queue_disk_read_errors_total":         false,
+		"kubexa_queue_disk_read_seconds":              false,
+		"kubexa_queue_segments":                       false,
 		"kubexa_grpc_stream_active":                   false,
 		"kubexa_grpc_stream_messages_sent_total":      false,
 		"kubexa_grpc_stream_messages_received_total":  false,
@@ -394,4 +397,43 @@ func labelsMatch(pairs []*dto.LabelPair, want map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func TestQueueDiskReadMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m, err := New(reg, "test", "cluster", "agent")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	q := m.Queue()
+
+	q.IncDiskReadError()
+	q.IncDiskReadError()
+	q.ObserveDiskRead(0.25)
+	q.SetSegments(3)
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+	got := map[string]bool{}
+	for _, f := range families {
+		got[f.GetName()] = true
+	}
+	for _, want := range []string{
+		"kubexa_queue_disk_read_errors_total",
+		"kubexa_queue_disk_read_seconds",
+		"kubexa_queue_segments",
+	} {
+		if !got[want] {
+			t.Errorf("metric %q not registered", want)
+		}
+	}
+}
+
+func TestQueueDiskReadMetricsNilSafe(t *testing.T) {
+	var q *QueueMetrics
+	q.IncDiskReadError()
+	q.ObserveDiskRead(1)
+	q.SetSegments(1)
 }
