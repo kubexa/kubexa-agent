@@ -176,6 +176,21 @@ func New(cfg *config.BufferConfig, log *logger.Logger, m *agentmetrics.QueueMetr
 			q.refsPerSegment[ref.Segment]++
 		}
 
+		// Where compaction starts scanning after a restart. Segment 0 is
+		// usually long gone by then, and starting there would make every call
+		// walk the whole deleted range looking for files that are not coming
+		// back. The seed is the lowest of the active segment and every
+		// recovered reference -- including the ones the cap is about to drop
+		// just below, because a starting point that is too low only costs a
+		// few no-op iterations, while one that is too high strands every
+		// segment below it forever.
+		q.lowestSegment = q.disk.activeSegment()
+		for _, ref := range recovered {
+			if ref.Segment < q.lowestSegment {
+				q.lowestSegment = ref.Segment
+			}
+		}
+
 		for _, ref := range droppedRefs {
 			// The WAL record survives unless acked here, so without this the
 			// very next restart recovers it again instead of the cap
@@ -500,6 +515,52 @@ func (q *bufferedQueue) releaseDiskRefUnlocked(segment int) {
 	q.refsPerSegment[segment] = count
 }
 
+// compactUnlocked deletes the contiguous run of oldest segments that no live
+// reference points into.
+//
+// Prefix only, never a hole. An ack record is always written at or after its
+// item's own segment, so removing a prefix always removes acks together with
+// the items they refer to. Punching a hole can delete an ack whose item is
+// still on disk further back, and the next restart would replay that item as
+// pending and deliver it a second time — silently, with nothing logged
+// anywhere. This is why the loop stops at the first segment that still holds a
+// claim instead of scanning on for other empty ones.
+//
+// A zero count is necessary but not sufficient: the active write segment
+// normally carries no claims at all and must never be unlinked, which is what
+// the `< active` bound is for. removeSegment refuses it a second time.
+//
+// A claim is released only on ack or drop, never on dequeue, so an item sitting
+// in inflight still pins its segment and everything behind it.
+//
+// lowestSegment advances monotonically and is never moved past a segment that
+// was not actually removed, so this is amortized O(1) per call rather than a
+// scan, and a failed removal is retried on the next call instead of skipped.
+func (q *bufferedQueue) compactUnlocked() {
+	if q.disk == nil {
+		return
+	}
+
+	active := q.disk.activeSegment()
+	removed := 0
+	for q.lowestSegment < active && q.refsPerSegment[q.lowestSegment] == 0 {
+		if err := q.disk.removeSegment(q.lowestSegment); err != nil {
+			q.log.Warn("could not remove spent WAL segment",
+				logger.F("segment", q.lowestSegment),
+				logger.F("error", err.Error()),
+			)
+			break
+		}
+		delete(q.refsPerSegment, q.lowestSegment)
+		q.lowestSegment++
+		removed++
+	}
+
+	if removed > 0 && q.metrics != nil {
+		q.metrics.SetSegments(float64(q.disk.segmentCount()))
+	}
+}
+
 func (q *bufferedQueue) dropOldestUnlocked() {
 	select {
 	case oldest := <-q.memCh:
@@ -595,6 +656,19 @@ func (q *bufferedQueue) DequeueBatch(ctx context.Context, n int) ([]Item, error)
 			}
 			pulledItems = append(pulledItems, pulled{item: item, ref: ref})
 		}
+
+		// The second reclaim point. Ack is not the only path that releases the
+		// last claim on a segment: readRefUnlocked drops an unreadable record
+		// inside the pull loop above and releases it there, and no ack for that
+		// item will ever arrive. A queue whose every remaining record is corrupt
+		// would otherwise sit on a full disk forever. Cheap when there is
+		// nothing to reclaim — one map lookup, and no directory read unless a
+		// file was actually unlinked.
+		//
+		// Items already pulled here still hold their segment claims (a claim is
+		// released on ack or drop, never on dequeue), so nothing below can be
+		// deleted out from under a reference that is still live.
+		q.compactUnlocked()
 
 		if len(pulledItems) > 0 {
 			for _, p := range pulledItems {
@@ -707,6 +781,11 @@ func (q *bufferedQueue) Ack(ids []string) error {
 			q.releaseDiskRefUnlocked(entry.ref.Segment)
 		}
 	}
+	// The main reclaim point: acks are what retire WAL records, and without a
+	// reclaim the log only ever grew until appendRecord returned ErrDiskFull
+	// permanently. Compaction runs before the broadcast so an enqueuer parked
+	// on ErrDiskFull wakes up to space that already exists.
+	q.compactUnlocked()
 	q.signalWaitersLocked()
 	return nil
 }
