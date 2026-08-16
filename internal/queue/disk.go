@@ -28,8 +28,9 @@ const (
 )
 
 var (
-	errCorruptRecord = errors.New("corrupt WAL record")
-	errInvalidMagic  = errors.New("invalid WAL magic")
+	errCorruptRecord   = errors.New("corrupt WAL record")
+	errInvalidMagic    = errors.New("invalid WAL magic")
+	errNotAnItemRecord = errors.New("record at offset is not an item record")
 	// ErrDiskFull indicates the spill directory has reached max_disk_bytes.
 	ErrDiskFull = errors.New("disk spill limit exceeded")
 )
@@ -47,6 +48,12 @@ type diskStore struct {
 	segmentSize int64
 	totalBytes  int64
 	closed      bool
+	// readHandles are per-segment read-only handles, opened lazily. All reads
+	// use ReadAt, which does not touch the file offset, so they never race
+	// with the append-only writer or with each other. At 32 MiB segments and
+	// a 512 MiB cap there are at most 16 of these, so no eviction policy is
+	// needed; compaction and close() are what remove them.
+	readHandles map[int]*os.File
 }
 
 // newDiskStore opens or creates spill storage under dir.
@@ -265,6 +272,67 @@ func (ds *diskStore) appendRecord(recType byte, body []byte) (int, int64, error)
 	return segment, offset, nil
 }
 
+// readItem reads back the item record written at the given segment and offset.
+//
+// Reading from the active write segment is safe: appendRecord fsyncs before
+// returning, and a location is only published to the queue after that call
+// returns, so any offset a caller can name is already durable.
+func (ds *diskStore) readItem(segment int, offset int64) (Item, error) {
+	f, err := ds.readHandle(segment)
+	if err != nil {
+		return Item{}, err
+	}
+
+	header := make([]byte, 5)
+	if _, err := f.ReadAt(header, offset); err != nil {
+		return Item{}, fmt.Errorf("read record header at segment %d offset %d: %w", segment, offset, err)
+	}
+	if header[0] != recordTypeItem {
+		return Item{}, fmt.Errorf("%w: segment %d offset %d type %d", errNotAnItemRecord, segment, offset, header[0])
+	}
+	bodyLen := binary.BigEndian.Uint32(header[1:])
+	if bodyLen > 16<<20 {
+		return Item{}, fmt.Errorf("%w: body length %d at segment %d offset %d", errCorruptRecord, bodyLen, segment, offset)
+	}
+
+	body := make([]byte, bodyLen)
+	if _, err := f.ReadAt(body, offset+5); err != nil {
+		return Item{}, fmt.Errorf("read record body at segment %d offset %d: %w", segment, offset, err)
+	}
+	return decodeItemRecord(body)
+}
+
+func (ds *diskStore) readHandle(segment int) (*os.File, error) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+
+	if ds.closed {
+		return nil, errors.New("disk store closed")
+	}
+	if f, ok := ds.readHandles[segment]; ok {
+		return f, nil
+	}
+	path := filepath.Join(ds.dir, segmentFilename(segment))
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open segment for read: %w", err)
+	}
+	if ds.readHandles == nil {
+		ds.readHandles = make(map[int]*os.File)
+	}
+	ds.readHandles[segment] = f
+	return f, nil
+}
+
+// closeReadHandle releases the read handle for one segment, if open. Used by
+// compaction before deleting the file.
+func (ds *diskStore) closeReadHandle(segment int) {
+	if f, ok := ds.readHandles[segment]; ok {
+		_ = f.Close()
+		delete(ds.readHandles, segment)
+	}
+}
+
 // recover replays all segments and returns items not yet acknowledged.
 func (ds *diskStore) recover() ([]Item, error) {
 	entries, err := os.ReadDir(ds.dir)
@@ -459,6 +527,10 @@ func (ds *diskStore) close() error {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	ds.closed = true
+	for segment, f := range ds.readHandles {
+		_ = f.Close()
+		delete(ds.readHandles, segment)
+	}
 	if ds.segment != nil {
 		err := ds.segment.Close()
 		ds.segment = nil
