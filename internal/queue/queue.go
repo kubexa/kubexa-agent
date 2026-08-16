@@ -17,7 +17,12 @@ import (
 )
 
 const (
-	// avgItemSizeEstimate is used to size the in-memory channel from MaxMemoryBytes.
+	// avgItemSizeEstimate converts byte budgets into item counts. Measured
+	// agent traffic averages ~180 KB per item, so this is off by roughly 44x
+	// and the counts it produces are conservative, never generous. Both tiers
+	// have a real bound that does not depend on it: memory is gated by
+	// memBytes, and the disk tier by the WAL's own byte cap. It survives only
+	// as a slot count.
 	avgItemSizeEstimate = 4096
 )
 
@@ -345,6 +350,12 @@ func (q *bufferedQueue) evictOldestMemoryUnlocked() error {
 		q.memBytes -= q.itemSize(oldest)
 		q.memCount--
 		if q.disk != nil {
+			if q.diskRefsFullUnlocked() {
+				q.memCh <- oldest
+				q.memBytes += q.itemSize(oldest)
+				q.memCount++
+				return fmt.Errorf("spill item to disk: %w (reference cap)", ErrDiskFull)
+			}
 			segment, offset, err := q.disk.appendItem(oldest)
 			if err != nil {
 				q.memCh <- oldest
@@ -375,6 +386,9 @@ func (q *bufferedQueue) evictOldestMemoryUnlocked() error {
 // item coming back does not. A retry is not an arrival, and counting it makes
 // enqueued_total drift upward on every failed send.
 func (q *bufferedQueue) spillEnqueueUnlocked(item Item, countEnqueue bool) error {
+	if q.diskRefsFullUnlocked() {
+		return fmt.Errorf("%w (reference cap)", ErrDiskFull)
+	}
 	segment, offset, err := q.disk.appendItem(item)
 	if err != nil {
 		return err
@@ -391,6 +405,24 @@ func (q *bufferedQueue) spillEnqueueUnlocked(item Item, countEnqueue bool) error
 	}
 	q.updateDepthMetricsLocked()
 	return nil
+}
+
+// diskRefsFullUnlocked reports whether the reference slice has reached the
+// item count the disk budget allows.
+//
+// References are small but not free (~100 bytes each), and this is the bound
+// the old design was missing entirely: diskHead had no accounting of any
+// kind, so max_disk_bytes silently became a heap ceiling. diskSlotCapacity
+// already existed but gated nothing; it gates this.
+func (q *bufferedQueue) diskRefsFullUnlocked() bool {
+	if q.disk == nil {
+		return true
+	}
+	maxDisk := q.cfg.MaxDiskBytes
+	if maxDisk <= 0 {
+		maxDisk = 512 << 20
+	}
+	return int64(len(q.diskRefs)) >= diskSlotCapacity(maxDisk)
 }
 
 // addDiskRefUnlocked appends a reference and charges it to its segment.
