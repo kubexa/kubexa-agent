@@ -38,13 +38,17 @@ type Metrics struct {
 
 // QueueMetrics records buffer queue instrumentation.
 type QueueMetrics struct {
-	depth         *prometheus.GaugeVec
-	enqueuedTotal prometheus.Counter
-	dequeuedTotal prometheus.Counter
-	droppedTotal  prometheus.Counter
-	ackTotal      prometheus.Counter
-	nackTotal     prometheus.Counter
-	diskBytes     prometheus.Gauge
+	depth           *prometheus.GaugeVec
+	enqueuedTotal   prometheus.Counter
+	dequeuedTotal   prometheus.Counter
+	droppedTotal    prometheus.Counter
+	unrecordedTotal prometheus.Counter
+	ackTotal        prometheus.Counter
+	nackTotal       prometheus.Counter
+	diskBytes       prometheus.Gauge
+	diskReadErrors  prometheus.Counter
+	diskReadTime    prometheus.Histogram
+	segments        prometheus.Gauge
 }
 
 // StreamMetrics records gRPC stream and unary call instrumentation.
@@ -66,11 +70,11 @@ type K8sMetrics struct {
 
 // CollectorMetrics records data collection instrumentation.
 type CollectorMetrics struct {
-	logsCollectedTotal  *prometheus.CounterVec
-	logsBytesTotal      *prometheus.CounterVec
-	stateEventsTotal    *prometheus.CounterVec
-	metricScrapesTotal  *prometheus.CounterVec
-	activeStreams       *prometheus.GaugeVec
+	logsCollectedTotal *prometheus.CounterVec
+	logsBytesTotal     *prometheus.CounterVec
+	stateEventsTotal   *prometheus.CounterVec
+	metricScrapesTotal *prometheus.CounterVec
+	activeStreams      *prometheus.GaugeVec
 }
 
 // HealthMetrics records component health status.
@@ -133,6 +137,16 @@ func New(reg prometheus.Registerer, version, clusterID, agentID string) (*Metric
 				Help:      "Total number of items dropped due to capacity limits.",
 			},
 		),
+		unrecordedTotal: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: metricNamespace,
+				Subsystem: "queue",
+				Name:      "delivered_unrecorded_total",
+				Help: "Total number of items the gateway accepted but whose ack " +
+					"could not be persisted before redelivery gave up. Not data loss: " +
+					"the data arrived, only the agent's record of it did not.",
+			},
+		),
 		ackTotal: prometheus.NewCounter(
 			prometheus.CounterOpts{
 				Namespace: metricNamespace,
@@ -155,6 +169,31 @@ func New(reg prometheus.Registerer, version, clusterID, agentID string) (*Metric
 				Subsystem: "queue",
 				Name:      "disk_bytes",
 				Help:      "Total bytes used by on-disk spill segments.",
+			},
+		),
+		diskReadErrors: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: metricNamespace,
+				Subsystem: "queue",
+				Name:      "disk_read_errors_total",
+				Help:      "Total number of spilled items that could not be read back from the WAL and were dropped.",
+			},
+		),
+		diskReadTime: prometheus.NewHistogram(
+			prometheus.HistogramOpts{
+				Namespace: metricNamespace,
+				Subsystem: "queue",
+				Name:      "disk_read_seconds",
+				Help:      "Time spent reading one spilled item back from the WAL, measured while the queue lock is held.",
+				Buckets:   []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1},
+			},
+		),
+		segments: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricNamespace,
+				Subsystem: "queue",
+				Name:      "segments",
+				Help:      "Number of WAL segment files currently on disk.",
 			},
 		),
 	}
@@ -341,9 +380,13 @@ func New(reg prometheus.Registerer, version, clusterID, agentID string) (*Metric
 		queue.enqueuedTotal,
 		queue.dequeuedTotal,
 		queue.droppedTotal,
+		queue.unrecordedTotal,
 		queue.ackTotal,
 		queue.nackTotal,
 		queue.diskBytes,
+		queue.diskReadErrors,
+		queue.diskReadTime,
+		queue.segments,
 		stream.streamActive,
 		stream.streamMessagesSent,
 		stream.streamMessagesReceived,
@@ -442,6 +485,14 @@ func (q *QueueMetrics) IncDequeued() {
 	q.dequeuedTotal.Inc()
 }
 
+// IncDeliveredUnrecorded increments the delivered-but-unrecorded counter.
+func (q *QueueMetrics) IncDeliveredUnrecorded() {
+	if q == nil || q.unrecordedTotal == nil {
+		return
+	}
+	q.unrecordedTotal.Inc()
+}
+
 // IncDropped increments the dropped counter.
 func (q *QueueMetrics) IncDropped() {
 	if q == nil {
@@ -488,6 +539,30 @@ func (q *QueueMetrics) AddDiskBytes(delta float64) {
 		return
 	}
 	q.diskBytes.Add(delta)
+}
+
+// IncDiskReadError records one spilled item that could not be read back.
+func (q *QueueMetrics) IncDiskReadError() {
+	if q == nil {
+		return
+	}
+	q.diskReadErrors.Inc()
+}
+
+// ObserveDiskRead records how long one WAL read took, in seconds.
+func (q *QueueMetrics) ObserveDiskRead(seconds float64) {
+	if q == nil {
+		return
+	}
+	q.diskReadTime.Observe(seconds)
+}
+
+// SetSegments records how many WAL segment files exist on disk.
+func (q *QueueMetrics) SetSegments(count float64) {
+	if q == nil {
+		return
+	}
+	q.segments.Set(count)
 }
 
 // SetStreamActive sets whether a bidirectional stream is active.
