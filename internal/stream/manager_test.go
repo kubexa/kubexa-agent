@@ -865,6 +865,7 @@ func (f *fakeConnectClient) sendCount() int {
 type inflightObserver interface {
 	InflightLen() int
 	SegmentClaims() int64
+	RefUnderflows() int64
 }
 
 func queueObserver(t *testing.T, q queue.Queue) inflightObserver {
@@ -1025,6 +1026,11 @@ func TestDrainFailedSendKeepsSegmentClaimsExact(t *testing.T) {
 		t.Errorf("SegmentClaims() = %d, want %d -- one claim per requeued reference, none stranded, none released twice",
 			got, batchSize-failAfter)
 	}
+	// SegmentClaims cannot see a double release on its own: the release clamps
+	// at zero, so releasing twice reads the same as releasing once.
+	if got := observer.RefUnderflows(); got != 0 {
+		t.Errorf("RefUnderflows() = %d, want 0 -- a claim was released more than once", got)
+	}
 }
 
 // ackFailingQueue is a real queue whose Ack always fails, standing in for the
@@ -1034,11 +1040,12 @@ func TestDrainFailedSendKeepsSegmentClaimsExact(t *testing.T) {
 // caller's job to make sure something still settles the batch.
 type ackFailingQueue struct {
 	queue.Queue
-	ackCalls  atomic.Int32
-	nackCalls atomic.Int32
-	nackIDs   atomic.Int32
-	dropCalls atomic.Int32
-	dropIDs   atomic.Int32
+	ackCalls       atomic.Int32
+	nackCalls      atomic.Int32
+	nackIDs        atomic.Int32
+	deliveredNacks atomic.Int32
+	dropCalls      atomic.Int32
+	dropIDs        atomic.Int32
 }
 
 func (a *ackFailingQueue) Ack(ids []string) error {
@@ -1050,6 +1057,13 @@ func (a *ackFailingQueue) Nack(ids []string) error {
 	a.nackCalls.Add(1)
 	a.nackIDs.Add(int32(len(ids)))
 	return a.Queue.Nack(ids)
+}
+
+func (a *ackFailingQueue) NackDelivered(ids []string) error {
+	a.nackCalls.Add(1)
+	a.nackIDs.Add(int32(len(ids)))
+	a.deliveredNacks.Add(int32(len(ids)))
+	return a.Queue.NackDelivered(ids)
 }
 
 func (a *ackFailingQueue) Drop(ids []string) error {
@@ -1104,6 +1118,12 @@ func TestDrainSettlesABatchWhoseAckCannotBePersisted(t *testing.T) {
 	if got := stream.sendCount(); got != batchSize {
 		t.Errorf("sent %d messages, want %d -- the batch was redelivered inside one drain", got, batchSize)
 	}
+	// These items reached the gateway, so they go back as delivered: if one is
+	// later retired at the attempt cap it is not data loss and must not be
+	// counted as a drop.
+	if got := q.deliveredNacks.Load(); got != batchSize {
+		t.Errorf("%d ids were requeued as delivered, want %d", got, batchSize)
+	}
 }
 
 // The failed-ack fallback over a spill-backed queue: the requeued references
@@ -1137,6 +1157,9 @@ func TestDrainFailedAckKeepsSegmentClaimsExact(t *testing.T) {
 	if got := observer.SegmentClaims(); got != batchSize {
 		t.Errorf("SegmentClaims() = %d, want %d -- an ack that was never persisted must not release a claim",
 			got, batchSize)
+	}
+	if got := observer.RefUnderflows(); got != 0 {
+		t.Errorf("RefUnderflows() = %d, want 0 -- a claim was released more than once", got)
 	}
 }
 
@@ -1181,5 +1204,55 @@ func TestDrainFallbackDoesNotRequeueUndeliverableItems(t *testing.T) {
 	}
 	if got := q.DroppedTotal(); got != 1 {
 		t.Errorf("DroppedTotal() = %d, want 1", got)
+	}
+}
+
+// The gap between attempts has to be a real backoff, not a dial round trip.
+// abortSession ends the session with no error at all, which sends Run down its
+// err == nil path: no handleTransientFailure, no sleep, reconnect immediately.
+// Under a permanently failing ack that measured ~35 sessions a second -- 36
+// handshakes a second at the gateway, each one interrupting sendLoop and the
+// heartbeat. The drain must end the session WITH a reason so Run backs off.
+func TestDrainAckFailureEndsTheSessionWithAReason(t *testing.T) {
+	t.Parallel()
+
+	const batchSize = 3
+
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = batchSize
+	q := &ackFailingQueue{Queue: newTestQueue(t)}
+	sm := newDrainTestManager(t, cfg, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A session for the drain to end, exactly as startSessionWorkers would.
+	sessionCtx, sessionCancel := context.WithCancel(ctx)
+	defer sessionCancel()
+	sm.sessionMu.Lock()
+	sm.sessionCancel = sessionCancel
+	sm.sessionMu.Unlock()
+
+	enqueueTestLogs(ctx, t, q, batchSize)
+	runDrain(sessionCtx, t, sm, &fakeConnectClient{failAfter: batchSize})
+
+	sm.sessionMu.RLock()
+	sessionErr := sm.sessionErr
+	sm.sessionMu.RUnlock()
+
+	if sessionErr == nil {
+		t.Fatal("session ended with no error: Run takes its nil path and reconnects without any backoff")
+	}
+	if !errors.Is(sessionErr, errDrainStalled) {
+		t.Errorf("session error = %v, want it to wrap errDrainStalled", sessionErr)
+	}
+	// classifyGRPCError must not read this as permanent, or Run would shut the
+	// agent down instead of retrying.
+	permanent, _ := classifyGRPCError(sessionErr)
+	if permanent {
+		t.Error("the drain stall classifies as permanent: Run would shut the agent down")
+	}
+	if sessionCtx.Err() == nil {
+		t.Error("the session context is still live: the workers were never released")
 	}
 }

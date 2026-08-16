@@ -89,13 +89,14 @@ func (m *mockQueue) Enqueue(context.Context, queue.Item) error { return nil }
 func (m *mockQueue) DequeueBatch(context.Context, int) ([]queue.Item, error) {
 	return nil, nil
 }
-func (m *mockQueue) Ack([]string) error  { return nil }
-func (m *mockQueue) Nack([]string) error { return nil }
-func (m *mockQueue) Drop([]string) error { return nil }
-func (m *mockQueue) Depth() int64        { return m.depth }
-func (m *mockQueue) DroppedTotal() int64 { return m.dropped }
-func (m *mockQueue) Close() error          { return nil }
-func (m *mockQueue) Capacity() int64       { return m.capacity }
+func (m *mockQueue) Ack([]string) error           { return nil }
+func (m *mockQueue) Nack([]string) error          { return nil }
+func (m *mockQueue) NackDelivered([]string) error { return nil }
+func (m *mockQueue) Drop([]string) error          { return nil }
+func (m *mockQueue) Depth() int64                 { return m.depth }
+func (m *mockQueue) DroppedTotal() int64          { return m.dropped }
+func (m *mockQueue) Close() error                 { return nil }
+func (m *mockQueue) Capacity() int64              { return m.capacity }
 
 var _ queue.CapacityAware = (*mockQueue)(nil)
 

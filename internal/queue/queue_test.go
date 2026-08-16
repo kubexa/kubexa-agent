@@ -1968,8 +1968,18 @@ func TestNackRetiresAnItemPastTheAttemptCap(t *testing.T) {
 	if got := bq.SegmentClaims(); got != 0 {
 		t.Errorf("SegmentClaims() = %d, want 0 -- a retired item must hand its claim back", got)
 	}
+	// SegmentClaims reading 0 does not prove the claim was released once:
+	// releaseDiskRefUnlocked clamps at zero, so a double release reads exactly
+	// the same. This counter is the only evidence, and a double release is what
+	// lets compaction unlink a segment whose records are still live.
+	if got := bq.RefUnderflows(); got != 0 {
+		t.Errorf("RefUnderflows() = %d, want 0 -- the claim was released more than once", got)
+	}
 	if got := bq.DroppedTotal(); got != 1 {
 		t.Errorf("DroppedTotal() = %d, want exactly 1", got)
+	}
+	if got := bq.DeliveredUnrecordedTotal(); got != 0 {
+		t.Errorf("DeliveredUnrecordedTotal() = %d, want 0 -- this item never reached the gateway", got)
 	}
 }
 
@@ -2028,5 +2038,66 @@ func TestNackSettlesEveryIDWhenARequeueFails(t *testing.T) {
 	}
 	if got := bq.DroppedTotal(); got != 1 {
 		t.Errorf("DroppedTotal() = %d, want 1 -- the id that could not be requeued must be counted, not abandoned", got)
+	}
+}
+
+// An item retired at the cap after a SUCCESSFUL send is not data loss: the
+// gateway has it, and only the agent's record of the delivery failed. Counting
+// it in dropped_total tells an operator they lost telemetry they did not lose,
+// in the one metric they would use to decide exactly that.
+func TestRetirementAfterDeliveryIsNotCountedAsLoss(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.BufferConfig{
+		MaxMemoryBytes: 1,
+		SpillDir:       t.TempDir(),
+		MaxDiskBytes:   64 << 20,
+		BatchSize:      10,
+	}
+	bq := newTestBufferedQueue(t, cfg, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := bq.Enqueue(ctx, item("delivered", []byte("payload"))); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+
+	const maxRounds = 50
+	rounds := 0
+	for ; rounds < maxRounds; rounds++ {
+		batch, err := bq.DequeueBatch(ctx, 1)
+		if err != nil {
+			t.Fatalf("DequeueBatch() error = %v", err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		// Every round: the send succeeded, the ack could not be written.
+		if err := bq.NackDelivered([]string{batch[0].ID}); err != nil {
+			t.Fatalf("NackDelivered() error = %v", err)
+		}
+		if bq.Depth() == 0 {
+			rounds++
+			break
+		}
+	}
+	if rounds >= maxRounds {
+		t.Fatalf("still redelivering after %d attempts", rounds)
+	}
+
+	if got := bq.DroppedTotal(); got != 0 {
+		t.Errorf("DroppedTotal() = %d, want 0 -- the gateway has this data", got)
+	}
+	if got := bq.DeliveredUnrecordedTotal(); got != 1 {
+		t.Errorf("DeliveredUnrecordedTotal() = %d, want 1", got)
+	}
+	if got := bq.InflightLen(); got != 0 {
+		t.Errorf("InflightLen() = %d, want 0", got)
+	}
+	if got := bq.SegmentClaims(); got != 0 {
+		t.Errorf("SegmentClaims() = %d, want 0", got)
+	}
+	if got := bq.RefUnderflows(); got != 0 {
+		t.Errorf("RefUnderflows() = %d, want 0 -- a claim was released more than once", got)
 	}
 }
