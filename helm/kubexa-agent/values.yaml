@@ -262,6 +262,26 @@ buffer:
 observability:
   metricsAddr: ":9090"
   healthAddr: ":8080"
+  # Go profiling (/debug/pprof). EMPTY MEANS OFF, and off is the right default:
+  # a heap dump from this agent contains unredacted Secret values held in the
+  # state watcher's informer cache and raw log lines from every collected pod.
+  #
+  # Turn it on only while investigating, and only on loopback:
+  #
+  #   --set observability.pprofAddr=127.0.0.1:6060
+  #
+  # Loopback keeps it off the cluster network entirely while `kubectl
+  # port-forward` still reaches it, because port-forward attaches to the pod's
+  # own network namespace:
+  #
+  #   kubectl -n <ns> port-forward pod/<agent-pod> 6060:6060
+  #   go tool pprof -http=: http://127.0.0.1:6060/debug/pprof/heap
+  #
+  # Binding anything else (":6060", "0.0.0.0:6060") publishes those dumps to
+  # every pod in the cluster. This port is deliberately absent from the Service
+  # and from the container's declared ports; both would advertise an exposure
+  # that is not intended.
+  pprofAddr: ""
 
 log:
   level: info
