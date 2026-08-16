@@ -337,6 +337,93 @@ func (ds *diskStore) closeReadHandle(segment int) {
 	}
 }
 
+// activeSegment returns the segment currently being appended to.
+//
+// segmentNum is guarded by ds.mu and the writer moves it on rotation, so the
+// queue must not read the field directly — that is a data race the race
+// detector will catch under `go test -race`.
+func (ds *diskStore) activeSegment() int {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	return ds.segmentNum
+}
+
+// removeSegment deletes one WAL segment file and reclaims its bytes. The caller
+// is responsible for having established that nothing references it.
+//
+// The active write segment is refused outright. A segment carrying no live
+// references is not by itself evidence that it is spent: the segment being
+// appended to right now normally has no references at all in the moment between
+// a rotation and the next spill, and unlinking it would delete the file the
+// writer still holds open — on Linux the writes would keep succeeding into an
+// unreachable inode and vanish at process exit, with no error anywhere.
+//
+// segmentNum only ever increases, so a number below it at check time can never
+// become the active segment afterwards and the check does not need to stay held
+// across the unlink. That matters because ds.mu and ds.readMu are never nested:
+// the active-segment check and the byte accounting take ds.mu, closeReadHandle
+// takes ds.readMu, and each is a separate critical section.
+func (ds *diskStore) removeSegment(num int) error {
+	ds.mu.Lock()
+	if ds.closed {
+		ds.mu.Unlock()
+		return errors.New("disk store closed")
+	}
+	if num >= ds.segmentNum {
+		active := ds.segmentNum
+		ds.mu.Unlock()
+		return fmt.Errorf("refusing to remove segment %d: the active write segment is %d", num, active)
+	}
+	ds.mu.Unlock()
+
+	// Before the unlink, so no reader is left holding a handle to a deleted
+	// inode and no later reader can reopen the path in between.
+	ds.closeReadHandle(num)
+
+	path := filepath.Join(ds.dir, segmentFilename(num))
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat segment %q: %w", path, err)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("remove segment %q: %w", path, err)
+	}
+
+	ds.mu.Lock()
+	ds.totalBytes -= info.Size()
+	if ds.totalBytes < 0 {
+		ds.totalBytes = 0
+	}
+	total := ds.totalBytes
+	ds.mu.Unlock()
+
+	if ds.metrics != nil {
+		ds.metrics.SetDiskBytes(float64(total))
+	}
+	return nil
+}
+
+// segmentCount returns how many WAL segment files exist on disk.
+func (ds *diskStore) segmentCount() int {
+	entries, err := os.ReadDir(ds.dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if _, ok := parseSegmentName(e.Name()); ok {
+			n++
+		}
+	}
+	return n
+}
+
 // recover replays all segments and returns references to items not yet
 // acknowledged, ordered by enqueue time. Payloads stay on disk.
 func (ds *diskStore) recover() ([]diskRef, error) {
