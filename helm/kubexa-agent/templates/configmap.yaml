@@ -86,6 +86,7 @@ data:
     observability:
       metrics_addr: {{ .Values.observability.metricsAddr | quote }}
       health_addr: {{ .Values.observability.healthAddr | quote }}
+      pprof_addr: {{ .Values.observability.pprofAddr | default "" | quote }}
 
     log:
       level: {{ .Values.log.level | quote }}
