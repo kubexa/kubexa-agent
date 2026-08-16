@@ -1,7 +1,10 @@
 package queue
 
 import (
+	"errors"
+	"io/fs"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,8 +54,6 @@ func TestAppendItemReturnsLocation(t *testing.T) {
 	}
 }
 
-// A record that forces rotation must report the NEW segment and an offset
-// inside it. Reading ds.segmentNum before rotation is the trap this guards.
 // A record that forces rotation must report the NEW segment and an offset
 // inside it. Reading ds.segmentNum before rotation is the trap this guards.
 func TestAppendItemAcrossRotation(t *testing.T) {
@@ -152,14 +153,82 @@ func TestReadItemRejectsAnAckRecord(t *testing.T) {
 	if err := ds.appendAck("some-id"); err != nil {
 		t.Fatalf("appendAck() error = %v", err)
 	}
-	if _, err := ds.readItem(0, int64(len(walMagic)+1)); err == nil {
-		t.Fatal("readItem() on an ack record returned nil error, want failure")
+	_, err := ds.readItem(0, int64(len(walMagic)+1))
+	if !errors.Is(err, errNotAnItemRecord) {
+		t.Fatalf("readItem() on an ack record: got error %v, want errNotAnItemRecord", err)
 	}
 }
 
 func TestReadItemMissingSegment(t *testing.T) {
 	ds := newTestDiskStore(t, 64<<20)
-	if _, err := ds.readItem(999, 5); err == nil {
-		t.Fatal("readItem() on a missing segment returned nil error, want failure")
+	_, err := ds.readItem(999, 5)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("readItem() on a missing segment: got error %v, want fs.ErrNotExist", err)
 	}
+}
+
+func TestReadItemConcurrentWithWrites(t *testing.T) {
+	ds := newTestDiskStore(t, 512<<20)
+
+	// Pre-write some items and capture their locations.
+	type location struct {
+		seg     int
+		off     int64
+		id      string
+		payload []byte
+	}
+	var locations []location
+	for i := 0; i < 10; i++ {
+		it := testItem("pre-"+string(rune('a'+i)), 1024)
+		seg, off, err := ds.appendItem(it)
+		if err != nil {
+			t.Fatalf("appendItem(%d) error = %v", i, err)
+		}
+		locations = append(locations, location{
+			seg:     seg,
+			off:     off,
+			id:      it.ID,
+			payload: it.Payload,
+		})
+	}
+
+	var wg sync.WaitGroup
+
+	// Goroutine 1: Keep appending new items.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			it := testItem("append-"+string(rune('a'+i)), 2048)
+			if _, _, err := ds.appendItem(it); err != nil {
+				t.Errorf("appendItem(%d) error = %v", i, err)
+			}
+		}
+	}()
+
+	// Goroutines 2-5: Concurrently read the pre-written items.
+	for reader := 0; reader < 4; reader++ {
+		wg.Add(1)
+		go func(r int) {
+			defer wg.Done()
+			// Each reader checks all pre-written locations multiple times.
+			for attempt := 0; attempt < 5; attempt++ {
+				for _, loc := range locations {
+					got, err := ds.readItem(loc.seg, loc.off)
+					if err != nil {
+						t.Errorf("reader %d attempt %d: readItem(%d, %d) error = %v", r, attempt, loc.seg, loc.off, err)
+						continue
+					}
+					if got.ID != loc.id {
+						t.Errorf("reader %d attempt %d: ID = %q, want %q", r, attempt, got.ID, loc.id)
+					}
+					if string(got.Payload) != string(loc.payload) {
+						t.Errorf("reader %d attempt %d: payload mismatch", r, attempt)
+					}
+				}
+			}
+		}(reader)
+	}
+
+	wg.Wait()
 }

@@ -53,6 +53,8 @@ type diskStore struct {
 	// with the append-only writer or with each other. At 32 MiB segments and
 	// a 512 MiB cap there are at most 16 of these, so no eviction policy is
 	// needed; compaction and close() are what remove them.
+	readMu      sync.Mutex
+	readClosed  bool
 	readHandles map[int]*os.File
 }
 
@@ -303,10 +305,10 @@ func (ds *diskStore) readItem(segment int, offset int64) (Item, error) {
 }
 
 func (ds *diskStore) readHandle(segment int) (*os.File, error) {
-	ds.mu.Lock()
-	defer ds.mu.Unlock()
+	ds.readMu.Lock()
+	defer ds.readMu.Unlock()
 
-	if ds.closed {
+	if ds.readClosed {
 		return nil, errors.New("disk store closed")
 	}
 	if f, ok := ds.readHandles[segment]; ok {
@@ -327,6 +329,8 @@ func (ds *diskStore) readHandle(segment int) (*os.File, error) {
 // closeReadHandle releases the read handle for one segment, if open. Used by
 // compaction before deleting the file.
 func (ds *diskStore) closeReadHandle(segment int) {
+	ds.readMu.Lock()
+	defer ds.readMu.Unlock()
 	if f, ok := ds.readHandles[segment]; ok {
 		_ = f.Close()
 		delete(ds.readHandles, segment)
@@ -524,13 +528,17 @@ func decodeAckRecord(body []byte) (string, error) {
 }
 
 func (ds *diskStore) close() error {
-	ds.mu.Lock()
-	defer ds.mu.Unlock()
-	ds.closed = true
+	ds.readMu.Lock()
+	ds.readClosed = true
 	for segment, f := range ds.readHandles {
 		_ = f.Close()
 		delete(ds.readHandles, segment)
 	}
+	ds.readMu.Unlock()
+
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	ds.closed = true
 	if ds.segment != nil {
 		err := ds.segment.Close()
 		ds.segment = nil
