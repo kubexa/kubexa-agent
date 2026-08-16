@@ -73,6 +73,17 @@ type CapacityAware interface {
 	Capacity() int64
 }
 
+// refReadResult says how a spilled payload read ended, so the dequeue path can
+// tell a corrupt record (drop it, the queue must not wedge) from a closed store
+// (keep it, this process is simply done).
+type refReadResult int
+
+const (
+	refReadOK refReadResult = iota
+	refReadDropped
+	refReadStoreClosed
+)
+
 // inflightEntry holds one dequeued item awaiting ack or nack.
 //
 // For a disk-sourced item, ref is set and item is left zero: the payload
@@ -197,7 +208,16 @@ func New(cfg *config.BufferConfig, log *logger.Logger, m *agentmetrics.QueueMetr
 		// Erring low is free -- a few no-op iterations over numbers whose files
 		// are gone -- so the minimum is taken over all three sources.
 		q.lowestSegment = q.disk.activeSegment()
-		if oldest, ok := q.disk.lowestSegmentOnDisk(); ok && oldest < q.lowestSegment {
+		oldest, ok, err := q.disk.lowestSegmentOnDisk()
+		if err != nil {
+			// Refusing to start is the same answer recover() gives to the same
+			// failure two statements above. Carrying on would seed the cursor
+			// from the active segment alone -- the exact bug this seeding
+			// exists to fix -- and disable compaction silently.
+			_ = ds.close()
+			return nil, fmt.Errorf("scan spill segments: %w", err)
+		}
+		if ok && oldest < q.lowestSegment {
 			q.lowestSegment = oldest
 		}
 		for _, ref := range recovered {
@@ -680,7 +700,12 @@ func (q *bufferedQueue) DequeueBatch(ctx context.Context, n int) ([]Item, error)
 		}
 
 		q.mu.Lock()
-		if q.closed && q.memCount == 0 && q.diskCount == 0 && len(q.memCh) == 0 {
+		// Pending disk refs no longer keep a closed queue open once the store
+		// itself is closed: they cannot be read in this process, and without
+		// this the call would fall through to the pull loop, retrieve nothing,
+		// and park in waitForCapacity until its context is canceled.
+		if q.closed && q.memCount == 0 && len(q.memCh) == 0 &&
+			(q.diskCount == 0 || (q.disk != nil && q.disk.isClosed())) {
 			q.mu.Unlock()
 			return nil, nil
 		}
@@ -764,9 +789,18 @@ func (q *bufferedQueue) dequeueOneUnlocked(ctx context.Context) (Item, *diskRef,
 		q.diskCount--
 		q.updateDepthMetricsLocked()
 
-		item, ok := q.readRefUnlocked(ref)
-		if !ok {
+		item, res := q.readRefUnlocked(ref)
+		switch res {
+		case refReadDropped:
 			continue
+		case refReadStoreClosed:
+			// Put it back rather than swallow it: nothing is wrong with the
+			// record, and its claim was never released. The depth this
+			// restores is the truth -- those items are pending on disk.
+			q.diskRefs = append([]diskRef{ref}, q.diskRefs...)
+			q.diskCount++
+			q.updateDepthMetricsLocked()
+			return Item{}, nil, false, nil
 		}
 		item.Attempts = ref.Attempts
 		return item, &ref, true, nil
@@ -787,10 +821,19 @@ func (q *bufferedQueue) dequeueOneUnlocked(ctx context.Context) (Item, *diskRef,
 // readRefUnlocked fetches a spilled payload. An unreadable record is counted
 // as dropped and skipped: a corrupt byte range must not wedge the queue
 // behind an item that can never be delivered.
-func (q *bufferedQueue) readRefUnlocked(ref diskRef) (Item, bool) {
+//
+// A closed store is not an unreadable record. It means this process is finished
+// with the WAL, and every ref still held is durable and unacked -- the next
+// start replays it. Counting those as drops would make an ordinary shutdown
+// report data loss in dropped_total and disk_read_errors, and log one "drop
+// unreadable spilled item" line per pending item on the way out.
+func (q *bufferedQueue) readRefUnlocked(ref diskRef) (Item, refReadResult) {
 	start := time.Now()
 	item, err := q.disk.readItem(ref.Segment, ref.Offset)
 	q.metrics.ObserveDiskRead(time.Since(start).Seconds())
+	if errors.Is(err, errStoreClosed) {
+		return Item{}, refReadStoreClosed
+	}
 	if err != nil {
 		q.log.Error("drop unreadable spilled item",
 			logger.F("item_id", ref.ID),
@@ -802,9 +845,9 @@ func (q *bufferedQueue) readRefUnlocked(ref diskRef) (Item, bool) {
 		q.releaseDiskRefUnlocked(ref.Segment)
 		q.settleDroppedRefUnlocked(ref)
 		q.dropItemUnlocked(Item{ID: ref.ID})
-		return Item{}, false
+		return Item{}, refReadDropped
 	}
-	return item, true
+	return item, refReadOK
 }
 
 // Ack permanently removes delivered items.
