@@ -92,6 +92,7 @@ func (m *mockQueue) DequeueBatch(context.Context, int) ([]queue.Item, error) {
 func (m *mockQueue) Ack([]string) error           { return nil }
 func (m *mockQueue) Nack([]string) error          { return nil }
 func (m *mockQueue) NackDelivered([]string) error { return nil }
+func (m *mockQueue) NackUntried([]string) error   { return nil }
 func (m *mockQueue) Drop([]string) error          { return nil }
 func (m *mockQueue) Depth() int64                 { return m.depth }
 func (m *mockQueue) DroppedTotal() int64          { return m.dropped }
