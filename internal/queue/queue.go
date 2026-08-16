@@ -102,6 +102,9 @@ type bufferedQueue struct {
 	// item still lives in inflight and still pins its segment.
 	refsPerSegment map[int]int64
 	lowestSegment  int
+	// refUnderflows counts releases of a segment claim that was never held.
+	// Guarded by mu, like refsPerSegment itself.
+	refUnderflows int64
 
 	inflight map[string]*inflightEntry
 
@@ -256,7 +259,7 @@ func (q *bufferedQueue) Enqueue(ctx context.Context, item Item) error {
 				q.mu.Unlock()
 				return nil
 			}
-			if err := q.spillEnqueueUnlocked(item); err != nil {
+			if err := q.spillEnqueueUnlocked(item, true); err != nil {
 				if errors.Is(err, ErrDiskFull) {
 					q.waitForCapacity(ctx)
 					q.mu.Unlock()
@@ -366,7 +369,12 @@ func (q *bufferedQueue) evictOldestMemoryUnlocked() error {
 	}
 }
 
-func (q *bufferedQueue) spillEnqueueUnlocked(item Item) error {
+// spillEnqueueUnlocked writes item to the WAL and keeps only a reference to it.
+//
+// countEnqueue mirrors putMemoryUnlocked: a genuine arrival counts, a nacked
+// item coming back does not. A retry is not an arrival, and counting it makes
+// enqueued_total drift upward on every failed send.
+func (q *bufferedQueue) spillEnqueueUnlocked(item Item, countEnqueue bool) error {
 	segment, offset, err := q.disk.appendItem(item)
 	if err != nil {
 		return err
@@ -378,7 +386,9 @@ func (q *bufferedQueue) spillEnqueueUnlocked(item Item) error {
 		EnqueuedAt: item.EnqueuedAt,
 		Attempts:   item.Attempts,
 	})
-	q.metrics.IncEnqueued()
+	if countEnqueue {
+		q.metrics.IncEnqueued()
+	}
 	q.updateDepthMetricsLocked()
 	return nil
 }
@@ -393,11 +403,31 @@ func (q *bufferedQueue) addDiskRefUnlocked(ref diskRef) {
 // releaseDiskRefUnlocked drops a segment's claim on one reference. Called
 // only when the item is permanently gone: acked or dropped. Dequeue must not
 // call this — the item is still live in inflight.
+//
+// A release of a claim that was never held means some path decremented twice,
+// which is exactly the accounting error that lets compaction delete a segment
+// whose records are still needed. Decrementing blindly would park that at -1
+// and then erase the evidence when the key is deleted, so it is counted,
+// logged, and clamped at zero instead of being allowed to propagate.
 func (q *bufferedQueue) releaseDiskRefUnlocked(segment int) {
-	q.refsPerSegment[segment]--
-	if q.refsPerSegment[segment] <= 0 {
+	count, held := q.refsPerSegment[segment]
+	if !held || count <= 0 {
+		q.refUnderflows++
+		q.log.Error("disk ref release underflow",
+			logger.F("segment", segment),
+			logger.F("count", count),
+			logger.F("clamped_to", 0),
+			logger.F("underflows", q.refUnderflows),
+		)
 		delete(q.refsPerSegment, segment)
+		return
 	}
+	count--
+	if count == 0 {
+		delete(q.refsPerSegment, segment)
+		return
+	}
+	q.refsPerSegment[segment] = count
 }
 
 func (q *bufferedQueue) dropOldestUnlocked() {
@@ -412,8 +442,31 @@ func (q *bufferedQueue) dropOldestUnlocked() {
 			q.diskRefs = q.diskRefs[1:]
 			q.diskCount--
 			q.releaseDiskRefUnlocked(ref.Segment)
+			q.settleDroppedRefUnlocked(ref)
 			q.dropItemUnlocked(Item{ID: ref.ID})
 		}
+	}
+}
+
+// settleDroppedRefUnlocked records an ack for an item the queue is dropping,
+// so recovery treats it as finished.
+//
+// Without this the WAL record survives the drop: the next process start
+// replays it, the "dropped" item comes back, and dropped_total describes
+// something that did not happen. The ack is best effort — if the WAL cannot
+// take it the item does resurrect, which is the pre-existing behaviour, but it
+// is no longer silent.
+func (q *bufferedQueue) settleDroppedRefUnlocked(ref diskRef) {
+	if q.disk == nil {
+		return
+	}
+	if err := q.disk.appendAck(ref.ID); err != nil {
+		q.log.Error("could not record ack for dropped spilled item; it will "+
+			"return after a restart",
+			logger.F("item_id", ref.ID),
+			logger.F("segment", ref.Segment),
+			logger.F("error", err.Error()),
+		)
 	}
 }
 
@@ -455,6 +508,15 @@ func (q *bufferedQueue) DequeueBatch(ctx context.Context, n int) ([]Item, error)
 		for len(pulledItems) < n {
 			item, ref, ok, err := q.dequeueOneUnlocked(ctx)
 			if err != nil {
+				// Anything already pulled has left diskRefs and the memory
+				// channel and is not yet in inflight, so returning the error
+				// here would lose it: a memory item outright, a disk item
+				// until the next process restart replays the WAL. Stop
+				// pulling, register what we have, and hand it back with no
+				// error — the caller sees the cancellation on its next call.
+				if len(pulledItems) > 0 {
+					break
+				}
 				q.mu.Unlock()
 				return nil, err
 			}
@@ -545,6 +607,7 @@ func (q *bufferedQueue) readRefUnlocked(ref diskRef) (Item, bool) {
 		)
 		q.metrics.IncDiskReadError()
 		q.releaseDiskRefUnlocked(ref.Segment)
+		q.settleDroppedRefUnlocked(ref)
 		q.dropItemUnlocked(Item{ID: ref.ID})
 		return Item{}, false
 	}
@@ -625,7 +688,9 @@ func (q *bufferedQueue) Nack(ids []string) error {
 			continue
 		}
 		if q.disk != nil {
-			if err := q.spillEnqueueUnlocked(item); err != nil {
+			// countEnqueue=false, matching the memory branch above: this item
+			// already counted as an enqueue when it first arrived.
+			if err := q.spillEnqueueUnlocked(item, false); err != nil {
 				return err
 			}
 			continue
