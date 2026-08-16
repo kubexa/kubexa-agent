@@ -198,6 +198,14 @@ type BufferConfig struct {
 type ObservabilityConfig struct {
 	MetricsAddr string `yaml:"metrics_addr"`
 	HealthAddr  string `yaml:"health_addr"`
+	// PprofAddr enables Go profiling on its own listener. Empty means OFF, and
+	// that is the default: this agent's heap holds unredacted Secret values from
+	// the state watcher's informer cache and raw log lines from every collected
+	// pod, so a profile endpoint is an exfiltration path for the data the agent
+	// is trusted with. Set it to a loopback address ("127.0.0.1:6060") and it
+	// stays unreachable from the cluster network while `kubectl port-forward`,
+	// which attaches to the pod's own network namespace, still reaches it.
+	PprofAddr string `yaml:"pprof_addr"`
 }
 
 // LogConfig configures the agent process logger.

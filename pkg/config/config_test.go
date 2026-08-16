@@ -85,6 +85,13 @@ func TestDefault(t *testing.T) {
 	if cfg.Observability.MetricsAddr != ":9090" || cfg.Observability.HealthAddr != ":8080" {
 		t.Errorf("observability = %+v, want :9090 and :8080", cfg.Observability)
 	}
+	// Profiling is off unless an operator asks for it. A heap dump from this
+	// agent carries unredacted Secret values and raw customer log lines, so the
+	// default has to be the safe one -- doing nothing must not expose it.
+	if cfg.Observability.PprofAddr != "" {
+		t.Errorf("observability.pprof_addr = %q, want empty (profiling off by default)",
+			cfg.Observability.PprofAddr)
+	}
 	if cfg.Log.Level != "info" || cfg.Log.Format != "json" {
 		t.Errorf("log = %+v, want level info and format json", cfg.Log)
 	}
@@ -123,6 +130,7 @@ buffer:
   flush_interval: 2s
 observability:
   metrics_addr: ":9100"
+  pprof_addr: "127.0.0.1:6060"
 log:
   level: debug
   format: console
@@ -181,6 +189,9 @@ log:
 	}
 	if cfg.Observability.MetricsAddr != ":9100" {
 		t.Errorf("metrics_addr = %q", cfg.Observability.MetricsAddr)
+	}
+	if cfg.Observability.PprofAddr != "127.0.0.1:6060" {
+		t.Errorf("pprof_addr = %q, want 127.0.0.1:6060", cfg.Observability.PprofAddr)
 	}
 	if cfg.Log.Level != "debug" || cfg.Log.Format != "console" {
 		t.Errorf("log = %+v", cfg.Log)
