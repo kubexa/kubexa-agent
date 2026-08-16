@@ -1016,25 +1016,31 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 		if len(items) == 0 {
 			continue
 		}
-		var ackIDs []string
+		// Two disjoint sets, because they are settled differently when the ack
+		// cannot be persisted. sentIDs were delivered and may be redelivered;
+		// terminalIDs were judged undeliverable here -- unparseable, disabled,
+		// too old -- and must never go back on the queue, which is exactly why
+		// they are acked rather than nacked in the normal path.
+		var sentIDs []string
+		var terminalIDs []string
 		var skippedLogs int
 		for idx, item := range items {
 			var msg agentv1.AgentMessage
 			if err := proto.Unmarshal(item.Payload, &msg); err != nil {
 				m.log.Err(err).Warn("skip invalid queued payload", logger.F("id", item.ID))
-				ackIDs = append(ackIDs, item.ID)
+				terminalIDs = append(terminalIDs, item.ID)
 				continue
 			}
 			if !shouldDeliverQueuedMessage(m.cfg, &msg) {
 				skippedLogs++
-				ackIDs = append(ackIDs, item.ID)
+				terminalIDs = append(terminalIDs, item.ID)
 				continue
 			}
 			if reason := ageDropReason(&msg, m.rules.Get(), time.Now()); reason != "" {
 				m.countAgeDrop(reason)
 				// Acked, not nacked: the record is not retryable. It will only
 				// get older, and a nack would replay it forever.
-				ackIDs = append(ackIDs, item.ID)
+				terminalIDs = append(terminalIDs, item.ID)
 				continue
 			}
 			if err := stream.Send(&msg); err != nil {
@@ -1047,23 +1053,39 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				for _, remaining := range items[idx:] {
 					retryIDs = append(retryIDs, remaining.ID)
 				}
-				// Nack before ack so no ID is handled twice: the two sets are
+				// Nack before ack so no ID is handled twice: the three sets are
 				// disjoint, and this ordering keeps them so under any future
 				// edit.
 				m.settleNacks(retryIDs)
-				m.settleAcks(ackIDs)
+				m.settleAcks(sentIDs, terminalIDs)
 				m.log.Err(err).Warn("failed to send buffered message")
 				m.abortSession()
 				return
 			}
-			ackIDs = append(ackIDs, item.ID)
+			sentIDs = append(sentIDs, item.ID)
 		}
 		if skippedLogs > 0 {
 			m.log.Info("discarded buffered log messages (logs collection disabled)",
 				logger.F("count", skippedLogs),
 			)
 		}
-		m.settleAcks(ackIDs)
+		if !m.settleAcks(sentIDs, terminalIDs) {
+			// The acks could not be persisted, so the batch went back on the
+			// queue. Looping would dequeue and re-send the very same items at
+			// full speed -- measured at ~100k re-sends in 200ms, which is
+			// duplicate traffic to the gateway plus an agent log flooding the
+			// same pipeline as its own diagnostics.
+			//
+			// The session is aborted rather than simply returning because this
+			// is a per-session worker: nothing re-enters it, so a bare return
+			// would leave the queue undrained for the life of a session that
+			// might last hours. Aborting hands the gap to the reconnect
+			// backoff, which is the same answer the DequeueBatch failure above
+			// already gives, and the only cadence available here. No sleep is
+			// introduced and no lock is held across the wait.
+			m.abortSession()
+			return
+		}
 	}
 }
 
@@ -1076,57 +1098,100 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 // changed in between has already changed.
 const maxAckAttempts = 2
 
-// settleAcks acks ids and guarantees that none of them is left in the queue's
-// inflight map afterwards.
+// settleAcks acks both id sets and guarantees that none of them is left in the
+// queue's inflight map afterwards. It reports whether the acks were persisted;
+// false means the batch was settled the hard way and the caller must not
+// immediately dequeue again.
 //
 // Ack deliberately KEEPS the inflight entry when the ack could not be
 // persisted: the entry is what justifies holding the WAL segment claim, and
 // releasing it would let an ack that was never written be undone by a restart.
 // That is right at the queue layer, but it makes the entry releasable only by a
-// later Ack or a Nack -- so a caller that discards the error strands the entry,
-// its payload and its segment for the lifetime of the process.
+// later Ack, Nack or Drop -- so a caller that discards the error strands the
+// entry, its payload and its segment for the lifetime of the process.
 //
-// After the bounded retry the batch is nacked back into the queue instead. That
-// can redeliver a message the gateway already received, which is the cost of
-// at-least-once delivery and is what the queue has always promised; the
-// alternative is an entry nothing can ever release.
-func (m *streamManager) settleAcks(ids []string) {
+// After the bounded retry the two sets part ways: sent ids go back on the queue
+// (which can redeliver a message the gateway already received -- the cost of
+// at-least-once delivery, and the promise the queue has always made), while
+// terminal ids are dropped, because requeueing something already judged
+// undeliverable only replays it until it is judged undeliverable again.
+func (m *streamManager) settleAcks(sentIDs, terminalIDs []string) bool {
+	ids := make([]string, 0, len(sentIDs)+len(terminalIDs))
+	ids = append(ids, sentIDs...)
+	ids = append(ids, terminalIDs...)
 	if len(ids) == 0 {
-		return
+		return true
 	}
+
 	var err error
 	for attempt := 0; attempt < maxAckAttempts; attempt++ {
 		// Ack is idempotent over ids it has already retired -- it skips any id
 		// no longer inflight -- so a retry of the whole slice only re-attempts
 		// the tail the failed call stopped at.
-		if err = m.queue.Ack(ids); err == nil {
-			return
+		err = m.queue.Ack(ids)
+		if err == nil {
+			return true
+		}
+		if errors.Is(err, queue.ErrClosed) {
+			// Shutdown, not a fault. Nothing can be settled on a closed queue
+			// -- Nack and Drop refuse it too -- and the WAL replays whatever
+			// is left on the next start. Retrying or warning here only adds
+			// noise to every drain worker on the way out.
+			return false
 		}
 	}
-	m.log.Err(err).Warn("could not persist acks, returning the batch to the queue",
-		logger.F("count", len(ids)),
+
+	m.log.Err(err).Warn("could not persist acks, settling the batch by hand",
+		logger.F("sent", len(sentIDs)),
+		logger.F("terminal", len(terminalIDs)),
 	)
 	if m.streamMetrics != nil {
 		m.streamMetrics.IncStreamError("queue_ack")
 	}
-	m.settleNacks(ids)
+	m.settleNacks(sentIDs)
+	m.settleDrops(terminalIDs)
+	return false
 }
 
-// settleNacks returns ids to the queue, logging the failure that leaves them
-// stranded. Nack removes every id from the inflight map before it does anything
-// that can fail, so an error here means the items were lost or the queue is
-// closed -- not that they are still in flight.
+// settleNacks returns ids to the queue for redelivery.
+//
+// Nack settles every id it is given -- requeued, retired at the attempt cap, or
+// counted as dropped when there is nowhere to put it -- so an error here says
+// some of them were lost, not that they are still in flight. The exception is a
+// closed queue, which refuses the call before touching anything: those ids do
+// stay in the map, and that is fine, because the process is on its way out and
+// the WAL replays them.
 func (m *streamManager) settleNacks(ids []string) {
 	if len(ids) == 0 {
 		return
 	}
-	if err := m.queue.Nack(ids); err != nil {
-		m.log.Err(err).Warn("could not requeue buffered messages",
-			logger.F("count", len(ids)),
-		)
-		if m.streamMetrics != nil {
-			m.streamMetrics.IncStreamError("queue_nack")
-		}
+	err := m.queue.Nack(ids)
+	if err == nil || errors.Is(err, queue.ErrClosed) {
+		return
+	}
+	m.log.Err(err).Warn("could not requeue buffered messages",
+		logger.F("count", len(ids)),
+	)
+	if m.streamMetrics != nil {
+		m.streamMetrics.IncStreamError("queue_nack")
+	}
+}
+
+// settleDrops releases ids that must never be retried. Same closed-queue
+// exemption as settleNacks, for the same reason.
+func (m *streamManager) settleDrops(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	err := m.queue.Drop(ids)
+	if err == nil || errors.Is(err, queue.ErrClosed) {
+		return
+	}
+	m.log.Err(err).Warn("could not drop undeliverable buffered messages",
+		logger.F("count", len(ids)),
+	)
+	if m.streamMetrics != nil {
+		m.streamMetrics.IncStreamError("queue_drop")
 	}
 }
 

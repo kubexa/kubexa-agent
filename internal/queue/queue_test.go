@@ -1906,3 +1906,127 @@ func TestDequeueAfterCloseIsNotDataLoss(t *testing.T) {
 	}
 	assertCounter(t, reg, "kubexa_queue_disk_read_errors_total", 0)
 }
+
+// An item that keeps coming back must eventually stop coming back. Attempts
+// was incremented on every nack and read by nobody, so a caller that nacked
+// whatever it could not deliver -- which is what the drain loop now does when
+// an ack cannot be persisted -- redelivered the same item forever: duplicate
+// traffic to the gateway, a pegged core, and a log line per round.
+//
+// The cap belongs here rather than in the caller because Nack is the single
+// choke point every redelivery passes through.
+func TestNackRetiresAnItemPastTheAttemptCap(t *testing.T) {
+	t.Parallel()
+
+	// MaxMemoryBytes below any item size sends everything straight to the
+	// spill path, so the retired item is disk-sourced and its segment claim
+	// has to be handed back too.
+	cfg := &config.BufferConfig{
+		MaxMemoryBytes: 1,
+		SpillDir:       t.TempDir(),
+		MaxDiskBytes:   64 << 20,
+		BatchSize:      10,
+	}
+	bq := newTestBufferedQueue(t, cfg, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := bq.Enqueue(ctx, item("poison", []byte("payload"))); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+
+	// The loop bound is deliberately far above any sane cap: the assertion is
+	// that redelivery stops, not that it stops on a particular round.
+	const maxRounds = 50
+	rounds := 0
+	for ; rounds < maxRounds; rounds++ {
+		batch, err := bq.DequeueBatch(ctx, 1)
+		if err != nil {
+			t.Fatalf("DequeueBatch() error = %v", err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		if err := bq.Nack([]string{batch[0].ID}); err != nil {
+			t.Fatalf("Nack() error = %v", err)
+		}
+		if bq.Depth() == 0 {
+			rounds++
+			break
+		}
+	}
+	if rounds >= maxRounds {
+		t.Fatalf("item was still being redelivered after %d nacks; there is no attempt cap", rounds)
+	}
+
+	if got := bq.Depth(); got != 0 {
+		t.Errorf("Depth() = %d, want 0 after the attempt cap retired the item", got)
+	}
+	if got := bq.InflightLen(); got != 0 {
+		t.Errorf("InflightLen() = %d, want 0", got)
+	}
+	if got := bq.SegmentClaims(); got != 0 {
+		t.Errorf("SegmentClaims() = %d, want 0 -- a retired item must hand its claim back", got)
+	}
+	if got := bq.DroppedTotal(); got != 1 {
+		t.Errorf("DroppedTotal() = %d, want exactly 1", got)
+	}
+}
+
+// Nack returned on the first requeue failure, so every id after it in the same
+// call was neither requeued nor counted: silently gone, with dropped_total
+// unmoved. Reachable now that a failed ack falls back to a nack -- on a full
+// disk that is exactly this path.
+func TestNackSettlesEveryIDWhenARequeueFails(t *testing.T) {
+	t.Parallel()
+
+	// Two memory slots, so exactly one nacked item can be requeued once one
+	// slot is occupied.
+	cfg := &config.BufferConfig{
+		MaxMemoryBytes: 2 * avgItemSizeEstimate,
+		SpillDir:       t.TempDir(),
+		MaxDiskBytes:   64 << 20,
+		BatchSize:      10,
+	}
+	bq := newTestBufferedQueue(t, cfg, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, id := range []string{"a", "b"} {
+		if err := bq.Enqueue(ctx, item(id, []byte("payload"))); err != nil {
+			t.Fatalf("Enqueue(%s) error = %v", id, err)
+		}
+	}
+	batch, err := bq.DequeueBatch(ctx, 2)
+	if err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+	if len(batch) != 2 {
+		t.Fatalf("dequeued %d items, want 2", len(batch))
+	}
+
+	// Occupy one of the two slots, then take the spill path away: a closed
+	// store fails every write, the same way a full disk does.
+	if err := bq.Enqueue(ctx, item("c", []byte("payload"))); err != nil {
+		t.Fatalf("Enqueue(c) error = %v", err)
+	}
+	if err := bq.disk.close(); err != nil {
+		t.Fatalf("close disk store: %v", err)
+	}
+
+	// Nack processes the ids back-to-front to preserve order, so "b" takes the
+	// free slot and "a" has nowhere to go.
+	if err := bq.Nack([]string{"a", "b"}); err == nil {
+		t.Fatal("Nack() error = nil, want the requeue failure reported")
+	}
+
+	if got := bq.InflightLen(); got != 0 {
+		t.Errorf("InflightLen() = %d, want 0", got)
+	}
+	if got := bq.Depth(); got != 2 {
+		t.Errorf("Depth() = %d, want 2 (the occupant plus the one item that fit)", got)
+	}
+	if got := bq.DroppedTotal(); got != 1 {
+		t.Errorf("DroppedTotal() = %d, want 1 -- the id that could not be requeued must be counted, not abandoned", got)
+	}
+}
