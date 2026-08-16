@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -419,6 +420,95 @@ func TestValidateConfig(t *testing.T) {
 	_, err := New(&config.BufferConfig{MaxMemoryBytes: 0}, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid max memory")
+	}
+}
+
+func TestDiskItemsDequeueBeforeMemoryItems(t *testing.T) {
+	t.Parallel()
+
+	// A memory budget of one small item forces the second enqueue to spill.
+	cfg := testBufferConfig(t, t.TempDir(), 200)
+	q := newTestQueue(t, cfg)
+	ctx := context.Background()
+
+	// "old" spills to disk when "new" needs the memory.
+	if err := q.Enqueue(ctx, item("old", make([]byte, 100))); err != nil {
+		t.Fatalf("Enqueue(old) error = %v", err)
+	}
+	if err := q.Enqueue(ctx, item("new", make([]byte, 100))); err != nil {
+		t.Fatalf("Enqueue(new) error = %v", err)
+	}
+
+	batch, err := q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+	if len(batch) != 1 {
+		t.Fatalf("got %d items, want 1", len(batch))
+	}
+	if batch[0].ID != "old" {
+		t.Errorf("first dequeued item = %q, want %q: spilled items are older and "+
+			"must come out first", batch[0].ID, "old")
+	}
+}
+
+func TestSpilledPayloadSurvivesTheRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	cfg := testBufferConfig(t, t.TempDir(), 200)
+	q := newTestQueue(t, cfg)
+	ctx := context.Background()
+
+	payload := []byte("the payload that must come back byte for byte")
+	if err := q.Enqueue(ctx, item("spilled", payload)); err != nil {
+		t.Fatalf("Enqueue(spilled) error = %v", err)
+	}
+	if err := q.Enqueue(ctx, item("resident", make([]byte, 100))); err != nil {
+		t.Fatalf("Enqueue(resident) error = %v", err)
+	}
+
+	batch, err := q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+	if batch[0].ID != "spilled" {
+		t.Fatalf("dequeued %q, want %q", batch[0].ID, "spilled")
+	}
+	if string(batch[0].Payload) != string(payload) {
+		t.Errorf("payload = %q, want %q", batch[0].Payload, payload)
+	}
+}
+
+func TestUnreadableSpilledItemIsDroppedNotStuck(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := testBufferConfig(t, dir, 200)
+	q := newTestQueue(t, cfg)
+	ctx := context.Background()
+
+	if err := q.Enqueue(ctx, item("corrupt", make([]byte, 100))); err != nil {
+		t.Fatalf("Enqueue(corrupt) error = %v", err)
+	}
+	if err := q.Enqueue(ctx, item("good", make([]byte, 100))); err != nil {
+		t.Fatalf("Enqueue(good) error = %v", err)
+	}
+
+	// Truncate the segment so the spilled record cannot be read back.
+	path := dir + "/" + segmentFilename(0)
+	if err := os.Truncate(path, int64(len(walMagic)+1)); err != nil {
+		t.Fatalf("truncate segment: %v", err)
+	}
+
+	batch, err := q.DequeueBatch(ctx, 2)
+	if err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+	if len(batch) != 1 || batch[0].ID != "good" {
+		t.Fatalf("got %v, want just the readable item %q", batch, "good")
+	}
+	if q.DroppedTotal() != 1 {
+		t.Errorf("DroppedTotal() = %d, want 1", q.DroppedTotal())
 	}
 }
 
