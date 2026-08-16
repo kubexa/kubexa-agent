@@ -327,7 +327,7 @@ func (q *bufferedQueue) evictOldestMemoryUnlocked() error {
 		q.memBytes -= q.itemSize(oldest)
 		q.memCount--
 		if q.disk != nil {
-			if err := q.disk.appendItem(oldest); err != nil {
+			if _, _, err := q.disk.appendItem(oldest); err != nil {
 				q.memCh <- oldest
 				q.memBytes += q.itemSize(oldest)
 				q.memCount++
@@ -346,7 +346,7 @@ func (q *bufferedQueue) evictOldestMemoryUnlocked() error {
 }
 
 func (q *bufferedQueue) spillEnqueueUnlocked(item Item) error {
-	if err := q.disk.appendItem(item); err != nil {
+	if _, _, err := q.disk.appendItem(item); err != nil {
 		return err
 	}
 	q.diskHead = append(q.diskHead, item)
@@ -566,7 +566,7 @@ drain:
 }
 
 func (q *bufferedQueue) prependDiskUnlocked(item Item) error {
-	if err := q.disk.appendItem(item); err != nil {
+	if _, _, err := q.disk.appendItem(item); err != nil {
 		return fmt.Errorf("nack spill to disk: %w", err)
 	}
 	q.diskHead = append([]Item{item}, q.diskHead...)
@@ -602,7 +602,7 @@ func (q *bufferedQueue) Close() error {
 			case item := <-q.memCh:
 				q.memBytes -= q.itemSize(item)
 				q.memCount--
-				if err := q.disk.appendItem(item); err != nil {
+				if _, _, err := q.disk.appendItem(item); err != nil {
 					return fmt.Errorf("flush item on close: %w", err)
 				}
 				q.diskHead = append(q.diskHead, item)
