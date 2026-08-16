@@ -842,21 +842,12 @@ type fakeConnectClient struct {
 	mu        sync.Mutex
 	sent      int
 	failAfter int
-	// stopAfter, when positive, calls stop once that many sends have been
-	// attempted. It ends the drain loop from the outside so a test that is
-	// asserting on what the loop settled cannot hang on a loop that keeps
-	// re-dequeuing what it just nacked.
-	stopAfter int
-	stop      func()
 }
 
 func (f *fakeConnectClient) Send(*agentv1.AgentMessage) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent++
-	if f.stopAfter > 0 && f.sent == f.stopAfter && f.stop != nil {
-		f.stop()
-	}
 	if f.sent > f.failAfter {
 		return errors.New("stream broken")
 	}
@@ -869,21 +860,44 @@ func (f *fakeConnectClient) sendCount() int {
 	return f.sent
 }
 
-// inflightObserver is how a test reads the queue's inflight map: InflightLen
-// is deliberately absent from the Queue interface.
-type inflightObserver interface{ InflightLen() int }
+// inflightObserver is how a test reads the queue accounting the Queue
+// interface deliberately does not expose.
+type inflightObserver interface {
+	InflightLen() int
+	SegmentClaims() int64
+}
 
-func inflightLen(t *testing.T, q queue.Queue) int {
+func queueObserver(t *testing.T, q queue.Queue) inflightObserver {
 	t.Helper()
 	observer, ok := q.(inflightObserver)
 	if !ok {
-		t.Fatal("queue does not expose InflightLen")
+		t.Fatalf("queue %T exposes no inflight accounting", q)
 	}
-	return observer.InflightLen()
+	return observer
+}
+
+// runDrain runs the drain and fails the test if it does not return promptly.
+//
+// Every drain path under test here is supposed to settle its batch and either
+// finish or hand the gap back to the reconnect cadence. Without this bound, a
+// regression that retries an ack forever -- or re-dequeues what it just nacked
+// -- would hang until the package timeout instead of failing legibly.
+func runDrain(ctx context.Context, t *testing.T, sm *streamManager, stream agentv1.AgentService_ConnectClient) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sm.drainBufferedQueue(ctx, stream)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drainBufferedQueue did not return: an ack retry or a redelivery is unbounded")
+	}
 }
 
 // enqueueTestLogs puts n marshalled log messages on q, id-0..id-(n-1).
-func enqueueTestLogs(t *testing.T, ctx context.Context, q queue.Queue, n int) {
+func enqueueTestLogs(ctx context.Context, t *testing.T, q queue.Queue, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
 		msg := &agentv1.AgentMessage{
@@ -904,6 +918,30 @@ func enqueueTestLogs(t *testing.T, ctx context.Context, q queue.Queue, n int) {
 			t.Fatalf("Enqueue(%d): %v", i, err)
 		}
 	}
+}
+
+// newTestDiskQueue returns a spill-backed queue whose memory tier is too small
+// for any item, so every enqueued item becomes a disk reference holding a
+// segment claim. The memory-only newTestQueue exercises none of that, and a
+// mishandled claim is what lets compaction delete a segment still in use.
+func newTestDiskQueue(t *testing.T) queue.Queue {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	m, err := agentmetrics.New(reg, "test", "cluster-1", "agent-1")
+	if err != nil {
+		t.Fatalf("metrics.New: %v", err)
+	}
+	q, err := queue.New(&config.BufferConfig{
+		MaxMemoryBytes: 1,
+		SpillDir:       t.TempDir(),
+		MaxDiskBytes:   64 << 20,
+		BatchSize:      10,
+	}, logger.New("queue-test"), m.Queue())
+	if err != nil {
+		t.Fatalf("queue.New: %v", err)
+	}
+	t.Cleanup(func() { _ = q.Close() })
+	return q
 }
 
 func newDrainTestManager(t *testing.T, cfg *config.Config, q queue.Queue) *streamManager {
@@ -938,15 +976,53 @@ func TestDrainNacksTheRemainderOfAFailedBatch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	enqueueTestLogs(t, ctx, q, batchSize)
+	enqueueTestLogs(ctx, t, q, batchSize)
 
-	sm.drainBufferedQueue(ctx, &fakeConnectClient{failAfter: failAfter})
+	runDrain(ctx, t, sm, &fakeConnectClient{failAfter: failAfter})
 
-	if got := inflightLen(t, q); got != 0 {
+	if got := queueObserver(t, q).InflightLen(); got != 0 {
 		t.Errorf("%d items left in flight after a failed send, want 0", got)
 	}
 	if got := q.Depth(); got != batchSize-failAfter {
 		t.Errorf("Depth() = %d, want %d (the failed item and everything after it)",
+			got, batchSize-failAfter)
+	}
+}
+
+// The same failure over a spill-backed queue. Every item here is a disk
+// reference holding a segment claim, so settling the batch has to hand back
+// exactly the claims it released: one too few pins the segment prefix forever,
+// one too many lets compaction unlink a segment whose records are still live.
+func TestDrainFailedSendKeepsSegmentClaimsExact(t *testing.T) {
+	t.Parallel()
+
+	const batchSize = 6
+	const failAfter = 3
+
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = batchSize
+	q := newTestDiskQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(ctx, t, q, batchSize)
+	observer := queueObserver(t, q)
+	if got := observer.SegmentClaims(); got != batchSize {
+		t.Fatalf("SegmentClaims() = %d before the drain, want %d -- the items did not spill", got, batchSize)
+	}
+
+	runDrain(ctx, t, sm, &fakeConnectClient{failAfter: failAfter})
+
+	if got := observer.InflightLen(); got != 0 {
+		t.Errorf("%d items left in flight after a failed send, want 0", got)
+	}
+	if got := q.Depth(); got != batchSize-failAfter {
+		t.Errorf("Depth() = %d, want %d", got, batchSize-failAfter)
+	}
+	if got := observer.SegmentClaims(); got != batchSize-failAfter {
+		t.Errorf("SegmentClaims() = %d, want %d -- one claim per requeued reference, none stranded, none released twice",
 			got, batchSize-failAfter)
 	}
 }
@@ -961,6 +1037,8 @@ type ackFailingQueue struct {
 	ackCalls  atomic.Int32
 	nackCalls atomic.Int32
 	nackIDs   atomic.Int32
+	dropCalls atomic.Int32
+	dropIDs   atomic.Int32
 }
 
 func (a *ackFailingQueue) Ack(ids []string) error {
@@ -974,11 +1052,18 @@ func (a *ackFailingQueue) Nack(ids []string) error {
 	return a.Queue.Nack(ids)
 }
 
+func (a *ackFailingQueue) Drop(ids []string) error {
+	a.dropCalls.Add(1)
+	a.dropIDs.Add(int32(len(ids)))
+	return a.Queue.Drop(ids)
+}
+
 // Every send succeeds, so the whole batch is acked -- and every ack fails.
 // The queue keeps those entries inflight on purpose; if the caller then walks
 // away, they are stranded for the process lifetime, holding their payloads and
-// pinning their WAL segments. The drain must settle them anyway, and must not
-// retry a permanently failing ack forever.
+// pinning their WAL segments. The drain must settle them anyway, must not
+// retry a permanently failing ack forever, and must not immediately re-dequeue
+// what it just handed back: that turned the leak into 100k re-sends in 200ms.
 func TestDrainSettlesABatchWhoseAckCannotBePersisted(t *testing.T) {
 	t.Parallel()
 
@@ -993,15 +1078,12 @@ func TestDrainSettlesABatchWhoseAckCannotBePersisted(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	enqueueTestLogs(t, ctx, q, batchSize)
+	enqueueTestLogs(ctx, t, q, batchSize)
 
-	// Stop the loop from the send side once the batch is on the wire: the
-	// batch is nacked back into the queue, so a loop left running would
-	// re-dequeue it forever.
-	stream := &fakeConnectClient{failAfter: batchSize, stopAfter: batchSize, stop: cancel}
-	sm.drainBufferedQueue(ctx, stream)
+	stream := &fakeConnectClient{failAfter: batchSize}
+	runDrain(ctx, t, sm, stream)
 
-	if got := inflightLen(t, inner); got != 0 {
+	if got := queueObserver(t, inner).InflightLen(); got != 0 {
 		t.Errorf("%d items left in flight after a failed ack, want 0", got)
 	}
 	if got := q.Depth(); got != batchSize {
@@ -1017,7 +1099,87 @@ func TestDrainSettlesABatchWhoseAckCannotBePersisted(t *testing.T) {
 	if got := q.ackCalls.Load(); got < 1 || got > 3 {
 		t.Errorf("Ack called %d times, want a bounded 1..3", got)
 	}
+	// The storm: one pass over the batch, not one per redelivery. The drain
+	// must hand the gap back rather than re-dequeue what it just nacked.
 	if got := stream.sendCount(); got != batchSize {
-		t.Errorf("sent %d messages, want %d", got, batchSize)
+		t.Errorf("sent %d messages, want %d -- the batch was redelivered inside one drain", got, batchSize)
+	}
+}
+
+// The failed-ack fallback over a spill-backed queue: the requeued references
+// must keep their claims, and no claim may be released for an ack that was
+// never written -- the WAL record is still there and a restart replays it.
+func TestDrainFailedAckKeepsSegmentClaimsExact(t *testing.T) {
+	t.Parallel()
+
+	const batchSize = 4
+
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = batchSize
+	inner := newTestDiskQueue(t)
+	q := &ackFailingQueue{Queue: inner}
+	sm := newDrainTestManager(t, cfg, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(ctx, t, q, batchSize)
+
+	runDrain(ctx, t, sm, &fakeConnectClient{failAfter: batchSize})
+
+	observer := queueObserver(t, inner)
+	if got := observer.InflightLen(); got != 0 {
+		t.Errorf("%d items left in flight after a failed ack, want 0", got)
+	}
+	if got := q.Depth(); got != batchSize {
+		t.Errorf("Depth() = %d, want %d", got, batchSize)
+	}
+	if got := observer.SegmentClaims(); got != batchSize {
+		t.Errorf("SegmentClaims() = %d, want %d -- an ack that was never persisted must not release a claim",
+			got, batchSize)
+	}
+}
+
+// Ids the drain judged undeliverable -- unparseable payload, logs disabled,
+// too old -- are acked precisely because a nack would replay them forever. The
+// ack fallback must keep that promise: they leave the inflight map without
+// going back on the queue.
+func TestDrainFallbackDoesNotRequeueUndeliverableItems(t *testing.T) {
+	t.Parallel()
+
+	const validItems = 3
+
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = validItems + 1
+	inner := newTestQueue(t)
+	q := &ackFailingQueue{Queue: inner}
+	sm := newDrainTestManager(t, cfg, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Garbage ahead of the valid items, so the terminal id is settled in the
+	// same batch as retryable ones.
+	if err := q.Enqueue(ctx, queue.Item{ID: "garbage", Payload: []byte{0xff, 0xff, 0xff, 0xff}}); err != nil {
+		t.Fatalf("Enqueue(garbage): %v", err)
+	}
+	enqueueTestLogs(ctx, t, q, validItems)
+
+	runDrain(ctx, t, sm, &fakeConnectClient{failAfter: validItems + 1})
+
+	if got := queueObserver(t, inner).InflightLen(); got != 0 {
+		t.Errorf("%d items left in flight, want 0", got)
+	}
+	if got := q.Depth(); got != validItems {
+		t.Errorf("Depth() = %d, want %d -- the unparseable item must not be requeued", got, validItems)
+	}
+	if got := q.nackIDs.Load(); got != validItems {
+		t.Errorf("Nack covered %d ids, want %d (retryable only)", got, validItems)
+	}
+	if got := q.dropIDs.Load(); got != 1 {
+		t.Errorf("Drop covered %d ids, want 1 (the unparseable payload)", got)
+	}
+	if got := q.DroppedTotal(); got != 1 {
+		t.Errorf("DroppedTotal() = %d, want 1", got)
 	}
 }

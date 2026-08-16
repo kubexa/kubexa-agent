@@ -24,7 +24,30 @@ const (
 	// memBytes, and the disk tier by the WAL's own byte cap. It survives only
 	// as a slot count.
 	avgItemSizeEstimate = 4096
+
+	// maxDeliveryAttempts caps how many times one item may be handed back for
+	// redelivery before the queue retires it.
+	//
+	// Attempts was incremented on every nack and read by nobody, so an item
+	// the gateway could never take -- or one whose ack could never be
+	// persisted -- came back forever. The drain loop nacks whatever it cannot
+	// settle, so "forever" is a tight loop: duplicate traffic, a pegged core,
+	// and a log line per round, all of it flowing into the same pipeline as
+	// the agent's real diagnostics.
+	//
+	// Six is chosen against what an attempt actually costs. Attempts do not
+	// accumulate during an outage -- with no session there is no drain, and
+	// the whole buffer waits -- so they only count real delivery failures
+	// against a live gateway. A transient one clears well inside six tries
+	// (the send path's own circuit breaker gives up far sooner), while a
+	// poison item costs at most six re-sends before it is counted and gone.
+	maxDeliveryAttempts = 6
 )
+
+// ErrClosed is returned by every operation once the queue is closed. Callers
+// use it to tell "this queue can no longer settle anything" (shutdown, nothing
+// to fix) apart from a failure worth reporting and retrying.
+var ErrClosed = errors.New("queue is closed")
 
 // Item is a single buffered agent message awaiting delivery.
 type Item struct {
@@ -54,7 +77,14 @@ type Queue interface {
 	Ack(ids []string) error
 
 	// Nack returns items back to the front of the queue for immediate retry.
+	// Items past the delivery-attempt cap are retired instead of returned.
 	Nack(ids []string) error
+
+	// Drop settles items without redelivering them, counting each as dropped.
+	// It is for items the caller has judged undeliverable, where a nack would
+	// replay them forever; it is on the interface because the caller has no
+	// other way to release an item it must not retry.
+	Drop(ids []string) error
 
 	// Depth returns current number of items in queue (memory + disk).
 	Depth() int64
@@ -319,7 +349,7 @@ func (q *bufferedQueue) Enqueue(ctx context.Context, item Item) error {
 		q.mu.Lock()
 		if q.closed {
 			q.mu.Unlock()
-			return errors.New("queue is closed")
+			return ErrClosed
 		}
 
 		size := q.itemSize(item)
@@ -456,7 +486,7 @@ func (q *bufferedQueue) evictOldestMemoryUnlocked() error {
 			q.updateDepthMetricsLocked()
 			return nil
 		}
-		q.dropItemUnlocked(oldest)
+		q.dropItemUnlocked(oldest, "no_disk_spill")
 		return nil
 	default:
 		return nil
@@ -635,7 +665,7 @@ func (q *bufferedQueue) dropOldestUnlocked() {
 	case oldest := <-q.memCh:
 		q.memBytes -= q.itemSize(oldest)
 		q.memCount--
-		q.dropItemUnlocked(oldest)
+		q.dropItemUnlocked(oldest, "capacity")
 	default:
 		if len(q.diskRefs) > 0 {
 			ref := q.diskRefs[0]
@@ -643,7 +673,7 @@ func (q *bufferedQueue) dropOldestUnlocked() {
 			q.diskCount--
 			q.releaseDiskRefUnlocked(ref.Segment)
 			q.settleDroppedRefUnlocked(ref)
-			q.dropItemUnlocked(Item{ID: ref.ID})
+			q.dropItemUnlocked(Item{ID: ref.ID}, "capacity")
 		}
 	}
 }
@@ -670,12 +700,17 @@ func (q *bufferedQueue) settleDroppedRefUnlocked(ref diskRef) {
 	}
 }
 
-func (q *bufferedQueue) dropItemUnlocked(item Item) {
+// dropItemUnlocked counts and logs one lost item. reason says which pressure
+// lost it -- capacity eviction, an unreadable WAL record, a requeue with
+// nowhere to go -- because "queue dropped oldest item" was already being
+// logged by paths that had nothing to do with the oldest item.
+func (q *bufferedQueue) dropItemUnlocked(item Item, reason string) {
 	q.dropped.Add(1)
 	q.metrics.IncDropped()
 	depth := q.memCount + q.diskCount
-	q.log.Warn("queue dropped oldest item",
+	q.log.Warn("queue dropped item",
 		logger.F("item_id", item.ID),
+		logger.F("reason", reason),
 		logger.F("depth", depth),
 	)
 	q.updateDepthMetricsLocked()
@@ -844,7 +879,7 @@ func (q *bufferedQueue) readRefUnlocked(ref diskRef) (Item, refReadResult) {
 		q.metrics.IncDiskReadError()
 		q.releaseDiskRefUnlocked(ref.Segment)
 		q.settleDroppedRefUnlocked(ref)
-		q.dropItemUnlocked(Item{ID: ref.ID})
+		q.dropItemUnlocked(Item{ID: ref.ID}, "unreadable")
 		return Item{}, refReadDropped
 	}
 	return item, refReadOK
@@ -856,7 +891,7 @@ func (q *bufferedQueue) Ack(ids []string) error {
 	defer q.mu.Unlock()
 
 	if q.closed {
-		return errors.New("queue is closed")
+		return ErrClosed
 	}
 
 	// An ack is only recorded once it is durable. The inflight entry is what
@@ -902,12 +937,22 @@ func (q *bufferedQueue) Ack(ids []string) error {
 }
 
 // Nack returns items to the front of the queue for immediate retry.
+//
+// Every id it is given is settled: requeued, or retired through the counted
+// drop path. Returning early on the first requeue failure left the rest of the
+// call's ids neither requeued nor counted -- gone, with dropped_total unmoved
+// and nothing logged. An id that reaches this function has already left the
+// inflight map, so there is no other holder that could settle it later.
+//
+// An item past maxDeliveryAttempts is retired here rather than requeued. Nack
+// is the one choke point every redelivery passes through; a cap in the caller
+// would leave every other nack path uncapped.
 func (q *bufferedQueue) Nack(ids []string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	if q.closed {
-		return errors.New("queue is closed")
+		return ErrClosed
 	}
 
 	var frontMemory []Item
@@ -922,11 +967,19 @@ func (q *bufferedQueue) Nack(ids []string) error {
 		if entry.ref != nil {
 			ref := *entry.ref
 			ref.Attempts++
+			if ref.Attempts > maxDeliveryAttempts {
+				q.retireInflightUnlocked(id, entry, ref.Attempts)
+				continue
+			}
 			frontRefs = append(frontRefs, ref)
 			continue
 		}
 		item := entry.item
 		item.Attempts++
+		if item.Attempts > maxDeliveryAttempts {
+			q.retireInflightUnlocked(id, entry, item.Attempts)
+			continue
+		}
 		frontMemory = append(frontMemory, item)
 	}
 
@@ -938,27 +991,103 @@ func (q *bufferedQueue) Nack(ids []string) error {
 		q.diskCount++
 	}
 
+	var requeueErr error
 	for i := len(frontMemory) - 1; i >= 0; i-- {
 		item := frontMemory[i]
 		size := q.itemSize(item)
 		if q.canAcceptInMemory(size) {
-			if err := q.enqueueFrontUnlocked(item, size); err != nil {
-				return err
+			err := q.enqueueFrontUnlocked(item, size)
+			if err == nil {
+				continue
 			}
-			continue
+			if requeueErr == nil {
+				requeueErr = err
+			}
 		}
 		if q.disk != nil {
 			// countEnqueue=false, matching the memory branch above: this item
 			// already counted as an enqueue when it first arrived.
-			if err := q.spillEnqueueUnlocked(item, false); err != nil {
-				return err
+			err := q.spillEnqueueUnlocked(item, false)
+			if err == nil {
+				continue
 			}
-			continue
+			if requeueErr == nil {
+				requeueErr = err
+			}
 		}
-		q.dropItemUnlocked(item)
+		// Nowhere left to put it. The item is gone either way; counting and
+		// logging it is the whole difference between a drop and a silent
+		// disappearance. With no disk configured this is the designed
+		// behaviour rather than a failure, so it reports no error.
+		q.dropItemUnlocked(item, "requeue_failed")
 	}
 
+	// Compaction runs even when a requeue failed: those failures are what a
+	// full disk looks like, and reclaiming a spent segment is the only thing
+	// that can make room for the next one.
+	q.compactUnlocked()
 	q.updateDepthMetricsLocked()
+	q.signalWaitersLocked()
+	return requeueErr
+}
+
+// retireInflightUnlocked settles an inflight entry that will never be
+// delivered: it has already left the inflight map, so this releases its WAL
+// claim, records an ack so recovery does not resurrect it, and counts it once.
+//
+// Releasing the claim here is what keeps the "decrement only on ack or drop"
+// rule intact -- this is the drop -- and it is the only reason compaction can
+// ever move past a segment holding a poison record.
+func (q *bufferedQueue) retireInflightUnlocked(id string, entry *inflightEntry, attempts int) {
+	if entry.ref != nil {
+		q.releaseDiskRefUnlocked(entry.ref.Segment)
+		q.settleDroppedRefUnlocked(*entry.ref)
+	}
+	q.dropped.Add(1)
+	q.metrics.IncDropped()
+	q.log.Warn("retiring an undeliverable queued item",
+		logger.F("item_id", id),
+		logger.F("attempts", attempts),
+		logger.F("max_attempts", maxDeliveryAttempts),
+	)
+	q.updateDepthMetricsLocked()
+}
+
+// Drop settles ids without redelivering them: they leave the inflight map,
+// their WAL claims are released, an ack record is written so recovery does not
+// bring them back, and each counts once in dropped_total.
+//
+// It exists for the items a caller has judged undeliverable -- an unparseable
+// payload, a record too old to be accepted, a stream the config has turned off.
+// Those are acked in the normal path precisely because a nack would replay them
+// forever; when the ack cannot be persisted, this is the settlement that keeps
+// that promise instead of putting them back on the queue.
+func (q *bufferedQueue) Drop(ids []string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.closed {
+		return ErrClosed
+	}
+
+	for _, id := range ids {
+		entry, ok := q.inflight[id]
+		if !ok {
+			continue
+		}
+		delete(q.inflight, id)
+		attempts := entry.item.Attempts
+		if entry.ref != nil {
+			// A disk-sourced entry keeps its attempt count on the reference:
+			// the item field is deliberately empty there.
+			attempts = entry.ref.Attempts
+		}
+		q.retireInflightUnlocked(id, entry, attempts)
+	}
+
+	// Retiring a disk-sourced item releases the last claim on its segment as
+	// often as an ack does, so the same reclaim has to run here.
+	q.compactUnlocked()
 	q.signalWaitersLocked()
 	return nil
 }
@@ -1013,6 +1142,25 @@ func (q *bufferedQueue) InflightLen() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.inflight)
+}
+
+// SegmentClaims reports the total number of live WAL references, summed over
+// every segment. A test hook with the same standing as InflightLen: nothing in
+// production reads it, and it is not on the Queue interface.
+//
+// It is the other half of the leak check. InflightLen == 0 proves no entry was
+// stranded; this proves the claims those entries held were handed back, which
+// is what lets compaction ever unlink a segment -- and, in the other direction,
+// that nothing released a claim twice, which would let compaction unlink a
+// segment whose records are still needed.
+func (q *bufferedQueue) SegmentClaims() int64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var total int64
+	for _, count := range q.refsPerSegment {
+		total += count
+	}
+	return total
 }
 
 // DroppedTotal returns the number of items dropped since startup.
