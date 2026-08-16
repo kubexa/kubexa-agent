@@ -27,6 +27,7 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/k8s/k8sconfig"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	"github.com/kubexa/kubexa-agent/internal/metrics"
+	agentpprof "github.com/kubexa/kubexa-agent/internal/pprof"
 	"github.com/kubexa/kubexa-agent/internal/query"
 	"github.com/kubexa/kubexa-agent/internal/query/policy"
 	"github.com/kubexa/kubexa-agent/internal/queue"
@@ -114,6 +115,11 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	shutdownTimeout := defaultShutdownTimeout
 
 	mainReg := prometheus.NewRegistry()
+	// A fresh registry carries no Go or process collectors, which is why a
+	// v0.6.0 agent could be OOMKilled with nothing but cadvisor to reason from.
+	if err := metrics.RegisterRuntimeCollectors(mainReg); err != nil {
+		return fmt.Errorf("runtime collectors: %w", err)
+	}
 
 	kube, err := initKubernetes(parentCtx, cfg, devMode, log)
 	if err != nil {
@@ -252,6 +258,10 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 
 	metricsSrv := metrics.NewServer(metricsAddr, mainReg, logger.New("metrics"))
 
+	// nil when observability.pprof_addr is unset, which is the default. Run() on
+	// a nil server is a no-op, so the disabled path needs no branch below.
+	pprofSrv := agentpprof.NewServer(cfg.Observability.PprofAddr, logger.New("pprof"))
+
 	g, ctx := errgroup.WithContext(parentCtx)
 
 	for _, c := range collectors {
@@ -281,6 +291,13 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 			return fmt.Errorf("metrics server: %w", err)
 		}
 		log.Info("metrics server stopped")
+		return nil
+	})
+
+	g.Go(func() error {
+		if err := pprofSrv.Run(ctx); err != nil && !isContextClosed(err) {
+			return fmt.Errorf("pprof server: %w", err)
+		}
 		return nil
 	})
 
