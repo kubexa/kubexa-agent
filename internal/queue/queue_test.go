@@ -995,3 +995,136 @@ func TestDiskRefCapAppliesToDirectSpillPath(t *testing.T) {
 			refs, diskSlotCapacity(cfg.MaxDiskBytes))
 	}
 }
+
+// TestRecoveryCapsDiskRefsKeepingOldest seeds a spill directory with more
+// pending WAL records than the reference cap allows -- the shape a config
+// change, or simply a very small average item size, can produce independent
+// of anything bufferedQueue itself ever wrote -- and asserts New() caps what
+// it loads into memory rather than mirroring the whole WAL as refs.
+func TestRecoveryCapsDiskRefsKeepingOldest(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	reg := prometheus.NewRegistry()
+	seedMetrics := newTestQueueMetrics(t, reg)
+	log := logger.New("queue-test")
+
+	// maxBytes=0 means "use the default 512 MiB cap" over in newDiskStore, so
+	// seeding is not itself constrained by the tiny cap the queue will be
+	// opened with below.
+	ds, err := newDiskStore(dir, 0, log, seedMetrics)
+	if err != nil {
+		t.Fatalf("newDiskStore() error = %v", err)
+	}
+
+	const seeded = 5
+	base := time.Now().UTC()
+	for i := 0; i < seeded; i++ {
+		it := Item{
+			ID:         fmt.Sprintf("r-%d", i),
+			Payload:    make([]byte, 50),
+			EnqueuedAt: base.Add(time.Duration(i) * time.Millisecond),
+		}
+		if _, _, err := ds.appendItem(it); err != nil {
+			t.Fatalf("seed appendItem(%d) error = %v", i, err)
+		}
+	}
+	if err := ds.close(); err != nil {
+		t.Fatalf("seed ds.close() error = %v", err)
+	}
+
+	// max_disk_bytes / avgItemSizeEstimate == 2 references: 3 of the 5 seeded
+	// records must be dropped at recovery.
+	cfg := &config.BufferConfig{
+		MaxMemoryBytes: 64 << 10,
+		SpillDir:       dir,
+		MaxDiskBytes:   2 * avgItemSizeEstimate,
+		BatchSize:      10,
+	}
+	q := newTestBufferedQueue(t, cfg, nil)
+
+	q.mu.Lock()
+	refs := append([]diskRef(nil), q.diskRefs...)
+	diskCount := q.diskCount
+	q.mu.Unlock()
+
+	if len(refs) != 2 {
+		t.Fatalf("recovered refs = %d, want 2 (capped)", len(refs))
+	}
+	if diskCount != 2 {
+		t.Fatalf("diskCount = %d, want 2", diskCount)
+	}
+	kept := map[string]bool{refs[0].ID: true, refs[1].ID: true}
+	if !kept["r-0"] || !kept["r-1"] {
+		t.Fatalf("kept refs = %v, want the two oldest (r-0, r-1)", refs)
+	}
+	if got := q.DroppedTotal(); got != 3 {
+		t.Fatalf("DroppedTotal() = %d, want 3", got)
+	}
+
+	if err := q.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	// A second New() over the same directory must not resurrect the refs
+	// dropped by the cap: the drop must have acked them.
+	q2 := newTestBufferedQueue(t, cfg, nil)
+	q2.mu.Lock()
+	refs2 := len(q2.diskRefs)
+	q2.mu.Unlock()
+	if refs2 != 2 {
+		t.Fatalf("second New() recovered %d refs, want 2 (dropped refs resurrected)", refs2)
+	}
+}
+
+// TestCloseFlushRespectsRefCap fills memory with more items than the disk
+// reference cap can hold and never spills any of them along the way, so
+// Close's own flush is the first and only thing that tries to write them to
+// disk. It must cap there too instead of overshooting by len(memCh).
+func TestCloseFlushRespectsRefCap(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.BufferConfig{
+		// Large enough that all 5 items enqueued below fit in memory without
+		// ever spilling -- Close's flush is the only producer this test
+		// exercises.
+		MaxMemoryBytes: 100_000,
+		SpillDir:       t.TempDir(),
+		MaxDiskBytes:   1 * avgItemSizeEstimate, // diskSlotCapacity == 1
+		BatchSize:      10,
+	}
+	q := newTestBufferedQueue(t, cfg, nil)
+	ctx := context.Background()
+
+	const enqueued = 5
+	for i := 0; i < enqueued; i++ {
+		if err := q.Enqueue(ctx, item(fmt.Sprintf("c-%d", i), make([]byte, 50))); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+
+	q.mu.Lock()
+	memCount := q.memCount
+	diskRefsBefore := len(q.diskRefs)
+	q.mu.Unlock()
+	if memCount != enqueued || diskRefsBefore != 0 {
+		t.Fatalf("setup: memCount=%d diskRefs=%d, want %d resident items and 0 refs "+
+			"before Close (test must isolate the flush path)", memCount, diskRefsBefore, enqueued)
+	}
+
+	if err := q.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	q.mu.Lock()
+	refs := len(q.diskRefs)
+	q.mu.Unlock()
+	wantCap := diskSlotCapacity(cfg.MaxDiskBytes)
+	if int64(refs) > wantCap {
+		t.Errorf("diskRefs after Close = %d, past the cap of %d", refs, wantCap)
+	}
+	wantDropped := int64(enqueued) - wantCap
+	if got := q.DroppedTotal(); got != wantDropped {
+		t.Errorf("DroppedTotal() = %d, want %d", got, wantDropped)
+	}
+}

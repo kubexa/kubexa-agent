@@ -156,13 +156,46 @@ func New(cfg *config.BufferConfig, log *logger.Logger, m *agentmetrics.QueueMetr
 			_ = ds.close()
 			return nil, fmt.Errorf("recover spill segments: %w", err)
 		}
-		q.diskRefs = append(q.diskRefs, recovered...)
-		q.diskCount = int64(len(recovered))
-		for _, ref := range recovered {
+
+		// Recovery runs at startup -- exactly the window a mirrored-payload
+		// queue used to OOM the pod in -- so the reference cap has to hold
+		// here too, not just on the two live-traffic paths. recover() returns
+		// refs oldest-first, so the front is what survives and the tail (the
+		// newest arrivals) is what gets dropped.
+		limit := diskSlotCapacity(maxDisk)
+		kept := recovered
+		var droppedRefs []diskRef
+		if int64(len(recovered)) > limit {
+			kept = recovered[:limit]
+			droppedRefs = recovered[limit:]
+		}
+
+		q.diskRefs = append(q.diskRefs, kept...)
+		q.diskCount = int64(len(kept))
+		for _, ref := range kept {
 			q.refsPerSegment[ref.Segment]++
 		}
+
+		for _, ref := range droppedRefs {
+			// The WAL record survives unless acked here, so without this the
+			// very next restart recovers it again instead of the cap
+			// converging on the same kept set.
+			q.settleDroppedRefUnlocked(ref)
+			q.dropped.Add(1)
+			q.metrics.IncDropped()
+		}
+
 		if len(recovered) > 0 {
 			log.Info("recovered items from disk spill", logger.F("count", len(recovered)))
+		}
+		if len(droppedRefs) > 0 {
+			log.Error("disk reference cap exceeded at recovery; dropped newest-first tail past the cap",
+				logger.F("recovered", len(recovered)),
+				logger.F("kept", len(kept)),
+				logger.F("dropped", len(droppedRefs)),
+				logger.F("cap", limit),
+				logger.F("raise_limit_via", "buffer.max_disk_bytes"),
+			)
 		}
 	}
 
@@ -414,9 +447,14 @@ func (q *bufferedQueue) spillEnqueueUnlocked(item Item, countEnqueue bool) error
 // the old design was missing entirely: diskHead had no accounting of any
 // kind, so max_disk_bytes silently became a heap ceiling. diskSlotCapacity
 // already existed but gated nothing; it gates this.
+//
+// With no disk tier there is no reference slice to fill, so this reports not
+// full. Every call site today only reaches this with q.disk already non-nil;
+// the check exists so the answer stays correct if that ever stops being true,
+// rather than silently refusing callers that have nothing to be full of.
 func (q *bufferedQueue) diskRefsFullUnlocked() bool {
 	if q.disk == nil {
-		return true
+		return false
 	}
 	maxDisk := q.cfg.MaxDiskBytes
 	if maxDisk <= 0 {
@@ -787,11 +825,21 @@ func (q *bufferedQueue) Close() error {
 	q.closed = true
 
 	if q.disk != nil {
+		var closeDropped int
 		for {
 			select {
 			case item := <-q.memCh:
 				q.memBytes -= q.itemSize(item)
 				q.memCount--
+				if q.diskRefsFullUnlocked() {
+					// Nothing was ever written for this item -- it never got a
+					// WAL record or a ref -- so there is nothing to ack. It is
+					// simply lost, which is why it is counted.
+					q.dropped.Add(1)
+					q.metrics.IncDropped()
+					closeDropped++
+					continue
+				}
 				segment, offset, err := q.disk.appendItem(item)
 				if err != nil {
 					return fmt.Errorf("flush item on close: %w", err)
@@ -808,6 +856,11 @@ func (q *bufferedQueue) Close() error {
 			}
 		}
 	closeDisk:
+		if closeDropped > 0 {
+			q.log.Error("dropped items at shutdown flush: reference cap reached",
+				logger.F("dropped", closeDropped),
+			)
+		}
 		if err := q.disk.close(); err != nil {
 			return fmt.Errorf("close disk store: %w", err)
 		}
