@@ -902,3 +902,96 @@ func TestDequeueRespectsContext(t *testing.T) {
 		t.Fatal("expected context error on empty queue")
 	}
 }
+
+func TestDiskRefCapAppliesToBothSpillPaths(t *testing.T) {
+	t.Parallel()
+
+	// max_disk_bytes / avgItemSizeEstimate == 2 references.
+	cfg := &config.BufferConfig{
+		MaxMemoryBytes: 200,
+		SpillDir:       t.TempDir(),
+		MaxDiskBytes:   2 * avgItemSizeEstimate,
+		BatchSize:      10,
+	}
+	q := newTestQueue(t, cfg)
+	bq, ok := q.(*bufferedQueue)
+	if !ok {
+		t.Fatalf("newTestQueue returned %T, want *bufferedQueue", q)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// Fill past the cap. Once the cap is hit, Enqueue must apply backpressure
+	// (block until ctx expires) rather than growing diskRefs without bound.
+	var lastErr error
+	for i := 0; i < 8; i++ {
+		lastErr = q.Enqueue(ctx, item(fmt.Sprintf("i-%d", i), make([]byte, 100)))
+		if lastErr != nil {
+			break
+		}
+	}
+	if lastErr == nil {
+		t.Fatal("Enqueue never applied backpressure past the reference cap")
+	}
+
+	bq.mu.Lock()
+	refs := len(bq.diskRefs)
+	bq.mu.Unlock()
+	if int64(refs) > diskSlotCapacity(cfg.MaxDiskBytes) {
+		t.Errorf("diskRefs grew to %d, past the cap of %d",
+			refs, diskSlotCapacity(cfg.MaxDiskBytes))
+	}
+}
+
+// TestDiskRefCapAppliesToDirectSpillPath isolates the guard in
+// spillEnqueueUnlocked from the one in evictOldestMemoryUnlocked.
+//
+// With MaxMemoryBytes big enough to hold one item (as in
+// TestDiskRefCapAppliesToBothSpillPaths above), every Enqueue past the first
+// routes through evictOldestMemoryUnlocked before it ever reaches
+// spillEnqueueUnlocked, so that test alone proves only the eviction-path
+// guard. Here MaxMemoryBytes is smaller than any item, so memory never
+// accepts anything and every Enqueue goes straight to spillEnqueueUnlocked --
+// proving its guard holds independently of eviction ever running.
+func TestDiskRefCapAppliesToDirectSpillPath(t *testing.T) {
+	t.Parallel()
+
+	// max_disk_bytes / avgItemSizeEstimate == 2 references.
+	cfg := &config.BufferConfig{
+		MaxMemoryBytes: 1,
+		SpillDir:       t.TempDir(),
+		MaxDiskBytes:   2 * avgItemSizeEstimate,
+		BatchSize:      10,
+	}
+	q := newTestQueue(t, cfg)
+	bq, ok := q.(*bufferedQueue)
+	if !ok {
+		t.Fatalf("newTestQueue returned %T, want *bufferedQueue", q)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	var lastErr error
+	for i := 0; i < 8; i++ {
+		lastErr = q.Enqueue(ctx, item(fmt.Sprintf("d-%d", i), make([]byte, 100)))
+		if lastErr != nil {
+			break
+		}
+	}
+	if lastErr == nil {
+		t.Fatal("Enqueue never applied backpressure past the reference cap")
+	}
+
+	bq.mu.Lock()
+	memCount := bq.memCount
+	refs := len(bq.diskRefs)
+	bq.mu.Unlock()
+	if memCount != 0 {
+		t.Fatalf("memCount = %d, want 0 -- an item reached memory, so this run "+
+			"did not isolate the direct-spill path", memCount)
+	}
+	if int64(refs) > diskSlotCapacity(cfg.MaxDiskBytes) {
+		t.Errorf("diskRefs grew to %d, past the cap of %d",
+			refs, diskSlotCapacity(cfg.MaxDiskBytes))
+	}
+}
