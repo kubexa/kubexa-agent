@@ -68,9 +68,15 @@ type CapacityAware interface {
 	Capacity() int64
 }
 
+// inflightEntry holds one dequeued item awaiting ack or nack.
+//
+// For a disk-sourced item, ref is set and item is left zero: the payload
+// stays on disk, and a nack simply puts the reference back. Retaining the
+// payload here would reintroduce the very cost this change removes, one
+// batch at a time.
 type inflightEntry struct {
-	item   Item
-	onDisk bool
+	item Item
+	ref  *diskRef
 }
 
 // bufferedQueue implements Queue with an in-memory channel and optional WAL disk spill.
@@ -87,8 +93,15 @@ type bufferedQueue struct {
 	memBytes  int64
 	memCount  int64
 	diskCount int64
-	diskHead  []Item
+	diskRefs  []diskRef
 	disk      *diskStore
+
+	// refsPerSegment counts live references into each WAL segment. Task 7
+	// uses it to decide which segments can be deleted. It is incremented when
+	// a reference is created and decremented ONLY on ack or drop — a dequeued
+	// item still lives in inflight and still pins its segment.
+	refsPerSegment map[int]int64
+	lowestSegment  int
 
 	inflight map[string]*inflightEntry
 
@@ -108,10 +121,11 @@ func New(cfg *config.BufferConfig, log *logger.Logger, m *agentmetrics.QueueMetr
 	}
 
 	q := &bufferedQueue{
-		cfg:      cfg,
-		log:      log,
-		metrics:  m,
-		inflight: make(map[string]*inflightEntry),
+		cfg:            cfg,
+		log:            log,
+		metrics:        m,
+		inflight:       make(map[string]*inflightEntry),
+		refsPerSegment: make(map[int]int64),
 	}
 	q.cond = sync.NewCond(&q.mu)
 
@@ -134,23 +148,10 @@ func New(cfg *config.BufferConfig, log *logger.Logger, m *agentmetrics.QueueMetr
 			_ = ds.close()
 			return nil, fmt.Errorf("recover spill segments: %w", err)
 		}
-		// TEMPORARY shim (Task 5 removes it): reads each recovered item's
-		// payload back into memory immediately, which defeats the point of
-		// diskRef and keeps the heap regression alive. It only exists so the
-		// package compiles and the tree stays green between tasks; Task 5
-		// stores the refs in q.diskHead directly and reads payloads lazily
-		// on dequeue instead.
+		q.diskRefs = append(q.diskRefs, recovered...)
+		q.diskCount = int64(len(recovered))
 		for _, ref := range recovered {
-			item, err := ds.readItem(ref.Segment, ref.Offset)
-			if err != nil {
-				log.Error("skip unreadable recovered item",
-					logger.F("item_id", ref.ID),
-					logger.F("error", err.Error()),
-				)
-				continue
-			}
-			q.diskHead = append(q.diskHead, item)
-			q.diskCount++
+			q.refsPerSegment[ref.Segment]++
 		}
 		if len(recovered) > 0 {
 			log.Info("recovered items from disk spill", logger.F("count", len(recovered)))
@@ -341,14 +342,20 @@ func (q *bufferedQueue) evictOldestMemoryUnlocked() error {
 		q.memBytes -= q.itemSize(oldest)
 		q.memCount--
 		if q.disk != nil {
-			if _, _, err := q.disk.appendItem(oldest); err != nil {
+			segment, offset, err := q.disk.appendItem(oldest)
+			if err != nil {
 				q.memCh <- oldest
 				q.memBytes += q.itemSize(oldest)
 				q.memCount++
 				return fmt.Errorf("spill item to disk: %w", err)
 			}
-			q.diskHead = append(q.diskHead, oldest)
-			q.diskCount++
+			q.addDiskRefUnlocked(diskRef{
+				ID:         oldest.ID,
+				Segment:    segment,
+				Offset:     offset,
+				EnqueuedAt: oldest.EnqueuedAt,
+				Attempts:   oldest.Attempts,
+			})
 			q.updateDepthMetricsLocked()
 			return nil
 		}
@@ -360,14 +367,37 @@ func (q *bufferedQueue) evictOldestMemoryUnlocked() error {
 }
 
 func (q *bufferedQueue) spillEnqueueUnlocked(item Item) error {
-	if _, _, err := q.disk.appendItem(item); err != nil {
+	segment, offset, err := q.disk.appendItem(item)
+	if err != nil {
 		return err
 	}
-	q.diskHead = append(q.diskHead, item)
-	q.diskCount++
+	q.addDiskRefUnlocked(diskRef{
+		ID:         item.ID,
+		Segment:    segment,
+		Offset:     offset,
+		EnqueuedAt: item.EnqueuedAt,
+		Attempts:   item.Attempts,
+	})
 	q.metrics.IncEnqueued()
 	q.updateDepthMetricsLocked()
 	return nil
+}
+
+// addDiskRefUnlocked appends a reference and charges it to its segment.
+func (q *bufferedQueue) addDiskRefUnlocked(ref diskRef) {
+	q.diskRefs = append(q.diskRefs, ref)
+	q.diskCount++
+	q.refsPerSegment[ref.Segment]++
+}
+
+// releaseDiskRefUnlocked drops a segment's claim on one reference. Called
+// only when the item is permanently gone: acked or dropped. Dequeue must not
+// call this — the item is still live in inflight.
+func (q *bufferedQueue) releaseDiskRefUnlocked(segment int) {
+	q.refsPerSegment[segment]--
+	if q.refsPerSegment[segment] <= 0 {
+		delete(q.refsPerSegment, segment)
+	}
 }
 
 func (q *bufferedQueue) dropOldestUnlocked() {
@@ -377,11 +407,12 @@ func (q *bufferedQueue) dropOldestUnlocked() {
 		q.memCount--
 		q.dropItemUnlocked(oldest)
 	default:
-		if len(q.diskHead) > 0 {
-			dropped := q.diskHead[0]
-			q.diskHead = q.diskHead[1:]
+		if len(q.diskRefs) > 0 {
+			ref := q.diskRefs[0]
+			q.diskRefs = q.diskRefs[1:]
 			q.diskCount--
-			q.dropItemUnlocked(dropped)
+			q.releaseDiskRefUnlocked(ref.Segment)
+			q.dropItemUnlocked(Item{ID: ref.ID})
 		}
 	}
 }
@@ -404,8 +435,8 @@ func (q *bufferedQueue) DequeueBatch(ctx context.Context, n int) ([]Item, error)
 	}
 
 	type pulled struct {
-		item     Item
-		fromDisk bool
+		item Item
+		ref  *diskRef
 	}
 
 	var pulledItems []pulled
@@ -422,7 +453,7 @@ func (q *bufferedQueue) DequeueBatch(ctx context.Context, n int) ([]Item, error)
 		}
 
 		for len(pulledItems) < n {
-			item, fromDisk, ok, err := q.dequeueOneUnlocked(ctx)
+			item, ref, ok, err := q.dequeueOneUnlocked(ctx)
 			if err != nil {
 				q.mu.Unlock()
 				return nil, err
@@ -430,12 +461,19 @@ func (q *bufferedQueue) DequeueBatch(ctx context.Context, n int) ([]Item, error)
 			if !ok {
 				break
 			}
-			pulledItems = append(pulledItems, pulled{item: item, fromDisk: fromDisk})
+			pulledItems = append(pulledItems, pulled{item: item, ref: ref})
 		}
 
 		if len(pulledItems) > 0 {
 			for _, p := range pulledItems {
-				q.inflight[p.item.ID] = &inflightEntry{item: p.item, onDisk: p.fromDisk}
+				entry := &inflightEntry{}
+				if p.ref != nil {
+					// Disk-sourced: keep the reference, not the payload.
+					entry.ref = p.ref
+				} else {
+					entry.item = p.item
+				}
+				q.inflight[p.item.ID] = entry
 				q.metrics.IncDequeued()
 			}
 			q.updateDepthMetricsLocked()
@@ -454,9 +492,29 @@ func (q *bufferedQueue) DequeueBatch(ctx context.Context, n int) ([]Item, error)
 	return batch, nil
 }
 
-func (q *bufferedQueue) dequeueOneUnlocked(ctx context.Context) (Item, bool, bool, error) {
+// dequeueOneUnlocked returns the next item, preferring the disk tier.
+//
+// Spilled items are by definition older than resident ones — they were
+// evicted to make room for what is in memory now — so reading memory first
+// starves them, and a disk tier that never drains is a disk tier whose
+// segments can never be compacted.
+func (q *bufferedQueue) dequeueOneUnlocked(ctx context.Context) (Item, *diskRef, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return Item{}, false, false, err
+		return Item{}, nil, false, err
+	}
+
+	for len(q.diskRefs) > 0 {
+		ref := q.diskRefs[0]
+		q.diskRefs = q.diskRefs[1:]
+		q.diskCount--
+		q.updateDepthMetricsLocked()
+
+		item, ok := q.readRefUnlocked(ref)
+		if !ok {
+			continue
+		}
+		item.Attempts = ref.Attempts
+		return item, &ref, true, nil
 	}
 
 	select {
@@ -464,19 +522,33 @@ func (q *bufferedQueue) dequeueOneUnlocked(ctx context.Context) (Item, bool, boo
 		q.memBytes -= q.itemSize(item)
 		q.memCount--
 		q.updateDepthMetricsLocked()
-		return item, false, true, nil
+		return item, nil, true, nil
 	default:
 	}
 
-	if len(q.diskHead) > 0 {
-		item := q.diskHead[0]
-		q.diskHead = q.diskHead[1:]
-		q.diskCount--
-		q.updateDepthMetricsLocked()
-		return item, true, true, nil
-	}
+	return Item{}, nil, false, nil
+}
 
-	return Item{}, false, false, nil
+// readRefUnlocked fetches a spilled payload. An unreadable record is counted
+// as dropped and skipped: a corrupt byte range must not wedge the queue
+// behind an item that can never be delivered.
+func (q *bufferedQueue) readRefUnlocked(ref diskRef) (Item, bool) {
+	start := time.Now()
+	item, err := q.disk.readItem(ref.Segment, ref.Offset)
+	q.metrics.ObserveDiskRead(time.Since(start).Seconds())
+	if err != nil {
+		q.log.Error("drop unreadable spilled item",
+			logger.F("item_id", ref.ID),
+			logger.F("segment", ref.Segment),
+			logger.F("offset", ref.Offset),
+			logger.F("error", err.Error()),
+		)
+		q.metrics.IncDiskReadError()
+		q.releaseDiskRefUnlocked(ref.Segment)
+		q.dropItemUnlocked(Item{ID: ref.ID})
+		return Item{}, false
+	}
+	return item, true
 }
 
 // Ack permanently removes delivered items.
@@ -495,10 +567,11 @@ func (q *bufferedQueue) Ack(ids []string) error {
 		}
 		delete(q.inflight, id)
 		q.metrics.IncAck()
-		if entry.onDisk && q.disk != nil {
+		if entry.ref != nil && q.disk != nil {
 			if err := q.disk.appendAck(id); err != nil {
 				return fmt.Errorf("persist ack for %q: %w", id, err)
 			}
+			q.releaseDiskRefUnlocked(entry.ref.Segment)
 		}
 	}
 	q.signalWaitersLocked()
@@ -514,21 +587,36 @@ func (q *bufferedQueue) Nack(ids []string) error {
 		return errors.New("queue is closed")
 	}
 
-	var front []Item
+	var frontMemory []Item
+	var frontRefs []diskRef
 	for _, id := range ids {
 		entry, ok := q.inflight[id]
 		if !ok {
 			continue
 		}
 		delete(q.inflight, id)
+		q.metrics.IncNack(1)
+		if entry.ref != nil {
+			ref := *entry.ref
+			ref.Attempts++
+			frontRefs = append(frontRefs, ref)
+			continue
+		}
 		item := entry.item
 		item.Attempts++
-		front = append(front, item)
-		q.metrics.IncNack(1)
+		frontMemory = append(frontMemory, item)
 	}
 
-	for i := len(front) - 1; i >= 0; i-- {
-		item := front[i]
+	// References first so they end up ahead of everything, preserving the
+	// disk-before-memory order the dequeue path relies on. No WAL write here:
+	// the record is already there, and the segment claim was never released.
+	for i := len(frontRefs) - 1; i >= 0; i-- {
+		q.diskRefs = append([]diskRef{frontRefs[i]}, q.diskRefs...)
+		q.diskCount++
+	}
+
+	for i := len(frontMemory) - 1; i >= 0; i-- {
+		item := frontMemory[i]
 		size := q.itemSize(item)
 		if q.canAcceptInMemory(size) {
 			if err := q.enqueueFrontUnlocked(item, size); err != nil {
@@ -537,7 +625,7 @@ func (q *bufferedQueue) Nack(ids []string) error {
 			continue
 		}
 		if q.disk != nil {
-			if err := q.prependDiskUnlocked(item); err != nil {
+			if err := q.spillEnqueueUnlocked(item); err != nil {
 				return err
 			}
 			continue
@@ -579,15 +667,6 @@ drain:
 	return nil
 }
 
-func (q *bufferedQueue) prependDiskUnlocked(item Item) error {
-	if _, _, err := q.disk.appendItem(item); err != nil {
-		return fmt.Errorf("nack spill to disk: %w", err)
-	}
-	q.diskHead = append([]Item{item}, q.diskHead...)
-	q.diskCount++
-	return nil
-}
-
 // Depth returns the combined memory and disk queue depth (excluding in-flight).
 func (q *bufferedQueue) Depth() int64 {
 	q.mu.Lock()
@@ -616,11 +695,17 @@ func (q *bufferedQueue) Close() error {
 			case item := <-q.memCh:
 				q.memBytes -= q.itemSize(item)
 				q.memCount--
-				if _, _, err := q.disk.appendItem(item); err != nil {
+				segment, offset, err := q.disk.appendItem(item)
+				if err != nil {
 					return fmt.Errorf("flush item on close: %w", err)
 				}
-				q.diskHead = append(q.diskHead, item)
-				q.diskCount++
+				q.addDiskRefUnlocked(diskRef{
+					ID:         item.ID,
+					Segment:    segment,
+					Offset:     offset,
+					EnqueuedAt: item.EnqueuedAt,
+					Attempts:   item.Attempts,
+				})
 			default:
 				goto closeDisk
 			}
