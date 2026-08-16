@@ -337,36 +337,44 @@ func (ds *diskStore) closeReadHandle(segment int) {
 	}
 }
 
-// recover replays all segments and returns items not yet acknowledged.
-func (ds *diskStore) recover() ([]Item, error) {
+// recover replays all segments and returns references to items not yet
+// acknowledged, ordered by enqueue time. Payloads stay on disk.
+func (ds *diskStore) recover() ([]diskRef, error) {
 	entries, err := os.ReadDir(ds.dir)
 	if err != nil {
 		return nil, fmt.Errorf("read spill dir: %w", err)
 	}
 
-	var paths []string
+	type segFile struct {
+		num  int
+		path string
+	}
+	var segs []segFile
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		if _, ok := parseSegmentName(e.Name()); ok {
-			paths = append(paths, filepath.Join(ds.dir, e.Name()))
+		if n, ok := parseSegmentName(e.Name()); ok {
+			segs = append(segs, segFile{num: n, path: filepath.Join(ds.dir, e.Name())})
 		}
 	}
-	sort.Strings(paths)
+	sort.Slice(segs, func(i, j int) bool { return segs[i].num < segs[j].num })
 
-	pending := make(map[string]Item)
+	pending := make(map[string]diskRef)
 	acked := make(map[string]struct{})
 
-	for _, path := range paths {
-		if err := replaySegment(path, pending, acked, ds.log); err != nil {
-			ds.log.Error("skip corrupted WAL segment", logger.F("path", path), logger.F("error", err.Error()))
+	for _, s := range segs {
+		if err := replaySegment(s.num, s.path, pending, acked, ds.log); err != nil {
+			ds.log.Error("skip corrupted WAL segment",
+				logger.F("path", s.path),
+				logger.F("error", err.Error()),
+			)
 		}
 	}
 
-	out := make([]Item, 0, len(pending))
-	for _, item := range pending {
-		out = append(out, item)
+	out := make([]diskRef, 0, len(pending))
+	for _, ref := range pending {
+		out = append(out, ref)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].EnqueuedAt.Before(out[j].EnqueuedAt)
@@ -374,7 +382,7 @@ func (ds *diskStore) recover() ([]Item, error) {
 	return out, nil
 }
 
-func replaySegment(path string, pending map[string]Item, acked map[string]struct{}, log *logger.Logger) error {
+func replaySegment(segNum int, path string, pending map[string]diskRef, acked map[string]struct{}, log *logger.Logger) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open segment %q: %w", path, err)
@@ -393,6 +401,10 @@ func replaySegment(path string, pending map[string]Item, acked map[string]struct
 		return fmt.Errorf("read WAL version: %w", err)
 	}
 
+	// Byte position of the next record, mirroring what appendRecord returned
+	// when it wrote it. The header is the 4-byte magic plus a 1-byte version.
+	offset := int64(len(walMagic) + 1)
+
 	for {
 		recType, body, err := readRecord(r)
 		if errors.Is(err, io.EOF) {
@@ -407,20 +419,28 @@ func replaySegment(path string, pending map[string]Item, acked map[string]struct
 			}
 			return nil
 		}
+		recordOffset := offset
+		offset += int64(5 + len(body))
 
 		switch recType {
 		case recordTypeItem:
-			item, err := decodeItemRecord(body)
+			id, enqueuedAt, attempts, err := decodeItemHeader(body)
 			if err != nil {
 				if log != nil {
 					log.Error("corrupt WAL item record", logger.F("path", path), logger.F("error", err.Error()))
 				}
 				continue
 			}
-			if _, ok := acked[item.ID]; ok {
+			if _, ok := acked[id]; ok {
 				continue
 			}
-			pending[item.ID] = item
+			pending[id] = diskRef{
+				ID:         id,
+				Segment:    segNum,
+				Offset:     recordOffset,
+				EnqueuedAt: enqueuedAt,
+				Attempts:   attempts,
+			}
 		case recordTypeAck:
 			id, err := decodeAckRecord(body)
 			if err != nil {
@@ -514,6 +534,47 @@ func decodeItemRecord(body []byte) (Item, error) {
 		EnqueuedAt: time.Unix(0, nanos),
 		Attempts:   attempts,
 	}, nil
+}
+
+// decodeItemHeader reads an item record's identity, timestamp and attempt
+// count without copying its payload.
+//
+// It deliberately duplicates decodeItemRecord's layout walk rather than
+// calling it: that function's `payload := make([]byte, payloadLen)` is what
+// put 163 MB of customer payloads into the heap at every startup. The layout
+// is
+//
+//	uint32 idLen | id | uint32 payloadLen | payload | int64 nanos | uint32 attempts
+//
+// so the payload is skipped by advancing the offset, never by allocating.
+func decodeItemHeader(body []byte) (string, time.Time, int, error) {
+	if len(body) < 16 {
+		return "", time.Time{}, 0, errCorruptRecord
+	}
+	off := 0
+	idLen := binary.BigEndian.Uint32(body[off:])
+	off += 4
+	if int(idLen) > len(body)-off {
+		return "", time.Time{}, 0, errCorruptRecord
+	}
+	id := string(body[off : off+int(idLen)])
+	off += int(idLen)
+	if len(body) < off+4 {
+		return "", time.Time{}, 0, errCorruptRecord
+	}
+	payloadLen := binary.BigEndian.Uint32(body[off:])
+	off += 4
+	if int(payloadLen) > len(body)-off {
+		return "", time.Time{}, 0, errCorruptRecord
+	}
+	off += int(payloadLen)
+	if len(body) < off+12 {
+		return "", time.Time{}, 0, errCorruptRecord
+	}
+	nanos := int64(binary.BigEndian.Uint64(body[off:]))
+	off += 8
+	attempts := int(binary.BigEndian.Uint32(body[off:]))
+	return id, time.Unix(0, nanos), attempts, nil
 }
 
 func decodeAckRecord(body []byte) (string, error) {
