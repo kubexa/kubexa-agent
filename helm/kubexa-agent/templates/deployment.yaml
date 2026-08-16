@@ -59,6 +59,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "kubexa-agent.secretName" . }}
                   key: {{ .Values.secret.existingSecretKey }}
+            {{- $goMemLimit := include "kubexa-agent.goMemLimit" . }}
+            {{- if and $goMemLimit (not (hasKey (.Values.env | default dict) "GOMEMLIMIT")) }}
+            - name: GOMEMLIMIT
+              value: {{ $goMemLimit | quote }}
+            {{- end }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

@@ -86,6 +86,22 @@ secret:
   # Override at install: --set secret.tenantToken=<token> or use secret.existingSecret.
   tenantToken: "CHANGEME"
 
+# Go runtime soft memory limit (GOMEMLIMIT).
+#
+# Leave empty to derive it from resources.limits.memory below. Without it the
+# Go runtime cannot see the container limit and targets a heap of twice the live
+# heap regardless of it -- which is how a 512Mi agent came to sit at 432 MB RSS
+# and get OOMKilled 8 times. See the kubexa-agent.goMemLimit helper for the
+# measurements and for why a soft limit is the right trade.
+#
+#   ""      derive: goMemLimitPercent of resources.limits.memory
+#   "off"   do not set GOMEMLIMIT at all
+#   other   used verbatim, e.g. "400MiB" or a plain byte count
+#
+# Setting GOMEMLIMIT in `env` below also wins; the chart will not add a second.
+goMemLimit: ""
+goMemLimitPercent: 75
+
 # Optional env overrides (see pkg/config applyEnvOverrides).
 # Example: KUBEXA_GATEWAY_ADDRESS, KUBEXA_LOG_LEVEL
 env: {}
