@@ -999,6 +999,22 @@ func (q *bufferedQueue) Depth() int64 {
 	return q.memCount + q.diskCount
 }
 
+// InflightLen reports how many items are dequeued but neither acked nor
+// nacked. Nothing in production reads it; it exists so a test can assert that
+// a drain loop strands nothing, which is exactly the bug that produced
+// permanently undeliverable items on a live agent -- and, since a claim is
+// released only on ack or drop, a stranded item now pins its WAL segment and
+// the whole prefix behind it for the lifetime of the process.
+//
+// Deliberately not on the Queue interface: it is an observation hook, not a
+// capability callers get to depend on. Tests reach it by asserting on an
+// anonymous interface.
+func (q *bufferedQueue) InflightLen() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.inflight)
+}
+
 // DroppedTotal returns the number of items dropped since startup.
 func (q *bufferedQueue) DroppedTotal() int64 {
 	return q.dropped.Load()
