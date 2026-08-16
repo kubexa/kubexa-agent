@@ -38,16 +38,17 @@ type Metrics struct {
 
 // QueueMetrics records buffer queue instrumentation.
 type QueueMetrics struct {
-	depth          *prometheus.GaugeVec
-	enqueuedTotal  prometheus.Counter
-	dequeuedTotal  prometheus.Counter
-	droppedTotal   prometheus.Counter
-	ackTotal       prometheus.Counter
-	nackTotal      prometheus.Counter
-	diskBytes      prometheus.Gauge
-	diskReadErrors prometheus.Counter
-	diskReadTime   prometheus.Histogram
-	segments       prometheus.Gauge
+	depth           *prometheus.GaugeVec
+	enqueuedTotal   prometheus.Counter
+	dequeuedTotal   prometheus.Counter
+	droppedTotal    prometheus.Counter
+	unrecordedTotal prometheus.Counter
+	ackTotal        prometheus.Counter
+	nackTotal       prometheus.Counter
+	diskBytes       prometheus.Gauge
+	diskReadErrors  prometheus.Counter
+	diskReadTime    prometheus.Histogram
+	segments        prometheus.Gauge
 }
 
 // StreamMetrics records gRPC stream and unary call instrumentation.
@@ -69,11 +70,11 @@ type K8sMetrics struct {
 
 // CollectorMetrics records data collection instrumentation.
 type CollectorMetrics struct {
-	logsCollectedTotal  *prometheus.CounterVec
-	logsBytesTotal      *prometheus.CounterVec
-	stateEventsTotal    *prometheus.CounterVec
-	metricScrapesTotal  *prometheus.CounterVec
-	activeStreams       *prometheus.GaugeVec
+	logsCollectedTotal *prometheus.CounterVec
+	logsBytesTotal     *prometheus.CounterVec
+	stateEventsTotal   *prometheus.CounterVec
+	metricScrapesTotal *prometheus.CounterVec
+	activeStreams      *prometheus.GaugeVec
 }
 
 // HealthMetrics records component health status.
@@ -134,6 +135,16 @@ func New(reg prometheus.Registerer, version, clusterID, agentID string) (*Metric
 				Subsystem: "queue",
 				Name:      "dropped_total",
 				Help:      "Total number of items dropped due to capacity limits.",
+			},
+		),
+		unrecordedTotal: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: metricNamespace,
+				Subsystem: "queue",
+				Name:      "delivered_unrecorded_total",
+				Help: "Total number of items the gateway accepted but whose ack " +
+					"could not be persisted before redelivery gave up. Not data loss: " +
+					"the data arrived, only the agent's record of it did not.",
 			},
 		),
 		ackTotal: prometheus.NewCounter(
@@ -369,6 +380,7 @@ func New(reg prometheus.Registerer, version, clusterID, agentID string) (*Metric
 		queue.enqueuedTotal,
 		queue.dequeuedTotal,
 		queue.droppedTotal,
+		queue.unrecordedTotal,
 		queue.ackTotal,
 		queue.nackTotal,
 		queue.diskBytes,
@@ -471,6 +483,14 @@ func (q *QueueMetrics) IncDequeued() {
 		return
 	}
 	q.dequeuedTotal.Inc()
+}
+
+// IncDeliveredUnrecorded increments the delivered-but-unrecorded counter.
+func (q *QueueMetrics) IncDeliveredUnrecorded() {
+	if q == nil || q.unrecordedTotal == nil {
+		return
+	}
+	q.unrecordedTotal.Inc()
 }
 
 // IncDropped increments the dropped counter.

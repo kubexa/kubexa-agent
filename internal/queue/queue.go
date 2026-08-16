@@ -80,6 +80,12 @@ type Queue interface {
 	// Items past the delivery-attempt cap are retired instead of returned.
 	Nack(ids []string) error
 
+	// NackDelivered returns items whose delivery succeeded but whose ack could
+	// not be recorded. Identical to Nack except in the accounting: retiring one
+	// of these at the attempt cap is not data loss, because the gateway has the
+	// data -- only our record of it failed.
+	NackDelivered(ids []string) error
+
 	// Drop settles items without redelivering them, counting each as dropped.
 	// It is for items the caller has judged undeliverable, where a nack would
 	// replay them forever; it is on the interface because the caller has no
@@ -160,6 +166,11 @@ type bufferedQueue struct {
 	inflight map[string]*inflightEntry
 
 	dropped atomic.Int64
+	// unrecorded counts items retired at the attempt cap that had actually
+	// been delivered. They are not losses and must not be reported as such:
+	// dropped_total is what an operator reads to decide whether telemetry went
+	// missing, and these arrived.
+	unrecorded atomic.Int64
 }
 
 // New constructs a ready-to-use Queue from cfg, logging through log and recording metrics via m.
@@ -948,6 +959,23 @@ func (q *bufferedQueue) Ack(ids []string) error {
 // is the one choke point every redelivery passes through; a cap in the caller
 // would leave every other nack path uncapped.
 func (q *bufferedQueue) Nack(ids []string) error {
+	return q.nack(ids, false)
+}
+
+// NackDelivered is Nack for items that reached the gateway but whose ack could
+// not be persisted. The queue cannot tell the two cases apart on its own -- it
+// never sees the wire -- so the caller says which it is, and the difference
+// shows up only if the item is later retired at the attempt cap: a retirement
+// after delivery counts as delivered-but-unrecorded, not as a drop.
+//
+// The flag describes the most recent attempt, which is the right question at
+// retirement time: it decides whether the data the queue is giving up on ever
+// left the agent.
+func (q *bufferedQueue) NackDelivered(ids []string) error {
+	return q.nack(ids, true)
+}
+
+func (q *bufferedQueue) nack(ids []string, delivered bool) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -968,7 +996,7 @@ func (q *bufferedQueue) Nack(ids []string) error {
 			ref := *entry.ref
 			ref.Attempts++
 			if ref.Attempts > maxDeliveryAttempts {
-				q.retireInflightUnlocked(id, entry, ref.Attempts)
+				q.retireInflightUnlocked(id, entry, ref.Attempts, delivered)
 				continue
 			}
 			frontRefs = append(frontRefs, ref)
@@ -977,7 +1005,7 @@ func (q *bufferedQueue) Nack(ids []string) error {
 		item := entry.item
 		item.Attempts++
 		if item.Attempts > maxDeliveryAttempts {
-			q.retireInflightUnlocked(id, entry, item.Attempts)
+			q.retireInflightUnlocked(id, entry, item.Attempts, delivered)
 			continue
 		}
 		frontMemory = append(frontMemory, item)
@@ -1038,10 +1066,25 @@ func (q *bufferedQueue) Nack(ids []string) error {
 // Releasing the claim here is what keeps the "decrement only on ack or drop"
 // rule intact -- this is the drop -- and it is the only reason compaction can
 // ever move past a segment holding a poison record.
-func (q *bufferedQueue) retireInflightUnlocked(id string, entry *inflightEntry, attempts int) {
+func (q *bufferedQueue) retireInflightUnlocked(id string, entry *inflightEntry, attempts int, delivered bool) {
 	if entry.ref != nil {
 		q.releaseDiskRefUnlocked(entry.ref.Segment)
 		q.settleDroppedRefUnlocked(*entry.ref)
+	}
+	if delivered {
+		// Not a loss. The gateway has this data; what failed was writing our
+		// own record of the delivery, and giving up on the record is the whole
+		// point of the cap. Counting it in dropped_total would tell an operator
+		// they lost telemetry they did not lose.
+		q.unrecorded.Add(1)
+		q.metrics.IncDeliveredUnrecorded()
+		q.log.Warn("retiring a delivered item whose ack could not be recorded",
+			logger.F("item_id", id),
+			logger.F("attempts", attempts),
+			logger.F("max_attempts", maxDeliveryAttempts),
+		)
+		q.updateDepthMetricsLocked()
+		return
 	}
 	q.dropped.Add(1)
 	q.metrics.IncDropped()
@@ -1082,7 +1125,9 @@ func (q *bufferedQueue) Drop(ids []string) error {
 			// the item field is deliberately empty there.
 			attempts = entry.ref.Attempts
 		}
-		q.retireInflightUnlocked(id, entry, attempts)
+		// delivered=false: Drop is for items judged undeliverable here, so
+		// they are genuine losses and belong in dropped_total.
+		q.retireInflightUnlocked(id, entry, attempts, false)
 	}
 
 	// Retiring a disk-sourced item releases the last claim on its segment as
@@ -1161,6 +1206,26 @@ func (q *bufferedQueue) SegmentClaims() int64 {
 		total += count
 	}
 	return total
+}
+
+// RefUnderflows reports how many times a segment claim was released that was
+// never held. A test hook, like InflightLen and SegmentClaims.
+//
+// SegmentClaims alone cannot see a double release: releaseDiskRefUnlocked
+// clamps at zero, so a second decrement leaves the same reading as one. This
+// counter is the only evidence, and a double release is precisely what lets
+// compaction unlink a segment whose records are still needed.
+func (q *bufferedQueue) RefUnderflows() int64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.refUnderflows
+}
+
+// DeliveredUnrecordedTotal returns the number of items retired at the attempt
+// cap after a successful delivery -- items the gateway has and the agent could
+// not record. Kept apart from DroppedTotal, which means data loss.
+func (q *bufferedQueue) DeliveredUnrecordedTotal() int64 {
+	return q.unrecorded.Load()
 }
 
 // DroppedTotal returns the number of items dropped since startup.
