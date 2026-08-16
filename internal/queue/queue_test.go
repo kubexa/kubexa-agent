@@ -1422,3 +1422,355 @@ func TestCompactionSurvivesRestart(t *testing.T) {
 		t.Errorf("recovered %d unacked items, want 4", len(seen))
 	}
 }
+
+// writeSpentWAL lays down segments the way a pre-compaction binary left them:
+// several rotated segments in which every record has already been acked, and
+// nothing was ever removed. It returns the ids it wrote.
+func writeSpentWAL(t *testing.T, dir string, maxBytes int64, n int) []string {
+	t.Helper()
+	ds, err := newDiskStore(dir, maxBytes, logger.New("queue-test"), nil)
+	if err != nil {
+		t.Fatalf("newDiskStore() error = %v", err)
+	}
+	payload := make([]byte, segmentMaxBytes/4)
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("old-%d", i)
+		if _, _, err := ds.appendItem(item(id, payload)); err != nil {
+			t.Fatalf("appendItem(%s) error = %v", id, err)
+		}
+		ids = append(ids, id)
+	}
+	for _, id := range ids {
+		if err := ds.appendAck(id); err != nil {
+			t.Fatalf("appendAck(%s) error = %v", id, err)
+		}
+	}
+	if err := ds.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+	return ids
+}
+
+// Segments already on disk when the process starts must be collectable even
+// when recovery finds nothing pending in them. Seeding the compaction cursor
+// from the active segment alone strands every one of them for the lifetime of
+// the process: the queue is empty, the disk is full, and no ack can ever move
+// a cursor that already sits above them.
+func TestCompactionReclaimsSegmentsWhenRecoveryFindsNothing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := bigSpillConfig(dir)
+	writeSpentWAL(t, dir, cfg.MaxDiskBytes, 10)
+
+	before := segmentFileNums(t, dir)
+	if len(before) < 3 {
+		t.Fatalf("segments on disk = %v, want at least 3 to have a prefix worth reclaiming", before)
+	}
+
+	q := newTestBufferedQueue(t, cfg, nil)
+	ctx := context.Background()
+	if got := q.Depth(); got != 0 {
+		t.Fatalf("Depth() = %d, want 0: this test covers the empty-recovery case", got)
+	}
+
+	// One real item through the public API is all the agent needs to do for
+	// the spent prefix to go.
+	if err := q.Enqueue(ctx, item("new-0", make([]byte, segmentMaxBytes/4))); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+	batch, err := q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+	if len(batch) != 1 {
+		t.Fatalf("got %d items, want 1", len(batch))
+	}
+	if err := q.Ack([]string{batch[0].ID}); err != nil {
+		t.Fatalf("Ack() error = %v", err)
+	}
+
+	active := q.disk.activeSegment()
+	got := segmentFileNums(t, dir)
+	if len(got) != 1 || got[0] != active {
+		t.Errorf("segments on disk = %v, want just the active segment [%d]: the "+
+			"fully-acked prefix written before this process must be reclaimed", got, active)
+	}
+}
+
+// A failed ack must not strand the claim it was about to release. The claim is
+// what pins the segment and the whole prefix behind it, so an ack that removes
+// the inflight entry but leaves the claim held pins that prefix for the
+// lifetime of the process -- nothing is left that could ever release it.
+func TestFailedAckLeavesTheSegmentReclaimable(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	q := newTestBufferedQueue(t, bigSpillConfig(dir), nil)
+	ctx := context.Background()
+
+	payload := make([]byte, segmentMaxBytes/4)
+	for i := 0; i < 8; i++ {
+		if err := q.Enqueue(ctx, item(fmt.Sprintf("big-%d", i), payload)); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+	batch, err := q.DequeueBatch(ctx, 64)
+	if err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+	if len(batch) != 8 {
+		t.Fatalf("got %d items, want all 8", len(batch))
+	}
+	ids := make([]string, len(batch))
+	for i, it := range batch {
+		ids[i] = it.ID
+	}
+
+	// Jam the WAL exactly the way a full disk does: the next append, ack
+	// records included, exceeds the byte cap.
+	q.disk.mu.Lock()
+	restore := q.disk.maxBytes
+	q.disk.maxBytes = q.disk.totalBytes
+	q.disk.mu.Unlock()
+
+	if err := q.Ack(ids); err == nil {
+		t.Fatalf("Ack() with a full WAL returned nil, want an error")
+	}
+
+	q.mu.Lock()
+	inflight := len(q.inflight)
+	claims := int64(0)
+	for _, n := range q.refsPerSegment {
+		claims += n
+	}
+	underflows := q.refUnderflows
+	q.mu.Unlock()
+	if inflight == 0 {
+		t.Fatalf("inflight is empty after a failed ack: the items were dropped " +
+			"from the queue's view while their claims stayed held")
+	}
+	if int64(inflight) != claims {
+		t.Errorf("inflight = %d but %d claims are held; every held claim needs a "+
+			"live entry that can still release it", inflight, claims)
+	}
+
+	// Unjam and retry the same ids, as a caller that got an error would.
+	q.disk.mu.Lock()
+	q.disk.maxBytes = restore
+	q.disk.mu.Unlock()
+
+	if err := q.Ack(ids); err != nil {
+		t.Fatalf("retried Ack() error = %v", err)
+	}
+	if underflows != 0 {
+		t.Errorf("refUnderflows = %d, want 0", underflows)
+	}
+
+	active := q.disk.activeSegment()
+	got := segmentFileNums(t, dir)
+	if len(got) != 1 || got[0] != active {
+		t.Errorf("segments on disk = %v, want just the active segment [%d]: a "+
+			"failed ack must not pin the prefix permanently", got, active)
+	}
+}
+
+// The dequeue path is the second reclaim point and the only one that runs
+// without an ack: an unreadable record releases its claim there, and no ack for
+// it will ever arrive. Without compaction on this path a queue whose remaining
+// records are all corrupt sits on a full disk forever.
+func TestCompactionRunsOnTheDequeueDropPath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	q := newTestBufferedQueue(t, bigSpillConfig(dir), nil)
+	ctx := context.Background()
+
+	payload := make([]byte, segmentMaxBytes/4)
+	for i := 0; i < 8; i++ {
+		if err := q.Enqueue(ctx, item(fmt.Sprintf("big-%d", i), payload)); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+	before := segmentFileNums(t, dir)
+	if len(before) < 3 {
+		t.Fatalf("segments on disk = %v, want at least 3", before)
+	}
+
+	// Every record in the lowest segment becomes unreadable.
+	if err := os.Truncate(dir+"/"+segmentFilename(0), int64(len(walMagic)+1)); err != nil {
+		t.Fatalf("truncate segment 0: %v", err)
+	}
+
+	if _, err := q.DequeueBatch(ctx, 64); err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+
+	got := segmentFileNums(t, dir)
+	for _, n := range got {
+		if n == 0 {
+			t.Fatalf("segments on disk = %v: segment 0 holds nothing but "+
+				"unreadable records, and no ack will ever arrive for them", got)
+		}
+	}
+	if q.DroppedTotal() == 0 {
+		t.Fatalf("DroppedTotal() = 0, want the unreadable records counted")
+	}
+}
+
+func queueGauge(t *testing.T, reg *prometheus.Registry, name string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			return m.GetGauge().GetValue()
+		}
+	}
+	t.Fatalf("metric %q not found", name)
+	return 0
+}
+
+// The segments gauge has to be right from the moment the process starts. An
+// agent that has not yet had anything to reclaim is exactly the agent whose
+// disk is filling, and a gauge that reads zero until the first compaction
+// cannot alert on it.
+func TestSegmentsGaugeTracksTheDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := bigSpillConfig(dir)
+	writeSpentWAL(t, dir, cfg.MaxDiskBytes, 10)
+	onDisk := float64(len(segmentFileNums(t, dir)))
+
+	reg := prometheus.NewRegistry()
+	q, err := New(cfg, logger.New("queue-test"), newTestQueueMetrics(t, reg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = q.Close() })
+
+	if got := queueGauge(t, reg, "kubexa_queue_segments"); got != onDisk {
+		t.Errorf("segments gauge at construction = %v, want %v (before any "+
+			"compaction has run)", got, onDisk)
+	}
+
+	ctx := context.Background()
+	if err := q.Enqueue(ctx, item("new-0", make([]byte, segmentMaxBytes/4))); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+	batch, err := q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+	if err := q.Ack([]string{batch[0].ID}); err != nil {
+		t.Fatalf("Ack() error = %v", err)
+	}
+
+	want := float64(len(segmentFileNums(t, dir)))
+	if got := queueGauge(t, reg, "kubexa_queue_segments"); got != want {
+		t.Errorf("segments gauge after compaction = %v, want %v", got, want)
+	}
+}
+
+// Removal failure is logged on the transition, not on every attempt: this runs
+// from both reclaim points, so a spill directory that has gone read-only would
+// otherwise emit a warning per ack and per dequeue into the same pipeline that
+// carries the real diagnostics.
+func TestCompactionFailureLogsTheTransitionNotEveryAttempt(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions would not stop the unlink")
+	}
+
+	dir := t.TempDir()
+	q := newTestBufferedQueue(t, bigSpillConfig(dir), nil)
+	ctx := context.Background()
+
+	payload := make([]byte, segmentMaxBytes/4)
+	for i := 0; i < 8; i++ {
+		if err := q.Enqueue(ctx, item(fmt.Sprintf("big-%d", i), payload)); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+	batch, err := q.DequeueBatch(ctx, 64)
+	if err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+	ids := make([]string, len(batch))
+	for i, it := range batch {
+		ids[i] = it.ID
+	}
+
+	// A directory without write permission fails the unlink, not the appends:
+	// the segment files are already open.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod spill dir: %v", err)
+	}
+	restored := false
+	defer func() {
+		if !restored {
+			_ = os.Chmod(dir, 0o750)
+		}
+	}()
+
+	if err := q.Ack(ids); err != nil {
+		t.Fatalf("Ack() error = %v", err)
+	}
+	q.mu.Lock()
+	failing, failures := q.compactFailing, q.compactFailures
+	q.mu.Unlock()
+	if !failing {
+		t.Skip("the unlink succeeded despite the directory mode; nothing to assert")
+	}
+	if failures != 1 {
+		t.Errorf("compactFailures = %d after one compaction, want 1", failures)
+	}
+
+	// Further attempts keep counting but must not re-announce. Acking ids
+	// that are no longer inflight is a no-op for the ack loop and still runs
+	// compaction, which is the retry under test.
+	for i := 0; i < 3; i++ {
+		if err := q.Ack(ids); err != nil {
+			t.Fatalf("repeat Ack() error = %v", err)
+		}
+	}
+	q.mu.Lock()
+	stillFailing, moreFailures := q.compactFailing, q.compactFailures
+	q.mu.Unlock()
+	if !stillFailing {
+		t.Errorf("compactFailing = false while removal is still failing")
+	}
+	if moreFailures <= failures {
+		t.Errorf("compactFailures = %d, want it to keep counting past %d", moreFailures, failures)
+	}
+
+	// Recovery has to clear the state, or the next real failure goes unlogged.
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatalf("restore spill dir mode: %v", err)
+	}
+	restored = true
+	if err := q.Enqueue(ctx, item("after", payload)); err != nil {
+		t.Fatalf("Enqueue(after) error = %v", err)
+	}
+	last, err := q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch() error = %v", err)
+	}
+	if err := q.Ack([]string{last[0].ID}); err != nil {
+		t.Fatalf("Ack() error = %v", err)
+	}
+	q.mu.Lock()
+	recovered := !q.compactFailing
+	q.mu.Unlock()
+	if !recovered {
+		t.Errorf("compactFailing stayed true after removal started working again")
+	}
+}

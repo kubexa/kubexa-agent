@@ -107,6 +107,11 @@ type bufferedQueue struct {
 	// item still lives in inflight and still pins its segment.
 	refsPerSegment map[int]int64
 	lowestSegment  int
+	// compactFailing is true while segment removal is failing, so the warning
+	// is logged on the transition instead of on every attempt.
+	// compactFailures counts every failed attempt. Both guarded by mu.
+	compactFailing  bool
+	compactFailures int64
 	// refUnderflows counts releases of a segment claim that was never held.
 	// Guarded by mu, like refsPerSegment itself.
 	refUnderflows int64
@@ -176,15 +181,25 @@ func New(cfg *config.BufferConfig, log *logger.Logger, m *agentmetrics.QueueMetr
 			q.refsPerSegment[ref.Segment]++
 		}
 
-		// Where compaction starts scanning after a restart. Segment 0 is
-		// usually long gone by then, and starting there would make every call
-		// walk the whole deleted range looking for files that are not coming
-		// back. The seed is the lowest of the active segment and every
-		// recovered reference -- including the ones the cap is about to drop
-		// just below, because a starting point that is too low only costs a
-		// few no-op iterations, while one that is too high strands every
-		// segment below it forever.
+		// Where compaction starts scanning. The cursor must sit at or below
+		// every segment that could still need collecting, so it is seeded from
+		// the files actually in the spill directory -- not from the recovered
+		// references, and not from the active segment.
+		//
+		// Those two are both wrong on their own, in the same direction. When
+		// every record in the WAL was already acked, recovery returns nothing
+		// and the seed would collapse onto the active segment, leaving every
+		// older file below the cursor permanently uncollectable: the queue is
+		// empty, the disk is full, and no ack can move a cursor that already
+		// sits above them. That is precisely the state an upgrade from a
+		// pre-compaction binary starts in.
+		//
+		// Erring low is free -- a few no-op iterations over numbers whose files
+		// are gone -- so the minimum is taken over all three sources.
 		q.lowestSegment = q.disk.activeSegment()
+		if oldest, ok := q.disk.lowestSegmentOnDisk(); ok && oldest < q.lowestSegment {
+			q.lowestSegment = oldest
+		}
 		for _, ref := range recovered {
 			if ref.Segment < q.lowestSegment {
 				q.lowestSegment = ref.Segment
@@ -542,23 +557,57 @@ func (q *bufferedQueue) compactUnlocked() {
 	}
 
 	active := q.disk.activeSegment()
-	removed := 0
 	for q.lowestSegment < active && q.refsPerSegment[q.lowestSegment] == 0 {
 		if err := q.disk.removeSegment(q.lowestSegment); err != nil {
-			q.log.Warn("could not remove spent WAL segment",
-				logger.F("segment", q.lowestSegment),
-				logger.F("error", err.Error()),
-			)
-			break
+			q.noteCompactionFailureUnlocked(q.lowestSegment, err)
+			return
 		}
+		// A no-op today: a claim's key is deleted the moment its count
+		// reaches zero, so the loop condition above already implies the key
+		// is absent. It stays as map hygiene -- a stale zero entry from any
+		// future path would otherwise accumulate one key per retired segment
+		// for the life of the process.
 		delete(q.refsPerSegment, q.lowestSegment)
 		q.lowestSegment++
-		removed++
+		q.noteCompactionSuccessUnlocked()
 	}
+}
 
-	if removed > 0 && q.metrics != nil {
-		q.metrics.SetSegments(float64(q.disk.segmentCount()))
+// noteCompactionFailureUnlocked reports a segment that would not delete,
+// logging the transition rather than the occurrence.
+//
+// This runs from both reclaim points, so on a spill directory that has gone
+// read-only it would otherwise fire on every ack and every dequeue -- hundreds
+// of megabytes a day of agent log, flowing into the same collection pipeline as
+// the real diagnostics and rotating them out. The agent's own telemetry
+// becoming the outage is a failure mode this project has hit before. One line
+// when reclamation starts failing, one when it recovers, and a count in both.
+//
+// A closed store is not a failure: compaction races Close by design.
+func (q *bufferedQueue) noteCompactionFailureUnlocked(segment int, err error) {
+	if errors.Is(err, errStoreClosed) {
+		return
 	}
+	q.compactFailures++
+	if q.compactFailing {
+		return
+	}
+	q.compactFailing = true
+	q.log.Error("WAL segment reclamation is failing; the spill directory will "+
+		"grow to max_disk_bytes and stay there",
+		logger.F("segment", segment),
+		logger.F("error", err.Error()),
+	)
+}
+
+func (q *bufferedQueue) noteCompactionSuccessUnlocked() {
+	if !q.compactFailing {
+		return
+	}
+	q.compactFailing = false
+	q.log.Info("WAL segment reclamation recovered",
+		logger.F("failed_attempts", q.compactFailures),
+	)
 }
 
 func (q *bufferedQueue) dropOldestUnlocked() {
@@ -767,27 +816,46 @@ func (q *bufferedQueue) Ack(ids []string) error {
 		return errors.New("queue is closed")
 	}
 
+	// An ack is only recorded once it is durable. The inflight entry is what
+	// justifies holding the segment claim, so removing the entry while the
+	// claim stays held -- which is what happens if the WAL write fails
+	// midway -- pins that segment and the entire prefix behind it for the
+	// lifetime of the process, with nothing left that could ever release it.
+	//
+	// The alternative shape, releasing the claim anyway, is worse: the WAL
+	// record survives an ack that was never written, so the item comes back
+	// on the next restart, and its segment may have been compacted away in
+	// the meantime. Leaving the entry inflight keeps the queue's own rule --
+	// a claim is held exactly as long as something live can release it --
+	// and leaves the caller free to retry the ack or nack the item back into
+	// the queue, both of which already work.
+	var ackErr error
 	for _, id := range ids {
 		entry, ok := q.inflight[id]
 		if !ok {
 			continue
 		}
-		delete(q.inflight, id)
-		q.metrics.IncAck()
 		if entry.ref != nil && q.disk != nil {
 			if err := q.disk.appendAck(id); err != nil {
-				return fmt.Errorf("persist ack for %q: %w", id, err)
+				ackErr = fmt.Errorf("persist ack for %q: %w", id, err)
+				break
 			}
 			q.releaseDiskRefUnlocked(entry.ref.Segment)
 		}
+		delete(q.inflight, id)
+		q.metrics.IncAck()
 	}
 	// The main reclaim point: acks are what retire WAL records, and without a
 	// reclaim the log only ever grew until appendRecord returned ErrDiskFull
 	// permanently. Compaction runs before the broadcast so an enqueuer parked
 	// on ErrDiskFull wakes up to space that already exists.
+	// Runs even when the ack failed above: a failing ack usually means a full
+	// disk, and compaction is the only thing that can make room. Returning
+	// early here would skip both the reclaim and the broadcast, leaving an
+	// enqueuer parked on ErrDiskFull with nothing left to wake it.
 	q.compactUnlocked()
 	q.signalWaitersLocked()
-	return nil
+	return ackErr
 }
 
 // Nack returns items to the front of the queue for immediate retry.
