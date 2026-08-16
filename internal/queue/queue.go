@@ -134,7 +134,21 @@ func New(cfg *config.BufferConfig, log *logger.Logger, m *agentmetrics.QueueMetr
 			_ = ds.close()
 			return nil, fmt.Errorf("recover spill segments: %w", err)
 		}
-		for _, item := range recovered {
+		// TEMPORARY shim (Task 5 removes it): reads each recovered item's
+		// payload back into memory immediately, which defeats the point of
+		// diskRef and keeps the heap regression alive. It only exists so the
+		// package compiles and the tree stays green between tasks; Task 5
+		// stores the refs in q.diskHead directly and reads payloads lazily
+		// on dequeue instead.
+		for _, ref := range recovered {
+			item, err := ds.readItem(ref.Segment, ref.Offset)
+			if err != nil {
+				log.Error("skip unreadable recovered item",
+					logger.F("item_id", ref.ID),
+					logger.F("error", err.Error()),
+				)
+				continue
+			}
 			q.diskHead = append(q.diskHead, item)
 			q.diskCount++
 		}
