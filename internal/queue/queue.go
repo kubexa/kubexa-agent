@@ -86,6 +86,14 @@ type Queue interface {
 	// data -- only our record of it failed.
 	NackDelivered(ids []string) error
 
+	// NackUntried returns items that were dequeued but never handed to the
+	// wire -- everything queued behind the one item whose send failed. They are
+	// requeued without charging an attempt, because none was made: an attempt
+	// count must record attempts that actually happened, and charging the
+	// untried remainder let one poison item at the head of a batch retire up to
+	// buffer.batch_size healthy items at the cap.
+	NackUntried(ids []string) error
+
 	// Drop settles items without redelivering them, counting each as dropped.
 	// It is for items the caller has judged undeliverable, where a nack would
 	// replay them forever; it is on the interface because the caller has no
@@ -880,6 +888,18 @@ func (q *bufferedQueue) readRefUnlocked(ref diskRef) (Item, refReadResult) {
 	if errors.Is(err, errStoreClosed) {
 		return Item{}, refReadStoreClosed
 	}
+	// A reference is a byte location, and readItem validates the record type
+	// but cannot know which item was asked for -- only this layer holds the
+	// ref. Should an offset ever drift (a torn write, a bad recovery, a future
+	// refactor), the read succeeds on a perfectly valid record belonging to
+	// somebody else: the wrong payload goes to the gateway, and the ack that
+	// follows retires an id that was never sent, with no error anywhere in the
+	// sequence. Checked here so a mismatch becomes what it is -- an unreadable
+	// record: counted, dropped, and never delivered.
+	if err == nil && item.ID != ref.ID {
+		err = fmt.Errorf("%w: wanted %q, record holds %q", errRecordIDMismatch, ref.ID, item.ID)
+		item = Item{}
+	}
 	if err != nil {
 		q.log.Error("drop unreadable spilled item",
 			logger.F("item_id", ref.ID),
@@ -959,7 +979,7 @@ func (q *bufferedQueue) Ack(ids []string) error {
 // is the one choke point every redelivery passes through; a cap in the caller
 // would leave every other nack path uncapped.
 func (q *bufferedQueue) Nack(ids []string) error {
-	return q.nack(ids, false)
+	return q.nack(ids, nackFailed)
 }
 
 // NackDelivered is Nack for items that reached the gateway but whose ack could
@@ -972,16 +992,53 @@ func (q *bufferedQueue) Nack(ids []string) error {
 // retirement time: it decides whether the data the queue is giving up on ever
 // left the agent.
 func (q *bufferedQueue) NackDelivered(ids []string) error {
-	return q.nack(ids, true)
+	return q.nack(ids, nackDelivered)
 }
 
-func (q *bufferedQueue) nack(ids []string, delivered bool) error {
+// NackUntried returns items that were dequeued but never sent, so they are
+// requeued without charging an attempt.
+//
+// The drain hands back the item whose send failed together with everything
+// queued behind it, and only the first of those was ever attempted. Charging
+// the whole slice made one poison item at the head cost the entire batch:
+// six rounds and all of it was in dropped_total, measured 10 items for 1. It
+// also falsified the cap's own promise above -- a poison item costs at most
+// six re-sends "and is counted and gone", not six re-sends of everything
+// behind it.
+//
+// The untried items still keep their attempt history: an item that used five
+// attempts in earlier rounds comes back with five, and the sixth real failure
+// still retires it.
+func (q *bufferedQueue) NackUntried(ids []string) error {
+	return q.nack(ids, nackUntried)
+}
+
+// nackKind says what happened to the items being handed back. It decides two
+// things: whether they are charged the delivery attempt, and how a retirement
+// at the cap is counted.
+type nackKind int
+
+const (
+	// nackFailed: the send was attempted and it failed. Charges the attempt;
+	// a retirement is data loss.
+	nackFailed nackKind = iota
+	// nackDelivered: the item reached the gateway and only our record of it
+	// failed. Charges the attempt; a retirement is not data loss.
+	nackDelivered
+	// nackUntried: the item never reached the wire. Charges nothing.
+	nackUntried
+)
+
+func (q *bufferedQueue) nack(ids []string, kind nackKind) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	if q.closed {
 		return ErrClosed
 	}
+
+	delivered := kind == nackDelivered
+	charge := kind != nackUntried
 
 	var frontMemory []Item
 	var frontRefs []diskRef
@@ -991,23 +1048,33 @@ func (q *bufferedQueue) nack(ids []string, delivered bool) error {
 			continue
 		}
 		delete(q.inflight, id)
-		q.metrics.IncNack(1)
 		if entry.ref != nil {
 			ref := *entry.ref
-			ref.Attempts++
+			if charge {
+				ref.Attempts++
+			}
 			if ref.Attempts > maxDeliveryAttempts {
 				q.retireInflightUnlocked(id, entry, ref.Attempts, delivered)
 				continue
 			}
+			// Counted here rather than at the top of the loop: nack_total is
+			// documented as requeued items, and an item retired above is not
+			// requeued -- it is gone, and dropped_total already carries it.
+			// Counting both made the requeue rate unreadable in exactly the
+			// incident it is read during.
+			q.metrics.IncNack(1)
 			frontRefs = append(frontRefs, ref)
 			continue
 		}
 		item := entry.item
-		item.Attempts++
+		if charge {
+			item.Attempts++
+		}
 		if item.Attempts > maxDeliveryAttempts {
 			q.retireInflightUnlocked(id, entry, item.Attempts, delivered)
 			continue
 		}
+		q.metrics.IncNack(1)
 		frontMemory = append(frontMemory, item)
 	}
 

@@ -1093,14 +1093,28 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				// ever return them. Returning here without nacking stranded
 				// them until the process restarted, and with WAL compaction a
 				// stranded item pins its segment forever.
-				retryIDs := make([]string, 0, len(items)-idx)
-				for _, remaining := range items[idx:] {
-					retryIDs = append(retryIDs, remaining.ID)
+				//
+				// They are handed back differently, though: Send was called
+				// for this one item only, so it is the only one that has used
+				// a delivery attempt. Charging the untried remainder let one
+				// poison item at the head retire the whole batch at the cap --
+				// measured 10 items dropped for 1 undeliverable one, up to
+				// buffer.batch_size (default 100) in production.
+				untriedIDs := make([]string, 0, len(items)-idx-1)
+				for _, remaining := range items[idx+1:] {
+					untriedIDs = append(untriedIDs, remaining.ID)
 				}
-				// Nack before ack so no ID is handled twice: the three sets are
+				// Untried first, then the failure: each nack prepends to the
+				// front of the queue, so the LAST call ends up ahead. That
+				// restores the batch's own order, with the failed item back at
+				// the head. This drain goroutine is the queue's only consumer
+				// and it is about to end the session, so nothing dequeues
+				// between the two calls.
+				m.settleUntriedNacks(untriedIDs)
+				// Nack before ack so no ID is handled twice: the sets are
 				// disjoint, and this ordering keeps them so under any future
 				// edit.
-				m.settleNacks(retryIDs)
+				m.settleNacks([]string{item.ID})
 				// The session is ending on the send error either way, so the
 				// settle result only matters for what it did, not what it
 				// reports: it has already returned or dropped everything.
@@ -1238,6 +1252,17 @@ func (m *streamManager) settleNacks(ids []string) {
 		return
 	}
 	m.reportSettleFailure(m.queue.Nack(ids), "could not requeue buffered messages", "queue_nack", len(ids))
+}
+
+// settleUntriedNacks returns ids that were dequeued but never sent: the batch
+// queued behind the item whose send failed. Same redelivery as settleNacks, and
+// the same guarantee that every id is settled; the difference is that these are
+// charged no delivery attempt, because none was made on them.
+func (m *streamManager) settleUntriedNacks(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	m.reportSettleFailure(m.queue.NackUntried(ids), "could not requeue untried messages", "queue_nack", len(ids))
 }
 
 // settleDrops releases ids that must never be retried. Same closed-queue
