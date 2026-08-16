@@ -371,3 +371,62 @@ func TestRecoverSkipsSegmentDeletedUnderneath(t *testing.T) {
 		t.Errorf("recovered %d refs from an empty spill dir, want 0", len(refs))
 	}
 }
+
+// The regression guard for the allocation-churn bug the plan's own
+// decodeItemHeader sketch reintroduced: readRecord read the WHOLE record
+// (id + payload + tail) into a fresh buffer before decodeItemHeader ever ran,
+// so every payload byte was still allocated and copied on every startup —
+// just not retained past the loop iteration, which is why
+// TestRecoverDoesNotMaterializePayloads (a retention/HeapAlloc check) could
+// not see it. TotalAlloc is cumulative allocation, not live retention, so it
+// does see it. 40 items of 256 KiB is 10 MiB of payload; a 1 MiB ceiling
+// means recover() must not be allocating anything payload-sized, even
+// transiently.
+func TestRecoverDoesNotAllocatePayloadBytes(t *testing.T) {
+	dir := t.TempDir()
+	ds, err := newDiskStore(dir, 64<<20, logger.New("disk-test"), nil)
+	if err != nil {
+		t.Fatalf("newDiskStore() error = %v", err)
+	}
+	const (
+		count      = 40
+		payloadLen = 256 << 10
+	)
+	for i := 0; i < count; i++ {
+		if _, _, err := ds.appendItem(testItem("alloc-"+string(rune('a'+i)), payloadLen)); err != nil {
+			t.Fatalf("appendItem(%d) error = %v", i, err)
+		}
+	}
+	if err := ds.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+
+	reopened, err := newDiskStore(dir, 64<<20, logger.New("disk-test"), nil)
+	if err != nil {
+		t.Fatalf("reopen error = %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.close() })
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	refs, err := reopened.recover()
+	if err != nil {
+		t.Fatalf("recover() error = %v", err)
+	}
+
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(refs)
+
+	if len(refs) != count {
+		t.Fatalf("recovered %d refs, want %d", len(refs), count)
+	}
+	growth := int64(after.TotalAlloc) - int64(before.TotalAlloc)
+	const ceiling = 1 << 20
+	if growth > ceiling {
+		t.Errorf("recover() allocated %d bytes for %d KiB of payload; "+
+			"want under %d bytes of TotalAlloc growth. Payload bytes are being "+
+			"read into the heap even though they aren't retained.",
+			growth, (count*payloadLen)>>10, ceiling)
+	}
+}

@@ -406,11 +406,11 @@ func replaySegment(segNum int, path string, pending map[string]diskRef, acked ma
 	offset := int64(len(walMagic) + 1)
 
 	for {
-		recType, body, err := readRecord(r)
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
+		var header [5]byte
+		if _, err := io.ReadFull(r, header[:]); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
 			if log != nil {
 				log.Error("corrupt WAL record, stopping segment replay",
 					logger.F("path", path),
@@ -419,17 +419,35 @@ func replaySegment(segNum int, path string, pending map[string]diskRef, acked ma
 			}
 			return nil
 		}
+		recType := header[0]
+		bodyLen := binary.BigEndian.Uint32(header[1:])
+		if bodyLen > 16<<20 {
+			if log != nil {
+				log.Error("corrupt WAL record, stopping segment replay",
+					logger.F("path", path),
+					logger.F("error", errCorruptRecord.Error()),
+				)
+			}
+			return nil
+		}
 		recordOffset := offset
-		offset += int64(5 + len(body))
+		offset += int64(5) + int64(bodyLen)
 
 		switch recType {
 		case recordTypeItem:
-			id, enqueuedAt, attempts, err := decodeItemHeader(body)
+			// readItemHeader streams the record off r and discards the
+			// payload through bufio's fixed buffer, so on success the reader
+			// sits exactly at the next record's header. On error, though, the
+			// reader may be stopped mid-record at an unknown position, so we
+			// cannot safely continue to the next iteration — stop replaying
+			// this segment entirely, same as any other corrupt record.
+			id, enqueuedAt, attempts, err := readItemHeader(r, bodyLen)
 			if err != nil {
 				if log != nil {
-					log.Error("corrupt WAL item record", logger.F("path", path), logger.F("error", err.Error()))
+					log.Error("corrupt WAL item record, stopping segment replay",
+						logger.F("path", path), logger.F("error", err.Error()))
 				}
-				continue
+				return nil
 			}
 			if _, ok := acked[id]; ok {
 				continue
@@ -442,6 +460,15 @@ func replaySegment(segNum int, path string, pending map[string]diskRef, acked ma
 				Attempts:   attempts,
 			}
 		case recordTypeAck:
+			// Ack bodies are just an id, so reading the whole thing is fine.
+			body := make([]byte, bodyLen)
+			if _, err := io.ReadFull(r, body); err != nil {
+				if log != nil {
+					log.Error("corrupt WAL ack record, stopping segment replay",
+						logger.F("path", path), logger.F("error", err.Error()))
+				}
+				return nil
+			}
 			id, err := decodeAckRecord(body)
 			if err != nil {
 				if log != nil {
@@ -451,26 +478,18 @@ func replaySegment(segNum int, path string, pending map[string]diskRef, acked ma
 			}
 			acked[id] = struct{}{}
 			delete(pending, id)
+		default:
+			// Unknown record type: skip its body through the fixed buffer so
+			// the reader stays aligned on the next record's header.
+			if _, err := r.Discard(int(bodyLen)); err != nil {
+				if log != nil {
+					log.Error("corrupt WAL record, stopping segment replay",
+						logger.F("path", path), logger.F("error", err.Error()))
+				}
+				return nil
+			}
 		}
 	}
-}
-
-func readRecord(r *bufio.Reader) (byte, []byte, error) {
-	header := make([]byte, 5)
-	_, err := io.ReadFull(r, header)
-	if err != nil {
-		return 0, nil, err
-	}
-	recType := header[0]
-	bodyLen := binary.BigEndian.Uint32(header[1:])
-	if bodyLen > 16<<20 {
-		return 0, nil, errCorruptRecord
-	}
-	body := make([]byte, bodyLen)
-	if _, err := io.ReadFull(r, body); err != nil {
-		return 0, nil, fmt.Errorf("%w: %v", errCorruptRecord, err)
-	}
-	return recType, body, nil
 }
 
 func encodeItemRecord(item Item) ([]byte, error) {
@@ -536,45 +555,62 @@ func decodeItemRecord(body []byte) (Item, error) {
 	}, nil
 }
 
-// decodeItemHeader reads an item record's identity, timestamp and attempt
-// count without copying its payload.
+// readItemHeader parses an item record's identity, timestamp and attempt
+// count directly off r, discarding the payload through bufio's fixed buffer
+// instead of ever allocating one the payload's size.
 //
-// It deliberately duplicates decodeItemRecord's layout walk rather than
-// calling it: that function's `payload := make([]byte, payloadLen)` is what
-// put 163 MB of customer payloads into the heap at every startup. The layout
-// is
+// An earlier version of this fix read the whole record body into a
+// `make([]byte, bodyLen)` buffer first and only then walked past the payload
+// by index — decodeItemRecord's `payload := make([]byte, payloadLen)` moved
+// one layer up, not removed. That still allocated and copied every payload
+// byte on every startup; the buffer was merely garbage by the next loop
+// iteration, invisible to a live-heap check but not to allocation counters.
+// Only r.Discard, which advances the reader through its existing internal
+// buffer without allocating, actually avoids the allocation. The record
+// layout is
 //
 //	uint32 idLen | id | uint32 payloadLen | payload | int64 nanos | uint32 attempts
 //
-// so the payload is skipped by advancing the offset, never by allocating.
-func decodeItemHeader(body []byte) (string, time.Time, int, error) {
-	if len(body) < 16 {
+// and the timestamp/attempts sit after the payload, so they cannot be read
+// from a prefix — the payload must genuinely be consumed, just without a copy.
+//
+// bodyLen is the caller's already-validated record length (see the
+// bodyLen > 16<<20 check in replaySegment); the check against it below is an
+// integrity check that the field lengths inside the body actually sum to it,
+// which the old whole-body decode never verified.
+func readItemHeader(r *bufio.Reader, bodyLen uint32) (string, time.Time, int, error) {
+	if bodyLen < 20 {
 		return "", time.Time{}, 0, errCorruptRecord
 	}
-	off := 0
-	idLen := binary.BigEndian.Uint32(body[off:])
-	off += 4
-	if int(idLen) > len(body)-off {
+	var num [4]byte
+	if _, err := io.ReadFull(r, num[:]); err != nil {
+		return "", time.Time{}, 0, fmt.Errorf("%w: %v", errCorruptRecord, err)
+	}
+	idLen := binary.BigEndian.Uint32(num[:])
+	if idLen > 1<<20 || uint64(idLen)+20 > uint64(bodyLen) {
 		return "", time.Time{}, 0, errCorruptRecord
 	}
-	id := string(body[off : off+int(idLen)])
-	off += int(idLen)
-	if len(body) < off+4 {
+	idBuf := make([]byte, idLen)
+	if _, err := io.ReadFull(r, idBuf); err != nil {
+		return "", time.Time{}, 0, fmt.Errorf("%w: %v", errCorruptRecord, err)
+	}
+	if _, err := io.ReadFull(r, num[:]); err != nil {
+		return "", time.Time{}, 0, fmt.Errorf("%w: %v", errCorruptRecord, err)
+	}
+	payloadLen := binary.BigEndian.Uint32(num[:])
+	if 4+uint64(idLen)+4+uint64(payloadLen)+12 != uint64(bodyLen) {
 		return "", time.Time{}, 0, errCorruptRecord
 	}
-	payloadLen := binary.BigEndian.Uint32(body[off:])
-	off += 4
-	if int(payloadLen) > len(body)-off {
-		return "", time.Time{}, 0, errCorruptRecord
+	if _, err := r.Discard(int(payloadLen)); err != nil {
+		return "", time.Time{}, 0, fmt.Errorf("%w: %v", errCorruptRecord, err)
 	}
-	off += int(payloadLen)
-	if len(body) < off+12 {
-		return "", time.Time{}, 0, errCorruptRecord
+	var tail [12]byte
+	if _, err := io.ReadFull(r, tail[:]); err != nil {
+		return "", time.Time{}, 0, fmt.Errorf("%w: %v", errCorruptRecord, err)
 	}
-	nanos := int64(binary.BigEndian.Uint64(body[off:]))
-	off += 8
-	attempts := int(binary.BigEndian.Uint32(body[off:]))
-	return id, time.Unix(0, nanos), attempts, nil
+	nanos := int64(binary.BigEndian.Uint64(tail[:8]))
+	attempts := int(binary.BigEndian.Uint32(tail[8:]))
+	return string(idBuf), time.Unix(0, nanos), attempts, nil
 }
 
 func decodeAckRecord(body []byte) (string, error) {
