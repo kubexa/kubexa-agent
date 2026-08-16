@@ -194,11 +194,11 @@ func (ds *diskStore) refreshTotalBytes() {
 	ds.totalBytes = total
 }
 
-// appendItem writes an item record and fsyncs.
-func (ds *diskStore) appendItem(item Item) error {
+// appendItem writes an item record, fsyncs, and returns where it landed.
+func (ds *diskStore) appendItem(item Item) (int, int64, error) {
 	body, err := encodeItemRecord(item)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	return ds.appendRecord(recordTypeItem, body)
 }
@@ -208,42 +208,52 @@ func (ds *diskStore) appendAck(id string) error {
 	body := make([]byte, 4+len(id))
 	binary.BigEndian.PutUint32(body, uint32(len(id)))
 	copy(body[4:], id)
-	return ds.appendRecord(recordTypeAck, body)
+	_, _, err := ds.appendRecord(recordTypeAck, body)
+	return err
 }
 
-func (ds *diskStore) appendRecord(recType byte, body []byte) error {
+// appendRecord writes one record and returns the segment number and byte
+// offset it was written at, so callers can read it back without keeping the
+// payload in memory.
+func (ds *diskStore) appendRecord(recType byte, body []byte) (int, int64, error) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
 	if ds.closed {
-		return errors.New("disk store closed")
+		return 0, 0, errors.New("disk store closed")
 	}
 	if ds.maxBytes > 0 && ds.totalBytes+int64(5+len(body)) > ds.maxBytes {
-		return fmt.Errorf("%w (%d bytes)", ErrDiskFull, ds.maxBytes)
+		return 0, 0, fmt.Errorf("%w (%d bytes)", ErrDiskFull, ds.maxBytes)
 	}
 
 	if ds.segment == nil {
-		return errors.New("no active WAL segment")
+		return 0, 0, errors.New("no active WAL segment")
 	}
 
 	if ds.segmentSize+int64(5+len(body)) > segmentMaxBytes {
 		if err := ds.createSegment(ds.segmentNum + 1); err != nil {
-			return err
+			return 0, 0, err
 		}
 	}
+
+	// Captured after any rotation: this is the file and offset the record
+	// actually lands in. Reading ds.segmentNum before the rotation above
+	// would name the previous file.
+	segment := ds.segmentNum
+	offset := ds.segmentSize
 
 	header := make([]byte, 5)
 	header[0] = recType
 	binary.BigEndian.PutUint32(header[1:], uint32(len(body)))
 
 	if _, err := ds.segment.Write(header); err != nil {
-		return fmt.Errorf("write WAL header: %w", err)
+		return 0, 0, fmt.Errorf("write WAL header: %w", err)
 	}
 	if _, err := ds.segment.Write(body); err != nil {
-		return fmt.Errorf("write WAL body: %w", err)
+		return 0, 0, fmt.Errorf("write WAL body: %w", err)
 	}
 	if err := ds.segment.Sync(); err != nil {
-		return fmt.Errorf("fsync WAL segment: %w", err)
+		return 0, 0, fmt.Errorf("fsync WAL segment: %w", err)
 	}
 
 	written := int64(len(header) + len(body))
@@ -252,7 +262,7 @@ func (ds *diskStore) appendRecord(recType byte, body []byte) error {
 	if ds.metrics != nil {
 		ds.metrics.AddDiskBytes(float64(written))
 	}
-	return nil
+	return segment, offset, nil
 }
 
 // recover replays all segments and returns items not yet acknowledged.
