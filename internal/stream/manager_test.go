@@ -1658,3 +1658,69 @@ func TestAFailedSendLeavesTheAlreadySentItemsAwaitingAnAck(t *testing.T) {
 		t.Fatalf("Depth() = %d, want 1 -- id-1's failed send goes back on the queue", got)
 	}
 }
+
+func TestTheDeadlineSweepReturnsAnItemNoAckEverCameFor(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = 1
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+	sm.deliveryAcks.Store(true)
+	obs := queueObserver(t, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(ctx, t, q, 1)
+	stream := &fakeConnectClient{failAfter: 100}
+	runDrainRound(ctx, t, sm, stream, func() bool { return stream.sendCount() == 1 })
+
+	if got := obs.InflightLen(); got != 1 {
+		t.Fatalf("InflightLen() = %d, want the item awaiting an ack", got)
+	}
+
+	// A zero deadline stands in for "older than 10 minutes" without injecting a
+	// clock: the rule under test is the comparison, not the constant.
+	n, err := q.NackInflightOlderThan(0)
+	if err != nil {
+		t.Fatalf("NackInflightOlderThan: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("swept %d, want 1", n)
+	}
+	if got := q.Depth(); got != 1 {
+		t.Fatalf("Depth() = %d, want the item back", got)
+	}
+}
+
+// Waiting for a remote ack means the drain loop no longer settles a batch before
+// taking the next, so something has to stop it pulling the whole queue into
+// memory. Without the bound this test sees the entire backlog inflight at once.
+func TestTheDrainLoopStopsDequeuingWhenTooManyItemsAwaitAnAck(t *testing.T) {
+	t.Parallel()
+
+	const batchSize = 2
+	limit := batchSize * maxInflightBatches
+
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = batchSize
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+	sm.deliveryAcks.Store(true)
+	obs := queueObserver(t, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(ctx, t, q, limit*4) // far more than the cap
+	stream := &fakeConnectClient{failAfter: 1000}
+	runDrainRound(ctx, t, sm, stream, func() bool { return obs.InflightLen() >= limit })
+
+	if got := obs.InflightLen(); got > limit {
+		t.Fatalf("InflightLen() = %d, want at most %d -- the drain loop must stop dequeuing while acks lag", got, limit)
+	}
+	if got := stream.sendCount(); got > limit {
+		t.Fatalf("sendCount() = %d, want at most %d", got, limit)
+	}
+}

@@ -710,6 +710,12 @@ const defaultHeartbeatInterval = 30 * time.Second
 // calls itself overloaded. It is a report, not a threshold anything acts on.
 const overloadedQueueFraction = 0.8
 
+// inflightAckDeadline bounds how long an item waits for a gateway ack that may
+// never arrive. Past it the item is nacked: it is redelivered, and
+// maxDeliveryAttempts still retires a genuinely poisonous one. Without this an
+// ack lost to a cut would pin its WAL segment for the process's lifetime.
+const inflightAckDeadline = 10 * time.Minute
+
 // heartbeatLoop reports the agent's health on the interval the gateway asked
 // for. Nothing sent one before this: agent.v1.Heartbeat has existed since the
 // protocol was written and the gateway's handler only ever saw messages from
@@ -749,7 +755,26 @@ func (m *streamManager) heartbeatLoop(ctx context.Context, stream agentv1.AgentS
 				m.abortSession()
 				return
 			}
+			m.sweepStaleInflight()
 		}
+	}
+}
+
+// sweepStaleInflight returns items whose ack never arrived and reports the
+// oldest remaining age. Called from the periodic loop.
+func (m *streamManager) sweepStaleInflight() {
+	if !m.deliveryAcks.Load() {
+		return
+	}
+	if n, err := m.queue.NackInflightOlderThan(inflightAckDeadline); err != nil {
+		if !errors.Is(err, queue.ErrClosed) {
+			m.log.Err(err).Warn("stale inflight sweep failed", logger.F("count", n))
+		}
+	} else if n > 0 {
+		m.log.Warn("returned items whose delivery ack never arrived",
+			logger.F("count", n),
+			logger.F("deadline", inflightAckDeadline.String()),
+		)
 	}
 }
 
@@ -1156,12 +1181,63 @@ func ageDropReason(msg *agentv1.AgentMessage, r ingestrules.Rules, now time.Time
 	return ""
 }
 
+// maxInflightBatches caps how many dequeued batches may await a gateway ack.
+//
+// Before delivery acks, drainBufferedQueue settled every item before dequeuing
+// again, so inflight was at most one batch and the queue's own memory
+// accounting covered everything. Waiting for a remote ack removed that bound: a
+// gateway that is up but not acking -- its own buffer full, or NATS down -- lets
+// this loop pull the entire disk queue into memory, and a memory-tier inflight
+// entry still holds its payload after memBytes was decremented, so nothing
+// bounds the bytes. That is the OOM this project spent two releases escaping.
+//
+// Two rather than one keeps the pipeline full -- one batch on the wire while
+// the next is prepared -- at twice the pre-ack envelope. Headroom: at
+// batch_size 100 and the gateway's 200 ms ack flush this still clears roughly
+// 17k items/min, against a measured production rate near 1,068/min.
+const maxInflightBatches = 2
+
+// inflightCounter is how the drain loop reads the queue's inflight count. It is
+// deliberately not on the Queue interface -- the same observation-hook standing
+// as InflightLen itself -- so the manager asserts for it and simply does not
+// bound when an implementation does not offer it.
+type inflightCounter interface {
+	InflightLen() int
+}
+
+// waitForInflightRoom blocks until fewer than maxInflightBatches batches await
+// an ack, or the session ends. A non-nil return means the caller must leave the
+// drain loop.
+func (m *streamManager) waitForInflightRoom(ctx context.Context, counter inflightCounter, batchSize int) error {
+	limit := batchSize * maxInflightBatches
+	if limit <= 0 {
+		return nil
+	}
+	for counter.InflightLen() >= limit {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+		if !m.ready.Load() {
+			return errors.New("session ended while waiting for inflight room")
+		}
+	}
+	return nil
+}
+
 func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
 	batchSize := m.cfg.Buffer.BatchSize
 	if batchSize <= 0 {
 		batchSize = 100
 	}
+	counter, bounded := m.queue.(inflightCounter)
 	for ctx.Err() == nil && m.ready.Load() {
+		if bounded && m.deliveryAcks.Load() {
+			if err := m.waitForInflightRoom(ctx, counter, batchSize); err != nil {
+				return
+			}
+		}
 		items, err := m.queue.DequeueBatch(ctx, batchSize)
 		if err != nil {
 			if ctx.Err() != nil {
