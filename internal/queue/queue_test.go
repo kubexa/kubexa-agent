@@ -2297,3 +2297,84 @@ func TestRefPointingAtAnotherRecordIsDroppedNotDelivered(t *testing.T) {
 		t.Errorf("RefUnderflows() = %d, want 0", got)
 	}
 }
+
+func TestNackInflightReturnsEverythingUnsettled(t *testing.T) {
+	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), nil)
+
+	for _, id := range []string{"a", "b", "c"} {
+		if err := q.Enqueue(context.Background(), Item{ID: id, Payload: []byte(id)}); err != nil {
+			t.Fatalf("Enqueue(%s): %v", id, err)
+		}
+	}
+	items, err := q.DequeueBatch(context.Background(), 3)
+	if err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("want 3 dequeued, got %d", len(items))
+	}
+	// One settled the normal way; two are left as a session cut would leave
+	// them.
+	if err := q.Ack([]string{"a"}); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+
+	n, err := q.NackInflight()
+	if err != nil {
+		t.Fatalf("NackInflight: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("NackInflight returned %d, want 2", n)
+	}
+	if got := q.Depth(); got != 2 {
+		t.Fatalf("depth = %d, want the two items back on the queue", got)
+	}
+	if got := q.InflightLen(); got != 0 {
+		t.Fatalf("inflight = %d, want 0", got)
+	}
+}
+
+func TestNackInflightOlderThanLeavesFreshItemsAlone(t *testing.T) {
+	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), nil)
+
+	if err := q.Enqueue(context.Background(), Item{ID: "a", Payload: []byte("a")}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.DequeueBatch(context.Background(), 1); err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+
+	n, err := q.NackInflightOlderThan(time.Hour)
+	if err != nil {
+		t.Fatalf("NackInflightOlderThan: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("swept %d fresh items, want 0", n)
+	}
+
+	n, err = q.NackInflightOlderThan(0)
+	if err != nil {
+		t.Fatalf("NackInflightOlderThan(0): %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("swept %d, want 1", n)
+	}
+}
+
+func TestOldestInflightAgeIsZeroWhenNothingIsInflight(t *testing.T) {
+	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), nil)
+
+	if got := q.OldestInflightAge(); got != 0 {
+		t.Fatalf("OldestInflightAge = %v, want 0", got)
+	}
+
+	if err := q.Enqueue(context.Background(), Item{ID: "a", Payload: []byte("a")}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.DequeueBatch(context.Background(), 1); err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+	if got := q.OldestInflightAge(); got <= 0 {
+		t.Fatalf("OldestInflightAge = %v, want a positive age", got)
+	}
+}
