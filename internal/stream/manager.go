@@ -137,6 +137,18 @@ type streamManager struct {
 	// not call queue.Ack itself: that takes the queue's mutex and runs WAL
 	// compaction, which would stall heartbeat and config handling behind disk
 	// work.
+	//
+	// Created once here and outlives any one session: ackSettleLoop is started
+	// fresh per session, so ids still sitting in ackCh when one session's loop
+	// returns on cancel are picked up by the NEXT session's loop instead. By
+	// then endSession has already nacked those same ids back onto the queue
+	// (they were still inflight when the sweep ran), so the late ack applies
+	// to a record the queue may already be treating as fresh again. That is
+	// safe, not a bug: an ack only ever proves the earlier session's delivery
+	// happened, and applying it late costs at most one harmless duplicate --
+	// the price this whole design accepts on purpose. Do not switch to a
+	// per-session channel to "fix" this; it would only turn a harmless late
+	// apply into a lost one.
 	ackCh chan []string
 }
 
@@ -615,6 +627,10 @@ func (m *streamManager) applyHandshakeConfig(hs *agentv1.HandshakeResponse) {
 	// and that fallback has to hold even when the handshake below has nothing
 	// else to apply.
 	m.deliveryAcks.Store(hs.GetDeliveryAcks())
+	m.log.Info("gateway handshake accepted",
+		logger.F("session_id", hs.GetSessionId()),
+		logger.F("delivery_acks", hs.GetDeliveryAcks()),
+	)
 	m.rules.Set(ingestrules.FromProto(hs.GetConfig().GetIngestRules()))
 	if hs.GetConfig() == nil {
 		return
@@ -967,20 +983,26 @@ func (m *streamManager) handleGatewayMessage(ctx context.Context, msg *agentv1.G
 			logger.F("reason", p.Shutdown.GetReason()),
 		)
 	case *agentv1.GatewayMessage_Ack:
-		ids := p.Ack.GetMessageIds()
-		if len(ids) == 0 {
-			break
-		}
-		select {
-		case m.ackCh <- ids:
-		default:
-			// The settle worker is behind. Dropping the ack is safe and the
-			// only non-blocking option: the items stay inflight, the session-end
-			// sweep returns them, and the gateway gets them again. A blocking
-			// send here would stall recvLoop behind disk work.
-			m.log.Warn("delivery ack settle queue full; these items will be redelivered",
-				logger.F("count", len(ids)),
-			)
+		// Gated so an old-mode agent (no delivery_acks) never takes the queue
+		// mutex or runs WAL compaction for an ack it doesn't need: the false
+		// path must be byte-for-byte today's behaviour, and a gateway that
+		// predates this feature never sends an Ack anyway.
+		if m.deliveryAcks.Load() {
+			ids := p.Ack.GetMessageIds()
+			if len(ids) == 0 {
+				break
+			}
+			select {
+			case m.ackCh <- ids:
+			default:
+				// The settle worker is behind. Dropping the ack is safe and the
+				// only non-blocking option: the items stay inflight, the session-end
+				// sweep returns them, and the gateway gets them again. A blocking
+				// send here would stall recvLoop behind disk work.
+				m.log.Warn("delivery ack settle queue full; these items will be redelivered",
+					logger.F("count", len(ids)),
+				)
+			}
 		}
 	case *agentv1.GatewayMessage_ResourceQuery:
 		m.handleResourceQuery(ctx, p.ResourceQuery)
