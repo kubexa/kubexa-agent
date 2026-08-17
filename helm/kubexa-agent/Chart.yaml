@@ -2,8 +2,15 @@ apiVersion: v2
 name: kubexa-agent
 description: Kubexa agent — collects Kubernetes logs, state, and metrics and streams them to the Kubexa gateway.
 type: application
-version: 0.7.0
-appVersion: "0.7.0"
+# 0.7.1 changes no template: appVersion moves to 0.7.1, the first agent that
+# keeps a sent item inflight until the gateway acks it instead of deleting it
+# the moment stream.Send returns nil. Install the 0.5.7 gateway FIRST. The
+# agent only switches modes when the handshake announces delivery_acks, so
+# against an older gateway this image behaves exactly as 0.7.0 did -- but the
+# reverse order, a new agent expecting acks from a gateway that never sends
+# them, holds every item to the 10-minute cap and then replays it.
+version: 0.7.1
+appVersion: "0.7.1"
 keywords:
   - kubexa
   - observability
