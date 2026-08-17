@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"sync"
@@ -860,6 +861,23 @@ func (f *fakeConnectClient) sendCount() int {
 	return f.sent
 }
 
+// recvBlockingClient is fakeConnectClient plus a Recv that parks instead of
+// panicking, so a test can drive startSessionWorkers -- which spawns
+// recvLoop -- rather than starting individual session workers by hand.
+// fakeConnectClient's own embedded agentv1.AgentService_ConnectClient is nil,
+// so an unoverridden Recv call panics on a nil interface; every other test in
+// this file avoids recvLoop entirely by calling the workers it needs
+// one at a time.
+type recvBlockingClient struct {
+	fakeConnectClient
+	done chan struct{}
+}
+
+func (r *recvBlockingClient) Recv() (*agentv1.GatewayMessage, error) {
+	<-r.done
+	return nil, io.EOF
+}
+
 // inflightObserver is how a test reads the queue accounting the Queue
 // interface deliberately does not expose.
 type inflightObserver interface {
@@ -1491,8 +1509,11 @@ func TestWithoutTheGatewayCapabilityTheAgentStillAcksOnSend(t *testing.T) {
 // drives the real path end to end: a real GatewayMessage_Ack goes through
 // handleGatewayMessage while ackSettleLoop runs on its own goroutine, and the
 // queue must settle without anything calling applyDeliveryAcks directly.
-// Deleting deliveryAcks.Store at handshake time, or the ackSettleLoop
-// registration in startSessionWorkers, must fail this test.
+//
+// This starts ackSettleLoop itself rather than through startSessionWorkers,
+// so it does NOT catch the settle-loop registration being deleted there --
+// see TestStartSessionWorkersWiresTheSettleLoop for that, which is the one
+// that drives startSessionWorkers for real.
 func TestARealAckThroughTheSettleLoopClearsInflight(t *testing.T) {
 	t.Parallel()
 
@@ -1528,6 +1549,78 @@ func TestARealAckThroughTheSettleLoopClearsInflight(t *testing.T) {
 		select {
 		case <-deadline:
 			t.Fatal("ack never settled through the running ackSettleLoop")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	if got := q.Depth(); got != 0 {
+		t.Fatalf("Depth() = %d, want 0 -- an acked item must not come back", got)
+	}
+}
+
+// TestStartSessionWorkersWiresTheSettleLoop is the one test in this file that
+// starts the settle loop the way production does: through startSessionWorkers,
+// not by hand. Without it, deleting the ackSettleLoop goroutine (and its
+// sessionWG.Add(5) -> Add(4)) from startSessionWorkers leaves every other test
+// in this package green -- meaning a build that never settles a single ack in
+// production, so every item waits out the deadline and is redelivered
+// forever, would still pass CI.
+//
+// recvLoop is one of the four workers startSessionWorkers spawns alongside
+// ackSettleLoop, so it has to run too: recvBlockingClient gives it a Recv
+// that blocks on a close signal instead of panicking on the embedded nil
+// AgentService_ConnectClient, exactly like a real stream idling with nothing
+// more from the gateway until this test is done with it.
+func TestStartSessionWorkersWiresTheSettleLoop(t *testing.T) {
+	t.Parallel()
+
+	const items = 2
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = items
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+	sm.deliveryAcks.Store(true)
+	obs := queueObserver(t, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := &recvBlockingClient{
+		fakeConnectClient: fakeConnectClient{failAfter: 100},
+		done:              make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		close(stream.done)
+		cancel()
+		sm.sessionWG.Wait()
+	})
+
+	enqueueTestLogs(ctx, t, q, items)
+
+	sm.startSessionWorkers(ctx, stream)
+
+	sendDeadline := time.After(5 * time.Second)
+	for stream.sendCount() != items {
+		select {
+		case <-sendDeadline:
+			t.Fatal("drain never sent the batch through the workers startSessionWorkers spawned")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	if got := obs.InflightLen(); got != items {
+		t.Fatalf("InflightLen() = %d, want %d before the ack arrives", got, items)
+	}
+
+	sm.handleGatewayMessage(ctx, &agentv1.GatewayMessage{
+		Payload: &agentv1.GatewayMessage_Ack{
+			Ack: &agentv1.Ack{MessageIds: []string{"id-0", "id-1"}},
+		},
+	})
+
+	settleDeadline := time.After(5 * time.Second)
+	for obs.InflightLen() != 0 {
+		select {
+		case <-settleDeadline:
+			t.Fatal("ack never settled -- the settle loop startSessionWorkers is supposed to register never ran")
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
