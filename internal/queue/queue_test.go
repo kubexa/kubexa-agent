@@ -2378,3 +2378,86 @@ func TestOldestInflightAgeIsZeroWhenNothingIsInflight(t *testing.T) {
 		t.Fatalf("OldestInflightAge = %v, want a positive age", got)
 	}
 }
+
+// The registry-gather counterpart to TestOldestInflightAgeIsZeroWhenNothingIsInflight:
+// that test reads the value through the Go method, this one reads it the way
+// Prometheus actually scrapes it. Deleting the SetOldestInflightAge call out of
+// updateDepthMetricsLocked leaves OldestInflightAge() (and every other test in
+// this package) unaffected, since nothing else reads the gauge through the
+// registry.
+func TestOldestInflightAgeGaugeTracksTheInflightMap(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	cfg := testBufferConfig(t, "", 64<<10)
+	q, err := New(cfg, logger.New("queue-test"), newTestQueueMetrics(t, reg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = q.Close() })
+
+	if got := queueGauge(t, reg, "kubexa_queue_oldest_inflight_age_seconds"); got != 0 {
+		t.Fatalf("gauge at construction = %v, want 0", got)
+	}
+
+	ctx := context.Background()
+	if err := q.Enqueue(ctx, item("age-1", []byte("x"))); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.DequeueBatch(ctx, 1); err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	if got := queueGauge(t, reg, "kubexa_queue_oldest_inflight_age_seconds"); got <= 0 {
+		t.Fatalf("gauge after dequeue = %v, want a positive age -- the gauge must track the inflight map through the registry, not just through the Go method", got)
+	}
+
+	if err := q.Ack([]string{"age-1"}); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if got := queueGauge(t, reg, "kubexa_queue_oldest_inflight_age_seconds"); got != 0 {
+		t.Fatalf("gauge after ack = %v, want 0 -- nothing is inflight anymore", got)
+	}
+}
+
+// A sweep that finds nothing past the deadline is the common case -- most
+// ticks, on most clusters, nothing is stale enough to nack. Before this fix
+// that was also the case where the gauge never moved: it is set only on queue
+// mutation (updateDepthMetricsLocked), and a no-op sweep is not a mutation. An
+// item stuck inflight on an otherwise quiet queue -- no new enqueues, no acks
+// arriving -- would report whatever age it had at its last mutation forever,
+// which is exactly the situation with no other signal that this gauge exists
+// to cover.
+func TestNackInflightOlderThanRefreshesTheGaugeEvenWhenNothingIsSwept(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), reg)
+
+	ctx := context.Background()
+	if err := q.Enqueue(ctx, item("age-2", []byte("x"))); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.DequeueBatch(ctx, 1); err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+
+	before := queueGauge(t, reg, "kubexa_queue_oldest_inflight_age_seconds")
+	time.Sleep(50 * time.Millisecond)
+
+	// Nothing is older than an hour, so nothing is swept -- and nothing else
+	// touches the queue in between, so the gauge has no other reason to move.
+	n, err := q.NackInflightOlderThan(time.Hour)
+	if err != nil {
+		t.Fatalf("NackInflightOlderThan: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("swept %d, want 0 -- this is the no-op branch under test", n)
+	}
+
+	after := queueGauge(t, reg, "kubexa_queue_oldest_inflight_age_seconds")
+	if after-before < 0.03 {
+		t.Fatalf("gauge = %v before the sweep, %v after one 50ms later with nothing swept -- want it refreshed, not stale", before, after)
+	}
+}

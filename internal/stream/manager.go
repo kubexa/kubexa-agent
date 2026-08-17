@@ -1205,15 +1205,21 @@ type inflightCounter interface {
 	InflightLen() int
 }
 
-// waitForInflightRoom blocks until fewer than maxInflightBatches batches await
-// an ack, or the session ends. A non-nil return means the caller must leave the
-// drain loop.
+// waitForInflightRoom blocks until a full batch of batchSize items would fit
+// within maxInflightBatches batches worth of inflight capacity, or the
+// session ends. A non-nil return means the caller must leave the drain loop.
+//
+// The condition is InflightLen()+batchSize > limit, not InflightLen() >=
+// limit: waiting only until there is room for *something* still lets the next
+// DequeueBatch add up to batchSize-1 more than the envelope promises, peaking
+// at batchSize*(maxInflightBatches+1)-1 -- 299 at the default batch_size 100 --
+// instead of the batchSize*maxInflightBatches this function exists to enforce.
 func (m *streamManager) waitForInflightRoom(ctx context.Context, counter inflightCounter, batchSize int) error {
 	limit := batchSize * maxInflightBatches
 	if limit <= 0 {
 		return nil
 	}
-	for counter.InflightLen() >= limit {
+	for counter.InflightLen()+batchSize > limit {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

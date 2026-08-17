@@ -1724,3 +1724,249 @@ func TestTheDrainLoopStopsDequeuingWhenTooManyItemsAwaitAnAck(t *testing.T) {
 		t.Fatalf("sendCount() = %d, want at most %d", got, limit)
 	}
 }
+
+// The test above cancels the instant the limit is first reached, so the loop
+// is under pressure for about 5ms and never gets a chance to overshoot even if
+// the bound were wrong -- InflightLen only ever climbs in whole batchSize
+// steps in that test, and the cap happens to be an exact multiple of
+// batchSize, so an off-by-one in the wait condition has no odd-sized inflight
+// count to expose it. This test holds the loop under pressure for roughly
+// 100ms with acks trickling in two at a time, so the drain loop actually
+// cycles -- dequeue, wait, dequeue again -- and the ceiling is sampled
+// throughout instead of once.
+func TestTheCountBoundHoldsUnderSustainedPressureWithPartialAcks(t *testing.T) {
+	t.Parallel()
+
+	const batchSize = 10
+	limit := batchSize * maxInflightBatches
+	// newTestQueue's 1MiB memory cap holds roughly 255 of enqueueTestLogs'
+	// items; this stays comfortably under that so nothing is dropped for
+	// capacity, while still being far more than fits under the inflight cap
+	// at once.
+	const totalItems = batchSize * 20
+
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = batchSize
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+	sm.deliveryAcks.Store(true)
+	obs := queueObserver(t, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(ctx, t, q, totalItems)
+	stream := &fakeConnectClient{failAfter: totalItems * 2}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sm.drainBufferedQueue(ctx, stream)
+	}()
+
+	// Trickle acks two at a time, oldest id first, so the loop keeps finding
+	// room and dequeuing again instead of plateauing at the cap after its
+	// first batch.
+	ackDone := make(chan struct{})
+	go func() {
+		defer close(ackDone)
+		next := 0
+		for next < totalItems {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Millisecond):
+			}
+			ids := make([]string, 0, 2)
+			for i := 0; i < 2 && next < totalItems; i++ {
+				ids = append(ids, fmt.Sprintf("id-%d", next))
+				next++
+			}
+			sm.applyDeliveryAcks(ids)
+		}
+	}()
+
+	deadline := time.Now().Add(100 * time.Millisecond)
+	sawInflight := false
+	for time.Now().Before(deadline) {
+		got := obs.InflightLen()
+		if got > 0 {
+			sawInflight = true
+		}
+		if got > limit {
+			cancel()
+			<-done
+			<-ackDone
+			t.Fatalf("InflightLen() = %d, want at most %d -- exceeded under sustained pressure with acks trickling in", got, limit)
+		}
+		time.Sleep(500 * time.Microsecond)
+	}
+
+	cancel()
+	<-done
+	<-ackDone
+
+	if !sawInflight {
+		t.Fatal("InflightLen() was never observed above 0 -- the drain loop did not actually run under pressure")
+	}
+}
+
+// countingInflightQueue counts every call to InflightLen so a test can prove
+// the count bound is consulted only when it is supposed to be. Mutating
+// drainBufferedQueue's `if bounded && m.deliveryAcks.Load()` to plain `if
+// bounded` -- applying the bound unconditionally, which the plan forbids --
+// leaves every other test in this package green, because none of them
+// distinguishes "the bound ran and found room" from "the bound never ran at
+// all".
+type countingInflightQueue struct {
+	queue.Queue
+	calls atomic.Int32
+}
+
+func (c *countingInflightQueue) InflightLen() int {
+	c.calls.Add(1)
+	inner, ok := c.Queue.(inflightCounter)
+	if !ok {
+		return 0
+	}
+	return inner.InflightLen()
+}
+
+func TestTheCountBoundIsConsultedOnlyUnderDeliveryAcks(t *testing.T) {
+	t.Parallel()
+
+	run := func(t *testing.T, deliveryAcks bool) *countingInflightQueue {
+		t.Helper()
+		const batchSize = 2
+		cfg := testConfig()
+		cfg.Buffer.BatchSize = batchSize
+		inner := newTestQueue(t)
+		q := &countingInflightQueue{Queue: inner}
+		sm := newDrainTestManager(t, cfg, q)
+		sm.deliveryAcks.Store(deliveryAcks)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		enqueueTestLogs(ctx, t, q, batchSize)
+		stream := &fakeConnectClient{failAfter: 100}
+		runDrainRound(ctx, t, sm, stream, func() bool { return stream.sendCount() == batchSize })
+		return q
+	}
+
+	t.Run("delivery acks on: the bound is consulted", func(t *testing.T) {
+		t.Parallel()
+		q := run(t, true)
+		if got := q.calls.Load(); got == 0 {
+			t.Fatalf("InflightLen() called %d times, want at least 1 -- the count bound must be consulted under delivery acks", got)
+		}
+	})
+
+	t.Run("delivery acks off: the bound is not consulted", func(t *testing.T) {
+		t.Parallel()
+		q := run(t, false)
+		if got := q.calls.Load(); got != 0 {
+			t.Fatalf("InflightLen() called %d times, want 0 -- without delivery acks the pre-Task-9 drain loop must not change", got)
+		}
+	})
+}
+
+// staleInflightSweepQueue counts calls to NackInflightOlderThan so a test can
+// tell "the sweep ran and found nothing to nack" from "the sweep never ran at
+// all".
+type staleInflightSweepQueue struct {
+	queue.Queue
+	calls atomic.Int32
+}
+
+func (s *staleInflightSweepQueue) NackInflightOlderThan(d time.Duration) (int, error) {
+	s.calls.Add(1)
+	return s.Queue.NackInflightOlderThan(d)
+}
+
+// sweepStaleInflight has no test of its own today: the deadline sweep it
+// implements is exercised only through
+// TestTheDeadlineSweepReturnsAnItemNoAckEverCameFor, which calls
+// q.NackInflightOlderThan(0) directly -- a queue test wearing a Task-9 name
+// that exercises no manager code at all. Deleting sweepStaleInflight's own
+// gate (`if !m.deliveryAcks.Load() { return }`), or deleting the
+// m.sweepStaleInflight() call from heartbeatLoop's ticker arm, leaves every
+// other test in this package green.
+//
+// The false case is the one that matters: an agent talking to a gateway that
+// predates delivery acks must never let this path touch the queue, because
+// the Send-acks fallback already settled everything and this sweep has no
+// business running at all.
+func TestSweepStaleInflightRespectsTheDeliveryAcksGate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("delivery acks on: the sweep consults the queue", func(t *testing.T) {
+		t.Parallel()
+		cfg := testConfig()
+		inner := newTestQueue(t)
+		q := &staleInflightSweepQueue{Queue: inner}
+		sm := newDrainTestManager(t, cfg, q)
+		sm.deliveryAcks.Store(true)
+
+		sm.sweepStaleInflight()
+
+		if got := q.calls.Load(); got != 1 {
+			t.Fatalf("NackInflightOlderThan called %d times, want 1 -- the sweep must consult the queue when delivery acks are on", got)
+		}
+	})
+
+	t.Run("delivery acks off: the sweep must not nack anything", func(t *testing.T) {
+		t.Parallel()
+		const batchSize = 1
+		cfg := testConfig()
+		cfg.Buffer.BatchSize = batchSize
+		inner := newTestQueue(t)
+		q := &staleInflightSweepQueue{Queue: inner}
+		sm := newDrainTestManager(t, cfg, q)
+		sm.deliveryAcks.Store(false)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		enqueueTestLogs(ctx, t, q, batchSize)
+		stream := &fakeConnectClient{failAfter: 100}
+		runDrainRound(ctx, t, sm, stream, func() bool { return stream.sendCount() == batchSize })
+
+		sm.sweepStaleInflight()
+
+		if got := q.calls.Load(); got != 0 {
+			t.Fatalf("NackInflightOlderThan called %d times, want 0 -- the deadline sweep must not run without delivery acks", got)
+		}
+	})
+}
+
+// Every test above calls sweepStaleInflight directly. In production it is
+// only ever reached from heartbeatLoop's ticker arm, and none of the direct
+// calls would notice if that one call site were deleted. This drives
+// heartbeatLoop for real, at the shortest interval the config format allows
+// (whole seconds), and proves the ticker is what invokes the sweep.
+func TestHeartbeatLoopInvokesTheStaleInflightSweep(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	inner := newTestQueue(t)
+	q := &staleInflightSweepQueue{Queue: inner}
+	sm := newDrainTestManager(t, cfg, q)
+	sm.deliveryAcks.Store(true)
+	sm.configSnap.Store(&agentv1.ConfigSnapshot{HeartbeatIntervalSec: 1})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stream := &fakeConnectClient{failAfter: 100}
+	go sm.heartbeatLoop(ctx, stream)
+
+	deadline := time.After(5 * time.Second)
+	for q.calls.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("heartbeatLoop never called sweepStaleInflight -- the ticker's call site may have been removed")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}

@@ -983,6 +983,12 @@ func (q *bufferedQueue) Ack(ids []string) error {
 	// early here would skip both the reclaim and the broadcast, leaving an
 	// enqueuer parked on ErrDiskFull with nothing left to wake it.
 	q.compactUnlocked()
+	// Ack removes entries from q.inflight, so it is a mutation the oldest-
+	// inflight-age gauge has to see. Without this, acking the last inflight
+	// item leaves the gauge parked at its pre-ack value instead of dropping to
+	// zero -- stale in exactly the direction that hides a real problem
+	// clearing up.
+	q.updateDepthMetricsLocked()
 	q.signalWaitersLocked()
 	return ackErr
 }
@@ -1027,6 +1033,16 @@ func (q *bufferedQueue) NackInflightOlderThan(d time.Duration) (int, error) {
 	q.mu.Unlock()
 
 	if len(ids) == 0 {
+		// A sweep that finds nothing stale still has to refresh the gauge. It
+		// is otherwise set only on queue mutation (updateDepthMetricsLocked),
+		// so an item stuck inflight on an otherwise quiet queue -- no new
+		// enqueues, no acks arriving -- would report whatever age it had at
+		// its last mutation forever, exactly the case with no other signal
+		// that this gauge exists for. Called via the method, not the loop
+		// inline, so this stays the one place that walks q.inflight for age.
+		if q.metrics != nil {
+			q.metrics.SetOldestInflightAge(q.OldestInflightAge().Seconds())
+		}
 		return 0, nil
 	}
 	// Nack takes the lock itself and settles every id it is given, including
@@ -1047,16 +1063,25 @@ func (q *bufferedQueue) NackInflightOlderThan(d time.Duration) (int, error) {
 func (q *bufferedQueue) OldestInflightAge() time.Duration {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	oldest := q.oldestInflightLocked()
+	if oldest.IsZero() {
+		return 0
+	}
+	return time.Since(oldest)
+}
+
+// oldestInflightLocked returns the earliest since among q.inflight, or the
+// zero Time when nothing is inflight. Callers must hold q.mu. Shared by
+// OldestInflightAge and updateDepthMetricsLocked so there is exactly one place
+// that walks the inflight map for age, not two copies that can drift apart.
+func (q *bufferedQueue) oldestInflightLocked() time.Time {
 	var oldest time.Time
 	for _, entry := range q.inflight {
 		if oldest.IsZero() || entry.since.Before(oldest) {
 			oldest = entry.since
 		}
 	}
-	if oldest.IsZero() {
-		return 0
-	}
-	return time.Since(oldest)
+	return oldest
 }
 
 // NackDelivered is Nack for items that reached the gateway but whose ack could
@@ -1455,12 +1480,7 @@ func (q *bufferedQueue) updateDepthMetricsLocked() {
 	// batch_size times the number of batches in flight -- hundreds, not
 	// thousands -- so the scan is cheaper than tracking a running minimum
 	// through every settle path would be.
-	var oldest time.Time
-	for _, entry := range q.inflight {
-		if oldest.IsZero() || entry.since.Before(oldest) {
-			oldest = entry.since
-		}
-	}
+	oldest := q.oldestInflightLocked()
 	if oldest.IsZero() {
 		q.metrics.SetOldestInflightAge(0)
 	} else {
