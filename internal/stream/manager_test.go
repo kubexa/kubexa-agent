@@ -1484,3 +1484,84 @@ func TestWithoutTheGatewayCapabilityTheAgentStillAcksOnSend(t *testing.T) {
 		t.Fatalf("Depth() = %d, want 0 under the Send-acks fallback", got)
 	}
 }
+
+// The three tests above set deliveryAcks by hand and call applyDeliveryAcks
+// directly, so none of them exercises handshake capture, the Ack case in
+// handleGatewayMessage, or the settle worker actually running. This test
+// drives the real path end to end: a real GatewayMessage_Ack goes through
+// handleGatewayMessage while ackSettleLoop runs on its own goroutine, and the
+// queue must settle without anything calling applyDeliveryAcks directly.
+// Deleting deliveryAcks.Store at handshake time, or the ackSettleLoop
+// registration in startSessionWorkers, must fail this test.
+func TestARealAckThroughTheSettleLoopClearsInflight(t *testing.T) {
+	t.Parallel()
+
+	const items = 2
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = items
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+	sm.deliveryAcks.Store(true)
+	obs := queueObserver(t, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go sm.ackSettleLoop(ctx)
+
+	enqueueTestLogs(ctx, t, q, items)
+	stream := &fakeConnectClient{failAfter: 100}
+	runDrainRound(ctx, t, sm, stream, func() bool { return stream.sendCount() == items })
+
+	if got := obs.InflightLen(); got != items {
+		t.Fatalf("InflightLen() = %d, want %d before the ack arrives", got, items)
+	}
+
+	sm.handleGatewayMessage(ctx, &agentv1.GatewayMessage{
+		Payload: &agentv1.GatewayMessage_Ack{
+			Ack: &agentv1.Ack{MessageIds: []string{"id-0", "id-1"}},
+		},
+	})
+
+	deadline := time.After(5 * time.Second)
+	for obs.InflightLen() != 0 {
+		select {
+		case <-deadline:
+			t.Fatal("ack never settled through the running ackSettleLoop")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	if got := q.Depth(); got != 0 {
+		t.Fatalf("Depth() = %d, want 0 -- an acked item must not come back", got)
+	}
+}
+
+// The Send-error path is the one that runs during the stream cut this whole
+// feature exists for. Items already sent in the failed batch are unproven and
+// must stay ours; only the failed item and the untried remainder go back.
+func TestAFailedSendLeavesTheAlreadySentItemsAwaitingAnAck(t *testing.T) {
+	t.Parallel()
+
+	const items = 2
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = items
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+	sm.deliveryAcks.Store(true)
+	obs := queueObserver(t, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(ctx, t, q, items)
+	// id-0 is sent, id-1's Send fails.
+	runDrain(ctx, t, sm, &fakeConnectClient{failAfter: 1})
+
+	if got := obs.InflightLen(); got != 1 {
+		t.Fatalf("InflightLen() = %d, want 1 -- id-0 was sent but is unproven and must still be held", got)
+	}
+	if got := q.Depth(); got != 1 {
+		t.Fatalf("Depth() = %d, want 1 -- id-1's failed send goes back on the queue", got)
+	}
+}
