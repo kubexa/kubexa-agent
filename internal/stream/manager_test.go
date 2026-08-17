@@ -1435,10 +1435,58 @@ func TestASentItemStaysInflightUntilTheGatewayAcksIt(t *testing.T) {
 	}
 }
 
+// endSession's own call to NackInflight (manager.go) has no coverage of its
+// own: deleting it leaves the whole suite green, because every other test
+// that exercises the sweep drives q.NackInflight() directly rather than
+// endSession itself. Without that call, roughly one batch stays stranded
+// inflight after every session cut -- the count bound then parks
+// waitForInflightRoom until the 10-minute deadline sweep frees room, which
+// collapses throughput to a fraction of what a real workload needs. This
+// test calls endSession for real (not q.NackInflight()) so it goes red if
+// that call is ever removed or its gate inverted.
+func TestEndSessionReturnsUnackedItemsToTheQueue(t *testing.T) {
+	t.Parallel()
+
+	const items = 2
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = items
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+	sm.deliveryAcks.Store(true)
+	obs := queueObserver(t, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(ctx, t, q, items)
+	stream := &fakeConnectClient{failAfter: 100}
+	runDrainRound(ctx, t, sm, stream, func() bool { return stream.sendCount() == items })
+
+	if got := obs.InflightLen(); got != items {
+		t.Fatalf("InflightLen() = %d, want %d before the session ends -- neither item has been acked", got, items)
+	}
+	if got := q.Depth(); got != 0 {
+		t.Fatalf("Depth() = %d before the session ends, want 0 -- both items are inflight, not queued", got)
+	}
+
+	// Neither item was acked: this is what a stream cut mid-flight leaves
+	// behind. endSession, not q.NackInflight, is the thing under test here.
+	sm.endSession()
+
+	if got := obs.InflightLen(); got != 0 {
+		t.Fatalf("InflightLen() = %d after endSession, want 0 -- endSession must sweep whatever the gateway never acked", got)
+	}
+	if got := q.Depth(); got != items {
+		t.Fatalf("Depth() = %d after endSession, want %d -- the unacked items must come back onto the queue, not stay stranded inflight", got, items)
+	}
+}
+
 // The contract endSession depends on: whatever the gateway never acked is still
 // inflight and comes back on a sweep. endSession's own one-line call to
-// NackInflight is verified by review, not here -- driving a whole session
-// teardown would test the harness, not the rule.
+// NackInflight is now also covered directly by
+// TestEndSessionReturnsUnackedItemsToTheQueue above, which drives endSession
+// for real; this test isolates the sweep's own behavior (partial acks,
+// queue/inflight accounting) without the rest of endSession's teardown.
 func TestWhateverTheGatewayNeverAckedComesBackOnASweep(t *testing.T) {
 	t.Parallel()
 
