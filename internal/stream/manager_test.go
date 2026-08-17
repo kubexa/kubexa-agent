@@ -1381,3 +1381,106 @@ func TestOnePoisonItemDoesNotRetireTheBatchBehindIt(t *testing.T) {
 		t.Errorf("Depth() = %d, want 0", got)
 	}
 }
+
+// Under delivery acks, Send returning nil stops being proof of anything. The
+// item has to stay ours until the gateway says otherwise -- the old code acked
+// here, which is exactly how a stream cut lost telemetry silently.
+func TestASentItemStaysInflightUntilTheGatewayAcksIt(t *testing.T) {
+	t.Parallel()
+
+	const items = 2
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = items
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+	sm.deliveryAcks.Store(true)
+	obs := queueObserver(t, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(ctx, t, q, items)
+	stream := &fakeConnectClient{failAfter: 100}
+	runDrainRound(ctx, t, sm, stream, func() bool { return stream.sendCount() == items })
+
+	if got := obs.InflightLen(); got != items {
+		t.Fatalf("InflightLen() = %d, want %d still held pending a gateway ack", got, items)
+	}
+
+	sm.applyDeliveryAcks([]string{"id-0", "id-1"})
+
+	if got := obs.InflightLen(); got != 0 {
+		t.Fatalf("InflightLen() = %d after the ack, want 0", got)
+	}
+	if got := q.Depth(); got != 0 {
+		t.Fatalf("Depth() = %d, want 0 -- an acked item must not come back", got)
+	}
+}
+
+// The contract endSession depends on: whatever the gateway never acked is still
+// inflight and comes back on a sweep. endSession's own one-line call to
+// NackInflight is verified by review, not here -- driving a whole session
+// teardown would test the harness, not the rule.
+func TestWhateverTheGatewayNeverAckedComesBackOnASweep(t *testing.T) {
+	t.Parallel()
+
+	const items = 2
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = items
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+	sm.deliveryAcks.Store(true)
+	obs := queueObserver(t, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(ctx, t, q, items)
+	stream := &fakeConnectClient{failAfter: 100}
+	runDrainRound(ctx, t, sm, stream, func() bool { return stream.sendCount() == items })
+
+	sm.applyDeliveryAcks([]string{"id-0"}) // one of the two
+
+	n, err := q.NackInflight()
+	if err != nil {
+		t.Fatalf("NackInflight: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("NackInflight returned %d, want 1", n)
+	}
+	if got := q.Depth(); got != 1 {
+		t.Fatalf("Depth() = %d, want the unacked item back on the queue", got)
+	}
+	if got := obs.InflightLen(); got != 0 {
+		t.Fatalf("InflightLen() = %d after the sweep, want 0", got)
+	}
+}
+
+// The fallback has to be byte-for-byte today's behaviour, or an agent upgraded
+// ahead of its gateway holds every item to the 10-minute deadline and then
+// replays it forever.
+func TestWithoutTheGatewayCapabilityTheAgentStillAcksOnSend(t *testing.T) {
+	t.Parallel()
+
+	const items = 2
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = items
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+	sm.deliveryAcks.Store(false) // an old gateway omits the handshake field
+	obs := queueObserver(t, q)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueueTestLogs(ctx, t, q, items)
+	stream := &fakeConnectClient{failAfter: 100}
+	runDrainRound(ctx, t, sm, stream, func() bool { return stream.sendCount() == items })
+
+	if got := obs.InflightLen(); got != 0 {
+		t.Fatalf("InflightLen() = %d, want 0 under the Send-acks fallback", got)
+	}
+	if got := q.Depth(); got != 0 {
+		t.Fatalf("Depth() = %d, want 0 under the Send-acks fallback", got)
+	}
+}
