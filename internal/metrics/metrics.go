@@ -38,18 +38,19 @@ type Metrics struct {
 
 // QueueMetrics records buffer queue instrumentation.
 type QueueMetrics struct {
-	depth             *prometheus.GaugeVec
-	enqueuedTotal     prometheus.Counter
-	dequeuedTotal     prometheus.Counter
-	droppedTotal      prometheus.Counter
-	unrecordedTotal   prometheus.Counter
-	ackTotal          prometheus.Counter
-	nackTotal         prometheus.Counter
-	diskBytes         prometheus.Gauge
-	diskReadErrors    prometheus.Counter
-	diskReadTime      prometheus.Histogram
-	segments          prometheus.Gauge
-	oldestInflightAge prometheus.Gauge
+	depth              *prometheus.GaugeVec
+	enqueuedTotal      prometheus.Counter
+	dequeuedTotal      prometheus.Counter
+	droppedTotal       prometheus.Counter
+	unrecordedTotal    prometheus.Counter
+	ackTotal           prometheus.Counter
+	nackTotal          prometheus.Counter
+	nackUnchargedTotal prometheus.Counter
+	diskBytes          prometheus.Gauge
+	diskReadErrors     prometheus.Counter
+	diskReadTime       prometheus.Histogram
+	segments           prometheus.Gauge
+	oldestInflightAge  prometheus.Gauge
 }
 
 // StreamMetrics records gRPC stream and unary call instrumentation.
@@ -162,6 +163,17 @@ func New(reg prometheus.Registerer, version, clusterID, agentID string) (*Metric
 				Subsystem: "queue",
 				Name:      "nack_total",
 				Help:      "Total number of negative-acknowledged (requeued) items.",
+			},
+		),
+		nackUnchargedTotal: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: metricNamespace,
+				Subsystem: "queue",
+				Name:      "nack_uncharged_total",
+				Help: "Total number of negative-acknowledged items requeued without " +
+					"charging a delivery attempt, because the gateway never had a " +
+					"chance to ack them (a session-end sweep after a transport cut). " +
+					"A subset of nack_total, not additional to it.",
 			},
 		),
 		diskBytes: prometheus.NewGauge(
@@ -392,6 +404,7 @@ func New(reg prometheus.Registerer, version, clusterID, agentID string) (*Metric
 		queue.unrecordedTotal,
 		queue.ackTotal,
 		queue.nackTotal,
+		queue.nackUnchargedTotal,
 		queue.diskBytes,
 		queue.diskReadErrors,
 		queue.diskReadTime,
@@ -525,6 +538,18 @@ func (q *QueueMetrics) IncNack(count int) {
 		return
 	}
 	q.nackTotal.Add(float64(count))
+}
+
+// IncNackUncharged increments the uncharged-nack counter by count. Callers
+// also call IncNack for the same items -- this counter is a subset breakout,
+// not a separate total -- so a session-end sweep and a deadline sweep stay
+// distinguishable in metrics even though both requeue through the same nack
+// path.
+func (q *QueueMetrics) IncNackUncharged(count int) {
+	if q == nil || count <= 0 {
+		return
+	}
+	q.nackUnchargedTotal.Add(float64(count))
 }
 
 // SetDepth sets the queue depth for the given storage tier.

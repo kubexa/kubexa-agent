@@ -2361,6 +2361,106 @@ func TestNackInflightOlderThanLeavesFreshItemsAlone(t *testing.T) {
 	}
 }
 
+// NackInflight is the session-end sweep: the transport was cut, so the
+// gateway never had a chance to ack. Charging a delivery attempt here would
+// retire a healthy item caught in a routine transport cut (Cloudflare cuts
+// these streams at ~150s of wall clock) after a handful of reconnects --
+// exactly the data loss delivery-ack waiting exists to stop. This must go red
+// if the "session-end sweep does not charge" distinction is ever removed
+// (e.g. by making NackInflight route through nackFailed like
+// NackInflightOlderThan does).
+func TestNackInflightDoesNotChargeAnAttempt(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), reg)
+	ctx := context.Background()
+
+	if err := q.Enqueue(ctx, item("a", []byte("payload"))); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	batch, err := q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+	if len(batch) != 1 || batch[0].Attempts != 0 {
+		t.Fatalf("first dequeue: batch = %+v, want one item with Attempts 0", batch)
+	}
+
+	// Simulates endSession's sweep after the transport was cut mid-flight.
+	n, err := q.NackInflight()
+	if err != nil {
+		t.Fatalf("NackInflight: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("NackInflight returned %d, want 1", n)
+	}
+
+	batch, err = q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch after sweep: %v", err)
+	}
+	if len(batch) != 1 || batch[0].ID != "a" {
+		t.Fatalf("after sweep: batch = %+v, want the item back", batch)
+	}
+	if batch[0].Attempts != 0 {
+		t.Fatalf("Attempts = %d after a session-end sweep, want 0 -- the gateway never had a chance to ack, so this must not count against the item", batch[0].Attempts)
+	}
+
+	assertCounter(t, reg, "kubexa_queue_nack_total", 1)
+	assertCounter(t, reg, "kubexa_queue_nack_uncharged_total", 1)
+}
+
+// NackInflightOlderThan is the deadline sweep: the gateway had a full
+// inflightAckDeadline to ack and did not, so unlike a session-end sweep the
+// missing ack is evidence against the item and must still charge an attempt
+// -- this is what retires a genuinely poison item after
+// maxDeliveryAttempts+1 sweeps. This must go red if deadline sweeps ever stop
+// charging (e.g. by collapsing nackFailed and nackSessionEnd into one
+// uncharged kind).
+func TestNackInflightOlderThanChargesAnAttempt(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), reg)
+	ctx := context.Background()
+
+	if err := q.Enqueue(ctx, item("a", []byte("payload"))); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	batch, err := q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+	if len(batch) != 1 || batch[0].Attempts != 0 {
+		t.Fatalf("first dequeue: batch = %+v, want one item with Attempts 0", batch)
+	}
+
+	// d=0 sweeps everything, simulating the deadline sweep catching an item
+	// that has been inflight past the deadline.
+	n, err := q.NackInflightOlderThan(0)
+	if err != nil {
+		t.Fatalf("NackInflightOlderThan: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("NackInflightOlderThan returned %d, want 1", n)
+	}
+
+	batch, err = q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch after sweep: %v", err)
+	}
+	if len(batch) != 1 || batch[0].ID != "a" {
+		t.Fatalf("after sweep: batch = %+v, want the item back", batch)
+	}
+	if batch[0].Attempts != 1 {
+		t.Fatalf("Attempts = %d after a deadline sweep, want 1 -- the gateway had the full deadline and did not ack, so this must count toward retirement", batch[0].Attempts)
+	}
+
+	assertCounter(t, reg, "kubexa_queue_nack_total", 1)
+	assertCounter(t, reg, "kubexa_queue_nack_uncharged_total", 0)
+}
+
 func TestOldestInflightAgeIsZeroWhenNothingIsInflight(t *testing.T) {
 	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), nil)
 
