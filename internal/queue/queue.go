@@ -1450,4 +1450,20 @@ func (q *bufferedQueue) updateDepthMetricsLocked() {
 	}
 	q.metrics.SetDepth("memory", float64(q.memCount))
 	q.metrics.SetDepth("disk", float64(q.diskCount))
+
+	// O(len(inflight)) on every queue mutation. inflight is bounded by
+	// batch_size times the number of batches in flight -- hundreds, not
+	// thousands -- so the scan is cheaper than tracking a running minimum
+	// through every settle path would be.
+	var oldest time.Time
+	for _, entry := range q.inflight {
+		if oldest.IsZero() || entry.since.Before(oldest) {
+			oldest = entry.since
+		}
+	}
+	if oldest.IsZero() {
+		q.metrics.SetOldestInflightAge(0)
+	} else {
+		q.metrics.SetOldestInflightAge(time.Since(oldest).Seconds())
+	}
 }

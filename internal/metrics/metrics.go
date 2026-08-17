@@ -38,17 +38,18 @@ type Metrics struct {
 
 // QueueMetrics records buffer queue instrumentation.
 type QueueMetrics struct {
-	depth           *prometheus.GaugeVec
-	enqueuedTotal   prometheus.Counter
-	dequeuedTotal   prometheus.Counter
-	droppedTotal    prometheus.Counter
-	unrecordedTotal prometheus.Counter
-	ackTotal        prometheus.Counter
-	nackTotal       prometheus.Counter
-	diskBytes       prometheus.Gauge
-	diskReadErrors  prometheus.Counter
-	diskReadTime    prometheus.Histogram
-	segments        prometheus.Gauge
+	depth             *prometheus.GaugeVec
+	enqueuedTotal     prometheus.Counter
+	dequeuedTotal     prometheus.Counter
+	droppedTotal      prometheus.Counter
+	unrecordedTotal   prometheus.Counter
+	ackTotal          prometheus.Counter
+	nackTotal         prometheus.Counter
+	diskBytes         prometheus.Gauge
+	diskReadErrors    prometheus.Counter
+	diskReadTime      prometheus.Histogram
+	segments          prometheus.Gauge
+	oldestInflightAge prometheus.Gauge
 }
 
 // StreamMetrics records gRPC stream and unary call instrumentation.
@@ -194,6 +195,14 @@ func New(reg prometheus.Registerer, version, clusterID, agentID string) (*Metric
 				Subsystem: "queue",
 				Name:      "segments",
 				Help:      "Number of WAL segment files currently on disk.",
+			},
+		),
+		oldestInflightAge: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricNamespace,
+				Subsystem: "queue",
+				Name:      "oldest_inflight_age_seconds",
+				Help:      "Age of the oldest item awaiting a delivery ack. An unacked item pins its WAL segment and everything behind it, so this is what says ack latency is holding compaction back.",
 			},
 		),
 	}
@@ -387,6 +396,7 @@ func New(reg prometheus.Registerer, version, clusterID, agentID string) (*Metric
 		queue.diskReadErrors,
 		queue.diskReadTime,
 		queue.segments,
+		queue.oldestInflightAge,
 		stream.streamActive,
 		stream.streamMessagesSent,
 		stream.streamMessagesReceived,
@@ -563,6 +573,14 @@ func (q *QueueMetrics) SetSegments(count float64) {
 		return
 	}
 	q.segments.Set(count)
+}
+
+// SetOldestInflightAge reports how long the oldest unacked item has waited.
+func (q *QueueMetrics) SetOldestInflightAge(seconds float64) {
+	if q == nil {
+		return
+	}
+	q.oldestInflightAge.Set(seconds)
 }
 
 // SetStreamActive sets whether a bidirectional stream is active.
