@@ -94,6 +94,32 @@ type Queue interface {
 	// buffer.batch_size healthy items at the cap.
 	NackUntried(ids []string) error
 
+	// NackInflight returns every item that is dequeued but neither acked nor
+	// nacked, and reports how many. Called when a session ends: once delivery
+	// is settled by a gateway ack rather than by Send returning nil, items sit
+	// inflight across the session boundary and nothing else would return them.
+	//
+	// Does not charge a delivery attempt. A session-end sweep means the
+	// transport was cut, not that the gateway declined to ack -- it never got
+	// the chance -- so this is not evidence against the item. Charging it
+	// anyway would retire a healthy item caught in a routine transport cut
+	// (Cloudflare cuts these streams at ~150s of wall clock) after about 17
+	// minutes of an otherwise-fine gateway, which is the data loss this
+	// branch exists to stop. NackInflightOlderThan is what still retires a
+	// genuinely undeliverable item.
+	NackInflight() (int, error)
+
+	// NackInflightOlderThan returns inflight items dequeued more than d ago.
+	// The backstop for an ack that never arrives, which would otherwise pin a
+	// WAL segment for the lifetime of the process.
+	//
+	// Unlike NackInflight, this charges a delivery attempt: the gateway had a
+	// full d to ack and did not, so -- unlike a session-end sweep -- the
+	// missing ack is evidence against the item, not just against the
+	// transport. This is what still retires a genuinely poison item, at
+	// maxDeliveryAttempts+1 sweeps.
+	NackInflightOlderThan(d time.Duration) (int, error)
+
 	// Drop settles items without redelivering them, counting each as dropped.
 	// It is for items the caller has judged undeliverable, where a nack would
 	// replay them forever; it is on the interface because the caller has no
@@ -137,6 +163,11 @@ const (
 type inflightEntry struct {
 	item Item
 	ref  *diskRef
+	// since is when the item was dequeued. It exists because an item now waits
+	// for a remote ack: an ack that never arrives must eventually be swept, and
+	// an unacked item pins its WAL segment and the whole prefix behind it in
+	// the meantime.
+	since time.Time
 }
 
 // bufferedQueue implements Queue with an in-memory channel and optional WAL disk spill.
@@ -800,7 +831,7 @@ func (q *bufferedQueue) DequeueBatch(ctx context.Context, n int) ([]Item, error)
 
 		if len(pulledItems) > 0 {
 			for _, p := range pulledItems {
-				entry := &inflightEntry{}
+				entry := &inflightEntry{since: time.Now()}
 				if p.ref != nil {
 					// Disk-sourced: keep the reference, not the payload.
 					entry.ref = p.ref
@@ -963,6 +994,12 @@ func (q *bufferedQueue) Ack(ids []string) error {
 	// early here would skip both the reclaim and the broadcast, leaving an
 	// enqueuer parked on ErrDiskFull with nothing left to wake it.
 	q.compactUnlocked()
+	// Ack removes entries from q.inflight, so it is a mutation the oldest-
+	// inflight-age gauge has to see. Without this, acking the last inflight
+	// item leaves the gauge parked at its pre-ack value instead of dropping to
+	// zero -- stale in exactly the direction that hides a real problem
+	// clearing up.
+	q.updateDepthMetricsLocked()
 	q.signalWaitersLocked()
 	return ackErr
 }
@@ -980,6 +1017,97 @@ func (q *bufferedQueue) Ack(ids []string) error {
 // would leave every other nack path uncapped.
 func (q *bufferedQueue) Nack(ids []string) error {
 	return q.nack(ids, nackFailed)
+}
+
+// NackInflight returns every unsettled item to the queue. Called from a
+// session-end sweep, where the transport was cut out from under the item
+// rather than the gateway declining to ack it -- so, unlike
+// NackInflightOlderThan, this does not charge a delivery attempt. See
+// nackSessionEnd for why.
+func (q *bufferedQueue) NackInflight() (int, error) {
+	return q.sweepInflight(0, nackSessionEnd)
+}
+
+// NackInflightOlderThan returns unsettled items dequeued more than d ago.
+// d <= 0 sweeps everything. This is the deadline sweep: the gateway had a
+// full d to ack and did not, so it charges a delivery attempt like any other
+// failed send (nackFailed) -- the retire cap is what still catches a
+// genuinely poison item.
+func (q *bufferedQueue) NackInflightOlderThan(d time.Duration) (int, error) {
+	return q.sweepInflight(d, nackFailed)
+}
+
+// sweepInflight collects unsettled items dequeued more than d ago (d <= 0
+// sweeps everything) and nacks them as kind. Shared by NackInflight and
+// NackInflightOlderThan so there is exactly one place that walks q.inflight
+// for a sweep; only the nackKind -- and so whether the sweep charges a
+// delivery attempt -- differs between the two callers.
+func (q *bufferedQueue) sweepInflight(d time.Duration, kind nackKind) (int, error) {
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		return 0, ErrClosed
+	}
+	cutoff := time.Now().Add(-d)
+	ids := make([]string, 0, len(q.inflight))
+	for id, entry := range q.inflight {
+		if d > 0 && entry.since.After(cutoff) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	q.mu.Unlock()
+
+	if len(ids) == 0 {
+		// A sweep that finds nothing stale still has to refresh the gauge. It
+		// is otherwise set only on queue mutation (updateDepthMetricsLocked),
+		// so an item stuck inflight on an otherwise quiet queue -- no new
+		// enqueues, no acks arriving -- would report whatever age it had at
+		// its last mutation forever, exactly the case with no other signal
+		// that this gauge exists for. Called via the method, not the loop
+		// inline, so this stays the one place that walks q.inflight for age.
+		if q.metrics != nil {
+			q.metrics.SetOldestInflightAge(q.OldestInflightAge().Seconds())
+		}
+		return 0, nil
+	}
+	// nack takes the lock itself and settles every id it is given, including
+	// retiring any past the attempt cap through the counted drop path.
+	if err := q.nack(ids, kind); err != nil {
+		return len(ids), err
+	}
+	return len(ids), nil
+}
+
+// OldestInflightAge reports how long the oldest unsettled item has been
+// waiting, or zero when nothing is inflight. An unacked item pins its WAL
+// segment and the whole prefix behind it, so ack latency now gates compaction
+// -- this is what makes that visible.
+//
+// Deliberately not on the Queue interface, same standing as InflightLen: an
+// observation hook, not a capability callers depend on.
+func (q *bufferedQueue) OldestInflightAge() time.Duration {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	oldest := q.oldestInflightLocked()
+	if oldest.IsZero() {
+		return 0
+	}
+	return time.Since(oldest)
+}
+
+// oldestInflightLocked returns the earliest since among q.inflight, or the
+// zero Time when nothing is inflight. Callers must hold q.mu. Shared by
+// OldestInflightAge and updateDepthMetricsLocked so there is exactly one place
+// that walks the inflight map for age, not two copies that can drift apart.
+func (q *bufferedQueue) oldestInflightLocked() time.Time {
+	var oldest time.Time
+	for _, entry := range q.inflight {
+		if oldest.IsZero() || entry.since.Before(oldest) {
+			oldest = entry.since
+		}
+	}
+	return oldest
 }
 
 // NackDelivered is Nack for items that reached the gateway but whose ack could
@@ -1027,6 +1155,24 @@ const (
 	nackDelivered
 	// nackUntried: the item never reached the wire. Charges nothing.
 	nackUntried
+	// nackSessionEnd: the item was inflight when a session ended (transport
+	// cut, gateway restart, ...) and is swept back by NackInflight. The
+	// gateway never got the ten minutes NackInflightOlderThan's deadline
+	// sweep would give it -- the session ended out from under it -- so the
+	// missing ack is not its fault. Charges nothing, same as nackUntried,
+	// but is kept as its own kind rather than reusing nackUntried so metrics
+	// can still tell "never sent" apart from "sent, cut before it could be
+	// acked" (see IncNackUncharged).
+	//
+	// Charging this would be double jeopardy for a healthy item caught in a
+	// transport cut: Cloudflare cuts these streams at ~150s of wall clock
+	// however busy they are, so an item that is merely inflight at the cut
+	// would be charged an attempt on every cut and retire as a counted drop
+	// after about 17 minutes of a gateway that is simply slow to ack --
+	// exactly the telemetry this branch exists to stop losing. The deadline
+	// sweep (nackFailed) is what still retires a genuinely poison item, at
+	// ~70 minutes (7 * the 10-minute deadline) instead.
+	nackSessionEnd
 )
 
 func (q *bufferedQueue) nack(ids []string, kind nackKind) error {
@@ -1038,7 +1184,8 @@ func (q *bufferedQueue) nack(ids []string, kind nackKind) error {
 	}
 
 	delivered := kind == nackDelivered
-	charge := kind != nackUntried
+	charge := kind != nackUntried && kind != nackSessionEnd
+	uncharged := kind == nackSessionEnd
 
 	var frontMemory []Item
 	var frontRefs []diskRef
@@ -1063,6 +1210,9 @@ func (q *bufferedQueue) nack(ids []string, kind nackKind) error {
 			// Counting both made the requeue rate unreadable in exactly the
 			// incident it is read during.
 			q.metrics.IncNack(1)
+			if uncharged {
+				q.metrics.IncNackUncharged(1)
+			}
 			frontRefs = append(frontRefs, ref)
 			continue
 		}
@@ -1075,6 +1225,9 @@ func (q *bufferedQueue) nack(ids []string, kind nackKind) error {
 			continue
 		}
 		q.metrics.IncNack(1)
+		if uncharged {
+			q.metrics.IncNackUncharged(1)
+		}
 		frontMemory = append(frontMemory, item)
 	}
 
@@ -1373,4 +1526,15 @@ func (q *bufferedQueue) updateDepthMetricsLocked() {
 	}
 	q.metrics.SetDepth("memory", float64(q.memCount))
 	q.metrics.SetDepth("disk", float64(q.diskCount))
+
+	// O(len(inflight)) on every queue mutation. inflight is bounded by
+	// batch_size times the number of batches in flight -- hundreds, not
+	// thousands -- so the scan is cheaper than tracking a running minimum
+	// through every settle path would be.
+	oldest := q.oldestInflightLocked()
+	if oldest.IsZero() {
+		q.metrics.SetOldestInflightAge(0)
+	} else {
+		q.metrics.SetOldestInflightAge(time.Since(oldest).Seconds())
+	}
 }

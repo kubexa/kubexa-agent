@@ -2297,3 +2297,267 @@ func TestRefPointingAtAnotherRecordIsDroppedNotDelivered(t *testing.T) {
 		t.Errorf("RefUnderflows() = %d, want 0", got)
 	}
 }
+
+func TestNackInflightReturnsEverythingUnsettled(t *testing.T) {
+	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), nil)
+
+	for _, id := range []string{"a", "b", "c"} {
+		if err := q.Enqueue(context.Background(), Item{ID: id, Payload: []byte(id)}); err != nil {
+			t.Fatalf("Enqueue(%s): %v", id, err)
+		}
+	}
+	items, err := q.DequeueBatch(context.Background(), 3)
+	if err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("want 3 dequeued, got %d", len(items))
+	}
+	// One settled the normal way; two are left as a session cut would leave
+	// them.
+	if err := q.Ack([]string{"a"}); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+
+	n, err := q.NackInflight()
+	if err != nil {
+		t.Fatalf("NackInflight: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("NackInflight returned %d, want 2", n)
+	}
+	if got := q.Depth(); got != 2 {
+		t.Fatalf("depth = %d, want the two items back on the queue", got)
+	}
+	if got := q.InflightLen(); got != 0 {
+		t.Fatalf("inflight = %d, want 0", got)
+	}
+}
+
+func TestNackInflightOlderThanLeavesFreshItemsAlone(t *testing.T) {
+	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), nil)
+
+	if err := q.Enqueue(context.Background(), Item{ID: "a", Payload: []byte("a")}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.DequeueBatch(context.Background(), 1); err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+
+	n, err := q.NackInflightOlderThan(time.Hour)
+	if err != nil {
+		t.Fatalf("NackInflightOlderThan: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("swept %d fresh items, want 0", n)
+	}
+
+	n, err = q.NackInflightOlderThan(0)
+	if err != nil {
+		t.Fatalf("NackInflightOlderThan(0): %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("swept %d, want 1", n)
+	}
+}
+
+// NackInflight is the session-end sweep: the transport was cut, so the
+// gateway never had a chance to ack. Charging a delivery attempt here would
+// retire a healthy item caught in a routine transport cut (Cloudflare cuts
+// these streams at ~150s of wall clock) after a handful of reconnects --
+// exactly the data loss delivery-ack waiting exists to stop. This must go red
+// if the "session-end sweep does not charge" distinction is ever removed
+// (e.g. by making NackInflight route through nackFailed like
+// NackInflightOlderThan does).
+func TestNackInflightDoesNotChargeAnAttempt(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), reg)
+	ctx := context.Background()
+
+	if err := q.Enqueue(ctx, item("a", []byte("payload"))); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	batch, err := q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+	if len(batch) != 1 || batch[0].Attempts != 0 {
+		t.Fatalf("first dequeue: batch = %+v, want one item with Attempts 0", batch)
+	}
+
+	// Simulates endSession's sweep after the transport was cut mid-flight.
+	n, err := q.NackInflight()
+	if err != nil {
+		t.Fatalf("NackInflight: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("NackInflight returned %d, want 1", n)
+	}
+
+	batch, err = q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch after sweep: %v", err)
+	}
+	if len(batch) != 1 || batch[0].ID != "a" {
+		t.Fatalf("after sweep: batch = %+v, want the item back", batch)
+	}
+	if batch[0].Attempts != 0 {
+		t.Fatalf("Attempts = %d after a session-end sweep, want 0 -- the gateway never had a chance to ack, so this must not count against the item", batch[0].Attempts)
+	}
+
+	assertCounter(t, reg, "kubexa_queue_nack_total", 1)
+	assertCounter(t, reg, "kubexa_queue_nack_uncharged_total", 1)
+}
+
+// NackInflightOlderThan is the deadline sweep: the gateway had a full
+// inflightAckDeadline to ack and did not, so unlike a session-end sweep the
+// missing ack is evidence against the item and must still charge an attempt
+// -- this is what retires a genuinely poison item after
+// maxDeliveryAttempts+1 sweeps. This must go red if deadline sweeps ever stop
+// charging (e.g. by collapsing nackFailed and nackSessionEnd into one
+// uncharged kind).
+func TestNackInflightOlderThanChargesAnAttempt(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), reg)
+	ctx := context.Background()
+
+	if err := q.Enqueue(ctx, item("a", []byte("payload"))); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	batch, err := q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+	if len(batch) != 1 || batch[0].Attempts != 0 {
+		t.Fatalf("first dequeue: batch = %+v, want one item with Attempts 0", batch)
+	}
+
+	// d=0 sweeps everything, simulating the deadline sweep catching an item
+	// that has been inflight past the deadline.
+	n, err := q.NackInflightOlderThan(0)
+	if err != nil {
+		t.Fatalf("NackInflightOlderThan: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("NackInflightOlderThan returned %d, want 1", n)
+	}
+
+	batch, err = q.DequeueBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("DequeueBatch after sweep: %v", err)
+	}
+	if len(batch) != 1 || batch[0].ID != "a" {
+		t.Fatalf("after sweep: batch = %+v, want the item back", batch)
+	}
+	if batch[0].Attempts != 1 {
+		t.Fatalf("Attempts = %d after a deadline sweep, want 1 -- the gateway had the full deadline and did not ack, so this must count toward retirement", batch[0].Attempts)
+	}
+
+	assertCounter(t, reg, "kubexa_queue_nack_total", 1)
+	assertCounter(t, reg, "kubexa_queue_nack_uncharged_total", 0)
+}
+
+func TestOldestInflightAgeIsZeroWhenNothingIsInflight(t *testing.T) {
+	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), nil)
+
+	if got := q.OldestInflightAge(); got != 0 {
+		t.Fatalf("OldestInflightAge = %v, want 0", got)
+	}
+
+	if err := q.Enqueue(context.Background(), Item{ID: "a", Payload: []byte("a")}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.DequeueBatch(context.Background(), 1); err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+	if got := q.OldestInflightAge(); got <= 0 {
+		t.Fatalf("OldestInflightAge = %v, want a positive age", got)
+	}
+}
+
+// The registry-gather counterpart to TestOldestInflightAgeIsZeroWhenNothingIsInflight:
+// that test reads the value through the Go method, this one reads it the way
+// Prometheus actually scrapes it. Deleting the SetOldestInflightAge call out of
+// updateDepthMetricsLocked leaves OldestInflightAge() (and every other test in
+// this package) unaffected, since nothing else reads the gauge through the
+// registry.
+func TestOldestInflightAgeGaugeTracksTheInflightMap(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	cfg := testBufferConfig(t, "", 64<<10)
+	q, err := New(cfg, logger.New("queue-test"), newTestQueueMetrics(t, reg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = q.Close() })
+
+	if got := queueGauge(t, reg, "kubexa_queue_oldest_inflight_age_seconds"); got != 0 {
+		t.Fatalf("gauge at construction = %v, want 0", got)
+	}
+
+	ctx := context.Background()
+	if err := q.Enqueue(ctx, item("age-1", []byte("x"))); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.DequeueBatch(ctx, 1); err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	if got := queueGauge(t, reg, "kubexa_queue_oldest_inflight_age_seconds"); got <= 0 {
+		t.Fatalf("gauge after dequeue = %v, want a positive age -- the gauge must track the inflight map through the registry, not just through the Go method", got)
+	}
+
+	if err := q.Ack([]string{"age-1"}); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if got := queueGauge(t, reg, "kubexa_queue_oldest_inflight_age_seconds"); got != 0 {
+		t.Fatalf("gauge after ack = %v, want 0 -- nothing is inflight anymore", got)
+	}
+}
+
+// A sweep that finds nothing past the deadline is the common case -- most
+// ticks, on most clusters, nothing is stale enough to nack. Before this fix
+// that was also the case where the gauge never moved: it is set only on queue
+// mutation (updateDepthMetricsLocked), and a no-op sweep is not a mutation. An
+// item stuck inflight on an otherwise quiet queue -- no new enqueues, no acks
+// arriving -- would report whatever age it had at its last mutation forever,
+// which is exactly the situation with no other signal that this gauge exists
+// to cover.
+func TestNackInflightOlderThanRefreshesTheGaugeEvenWhenNothingIsSwept(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	q := newTestBufferedQueue(t, testBufferConfig(t, "", 64<<10), reg)
+
+	ctx := context.Background()
+	if err := q.Enqueue(ctx, item("age-2", []byte("x"))); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.DequeueBatch(ctx, 1); err != nil {
+		t.Fatalf("DequeueBatch: %v", err)
+	}
+
+	before := queueGauge(t, reg, "kubexa_queue_oldest_inflight_age_seconds")
+	time.Sleep(50 * time.Millisecond)
+
+	// Nothing is older than an hour, so nothing is swept -- and nothing else
+	// touches the queue in between, so the gauge has no other reason to move.
+	n, err := q.NackInflightOlderThan(time.Hour)
+	if err != nil {
+		t.Fatalf("NackInflightOlderThan: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("swept %d, want 0 -- this is the no-op branch under test", n)
+	}
+
+	after := queueGauge(t, reg, "kubexa_queue_oldest_inflight_age_seconds")
+	if after-before < 0.03 {
+		t.Fatalf("gauge = %v before the sweep, %v after one 50ms later with nothing swept -- want it refreshed, not stale", before, after)
+	}
+}

@@ -99,6 +99,15 @@ message HandshakeResponse {
   ConfigSnapshot config                   = 5; // initial config
   string         proto_version            = 6; // negotiated API version, e.g. "v1"
   repeated string supported_proto_versions = 7; // gateway-supported versions (newest first)
+  // The gateway acks each AgentMessage after every buffer item it produced has
+  // been published, so the agent must settle its queue from Ack rather than
+  // from Send returning nil.
+  //
+  // Default false is load-bearing, not a formality: an old gateway omits the
+  // field, the agent reads false, and it keeps acking on Send -- exactly
+  // today's behaviour. An agent that switched without this gate would hold
+  // every item inflight until the 10-minute cap and then replay it forever.
+  bool           delivery_acks            = 8;
 }
 
 message Ack {
