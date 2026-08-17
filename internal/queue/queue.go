@@ -94,6 +94,21 @@ type Queue interface {
 	// buffer.batch_size healthy items at the cap.
 	NackUntried(ids []string) error
 
+	// NackInflight returns every item that is dequeued but neither acked nor
+	// nacked, and reports how many. Called when a session ends: once delivery
+	// is settled by a gateway ack rather than by Send returning nil, items sit
+	// inflight across the session boundary and nothing else would return them.
+	//
+	// Nack semantics, not NackDelivered: "sent but never acked" means delivery
+	// is unproven, so a retirement at the attempt cap may be real loss and
+	// must be counted as one.
+	NackInflight() (int, error)
+
+	// NackInflightOlderThan returns inflight items dequeued more than d ago.
+	// The backstop for an ack that never arrives, which would otherwise pin a
+	// WAL segment for the lifetime of the process.
+	NackInflightOlderThan(d time.Duration) (int, error)
+
 	// Drop settles items without redelivering them, counting each as dropped.
 	// It is for items the caller has judged undeliverable, where a nack would
 	// replay them forever; it is on the interface because the caller has no
@@ -137,6 +152,11 @@ const (
 type inflightEntry struct {
 	item Item
 	ref  *diskRef
+	// since is when the item was dequeued. It exists because an item now waits
+	// for a remote ack: an ack that never arrives must eventually be swept, and
+	// an unacked item pins its WAL segment and the whole prefix behind it in
+	// the meantime.
+	since time.Time
 }
 
 // bufferedQueue implements Queue with an in-memory channel and optional WAL disk spill.
@@ -800,7 +820,7 @@ func (q *bufferedQueue) DequeueBatch(ctx context.Context, n int) ([]Item, error)
 
 		if len(pulledItems) > 0 {
 			for _, p := range pulledItems {
-				entry := &inflightEntry{}
+				entry := &inflightEntry{since: time.Now()}
 				if p.ref != nil {
 					// Disk-sourced: keep the reference, not the payload.
 					entry.ref = p.ref
@@ -980,6 +1000,63 @@ func (q *bufferedQueue) Ack(ids []string) error {
 // would leave every other nack path uncapped.
 func (q *bufferedQueue) Nack(ids []string) error {
 	return q.nack(ids, nackFailed)
+}
+
+// NackInflight returns every unsettled item to the queue. See the Queue
+// interface for why it uses Nack semantics rather than NackDelivered.
+func (q *bufferedQueue) NackInflight() (int, error) {
+	return q.NackInflightOlderThan(0)
+}
+
+// NackInflightOlderThan returns unsettled items dequeued more than d ago.
+// d <= 0 sweeps everything.
+func (q *bufferedQueue) NackInflightOlderThan(d time.Duration) (int, error) {
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		return 0, ErrClosed
+	}
+	cutoff := time.Now().Add(-d)
+	ids := make([]string, 0, len(q.inflight))
+	for id, entry := range q.inflight {
+		if d > 0 && entry.since.After(cutoff) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	q.mu.Unlock()
+
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	// Nack takes the lock itself and settles every id it is given, including
+	// retiring any past the attempt cap through the counted drop path.
+	if err := q.Nack(ids); err != nil {
+		return len(ids), err
+	}
+	return len(ids), nil
+}
+
+// OldestInflightAge reports how long the oldest unsettled item has been
+// waiting, or zero when nothing is inflight. An unacked item pins its WAL
+// segment and the whole prefix behind it, so ack latency now gates compaction
+// -- this is what makes that visible.
+//
+// Deliberately not on the Queue interface, same standing as InflightLen: an
+// observation hook, not a capability callers depend on.
+func (q *bufferedQueue) OldestInflightAge() time.Duration {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var oldest time.Time
+	for _, entry := range q.inflight {
+		if oldest.IsZero() || entry.since.Before(oldest) {
+			oldest = entry.since
+		}
+	}
+	if oldest.IsZero() {
+		return 0
+	}
+	return time.Since(oldest)
 }
 
 // NackDelivered is Nack for items that reached the gateway but whose ack could
