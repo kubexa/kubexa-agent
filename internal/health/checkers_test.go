@@ -93,11 +93,15 @@ func (m *mockQueue) Ack([]string) error           { return nil }
 func (m *mockQueue) Nack([]string) error          { return nil }
 func (m *mockQueue) NackDelivered([]string) error { return nil }
 func (m *mockQueue) NackUntried([]string) error   { return nil }
-func (m *mockQueue) Drop([]string) error          { return nil }
-func (m *mockQueue) Depth() int64                 { return m.depth }
-func (m *mockQueue) DroppedTotal() int64          { return m.dropped }
-func (m *mockQueue) Close() error                 { return nil }
-func (m *mockQueue) Capacity() int64              { return m.capacity }
+func (m *mockQueue) NackInflight() (int, error)   { return 0, nil }
+func (m *mockQueue) NackInflightOlderThan(time.Duration) (int, error) {
+	return 0, nil
+}
+func (m *mockQueue) Drop([]string) error { return nil }
+func (m *mockQueue) Depth() int64        { return m.depth }
+func (m *mockQueue) DroppedTotal() int64 { return m.dropped }
+func (m *mockQueue) Close() error        { return nil }
+func (m *mockQueue) Capacity() int64     { return m.capacity }
 
 var _ queue.CapacityAware = (*mockQueue)(nil)
 

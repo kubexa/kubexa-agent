@@ -864,8 +864,17 @@ type HandshakeResponse struct {
 	Config                 *ConfigSnapshot        `protobuf:"bytes,5,opt,name=config,proto3" json:"config,omitempty"`                                                                 // initial config
 	ProtoVersion           string                 `protobuf:"bytes,6,opt,name=proto_version,json=protoVersion,proto3" json:"proto_version,omitempty"`                                 // negotiated API version, e.g. "v1"
 	SupportedProtoVersions []string               `protobuf:"bytes,7,rep,name=supported_proto_versions,json=supportedProtoVersions,proto3" json:"supported_proto_versions,omitempty"` // gateway-supported versions (newest first)
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// The gateway acks each AgentMessage after every buffer item it produced has
+	// been published, so the agent must settle its queue from Ack rather than
+	// from Send returning nil.
+	//
+	// Default false is load-bearing, not a formality: an old gateway omits the
+	// field, the agent reads false, and it keeps acking on Send -- exactly
+	// today's behaviour. An agent that switched without this gate would hold
+	// every item inflight until the 10-minute cap and then replay it forever.
+	DeliveryAcks  bool `protobuf:"varint,8,opt,name=delivery_acks,json=deliveryAcks,proto3" json:"delivery_acks,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HandshakeResponse) Reset() {
@@ -945,6 +954,13 @@ func (x *HandshakeResponse) GetSupportedProtoVersions() []string {
 		return x.SupportedProtoVersions
 	}
 	return nil
+}
+
+func (x *HandshakeResponse) GetDeliveryAcks() bool {
+	if x != nil {
+		return x.DeliveryAcks
+	}
+	return false
 }
 
 type Ack struct {
@@ -1955,7 +1971,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\fbackpressure\x18\x05 \x01(\v2\x1c.agent.v1.BackpressureSignalH\x00R\fbackpressure\x120\n" +
 	"\bshutdown\x18\x06 \x01(\v2\x12.agent.v1.ShutdownH\x00R\bshutdown\x12@\n" +
 	"\x0eresource_query\x18\a \x01(\v2\x17.agent.v1.ResourceQueryH\x00R\rresourceQueryB\t\n" +
-	"\apayload\"\xb1\x02\n" +
+	"\apayload\"\xd6\x02\n" +
 	"\x11HandshakeResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x1d\n" +
 	"\n" +
@@ -1964,7 +1980,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x10rejection_reason\x18\x04 \x01(\tR\x0frejectionReason\x120\n" +
 	"\x06config\x18\x05 \x01(\v2\x18.agent.v1.ConfigSnapshotR\x06config\x12#\n" +
 	"\rproto_version\x18\x06 \x01(\tR\fprotoVersion\x128\n" +
-	"\x18supported_proto_versions\x18\a \x03(\tR\x16supportedProtoVersions\"&\n" +
+	"\x18supported_proto_versions\x18\a \x03(\tR\x16supportedProtoVersions\x12#\n" +
+	"\rdelivery_acks\x18\b \x01(\bR\fdeliveryAcks\"&\n" +
 	"\x03Ack\x12\x1f\n" +
 	"\vmessage_ids\x18\x01 \x03(\tR\n" +
 	"messageIds\"K\n" +
