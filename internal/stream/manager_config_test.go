@@ -281,13 +281,52 @@ func TestHandshakeWithoutRulesRestoresTheDefaults(t *testing.T) {
 	m.rules.Set(ingestrules.Rules{MaxLineBytes: 4096, MaxSampleAge: time.Hour})
 
 	m.applyHandshakeConfig(&agentv1.HandshakeResponse{
-		Accepted:  true,
-		SessionId: "s1",
-		Config:    &agentv1.ConfigSnapshot{},
+		Accepted:     true,
+		SessionId:    "s1",
+		Config:       &agentv1.ConfigSnapshot{},
+		DeliveryAcks: true,
 	})
 
 	if got, want := m.rules.Get(), ingestrules.Defaults(); got != want {
 		t.Fatalf("a handshake with no rules must restore the defaults\n got: %+v\nwant: %+v", got, want)
+	}
+	if !m.deliveryAcks.Load() {
+		t.Fatal("applyHandshakeConfig did not store delivery_acks from a handshake carrying a config snapshot")
+	}
+}
+
+// TestHandshakeStoresDeliveryAcksEvenWithNilConfig is the common deployment
+// case, not an edge case: the gateway sends a nil ingest Config whenever no
+// rules have been pushed for a tenant/cluster, which is the documented
+// default. delivery_acks is not part of the config snapshot and must be
+// captured regardless of whether one is present -- gating it behind
+// "Config != nil" would mean a normal deployment never learns the gateway
+// supports acks and every item rides to the 10-minute deadline forever.
+func TestHandshakeStoresDeliveryAcksEvenWithNilConfig(t *testing.T) {
+	m := newConfigTestManager(t, &fakeReconciler{})
+
+	m.applyHandshakeConfig(&agentv1.HandshakeResponse{
+		Accepted:     true,
+		SessionId:    "s1",
+		Config:       nil,
+		DeliveryAcks: true,
+	})
+
+	if !m.deliveryAcks.Load() {
+		t.Fatal("applyHandshakeConfig did not store delivery_acks from a handshake carrying no config snapshot -- the common deployment case")
+	}
+
+	// A later reconnect to a gateway that has since lost the capability (or
+	// never had it) must overwrite the stored value, not leave the earlier
+	// session's true value in place.
+	m.applyHandshakeConfig(&agentv1.HandshakeResponse{
+		Accepted:     true,
+		SessionId:    "s2",
+		Config:       nil,
+		DeliveryAcks: false,
+	})
+	if m.deliveryAcks.Load() {
+		t.Fatal("applyHandshakeConfig left a stale true after a handshake reporting delivery_acks=false")
 	}
 }
 
