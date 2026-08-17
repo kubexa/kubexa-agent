@@ -126,6 +126,18 @@ type streamManager struct {
 	// reconnecting immediately and reconnecting through the backoff ladder.
 	// Guarded by sessionMu.
 	sessionErr error
+
+	// deliveryAcks records whether this gateway acks each agent message after
+	// publishing it. False means the gateway is older than that feature, and
+	// the agent must keep settling on Send -- an agent that waited for acks
+	// that never come would hold every item to the deadline and then replay it
+	// forever.
+	deliveryAcks atomic.Bool
+	// ackCh carries ack'd ids from recvLoop to the settle worker. recvLoop must
+	// not call queue.Ack itself: that takes the queue's mutex and runs WAL
+	// compaction, which would stall heartbeat and config handling behind disk
+	// work.
+	ackCh chan []string
 }
 
 type dialFunc func(ctx context.Context) (*grpc.ClientConn, agentv1.AgentServiceClient, error)
@@ -201,6 +213,7 @@ func New(
 		state:         StateIdle,
 		rules:         rules,
 		counters:      counters,
+		ackCh:         make(chan []string, 64),
 	}
 	// The manager is the store's only writer and Set panics on a nil receiver,
 	// so a caller that passes none gets a private store rather than a crash on
@@ -597,6 +610,11 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 // configSnap is only replaced when the handshake actually carries a snapshot,
 // because a nil there means "no config", not "empty config".
 func (m *streamManager) applyHandshakeConfig(hs *agentv1.HandshakeResponse) {
+	// Stored on EVERY handshake, not just one carrying a config snapshot: an
+	// agent upgraded ahead of its gateway must fall back to settling on Send,
+	// and that fallback has to hold even when the handshake below has nothing
+	// else to apply.
+	m.deliveryAcks.Store(hs.GetDeliveryAcks())
 	m.rules.Set(ingestrules.FromProto(hs.GetConfig().GetIngestRules()))
 	if hs.GetConfig() == nil {
 		return
@@ -605,11 +623,12 @@ func (m *streamManager) applyHandshakeConfig(hs *agentv1.HandshakeResponse) {
 	m.log.Info("applied gateway config snapshot",
 		logger.F("session_id", hs.GetSessionId()),
 		logger.F("max_line_bytes", m.rules.Get().MaxLineBytes),
+		logger.F("delivery_acks", hs.GetDeliveryAcks()),
 	)
 }
 
 func (m *streamManager) startSessionWorkers(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
-	m.sessionWG.Add(4)
+	m.sessionWG.Add(5)
 	go func() {
 		defer m.sessionWG.Done()
 		m.sendLoop(ctx, stream)
@@ -626,6 +645,44 @@ func (m *streamManager) startSessionWorkers(ctx context.Context, stream agentv1.
 		defer m.sessionWG.Done()
 		m.heartbeatLoop(ctx, stream)
 	}()
+	go func() {
+		defer m.sessionWG.Done()
+		m.ackSettleLoop(ctx)
+	}()
+}
+
+// applyDeliveryAcks settles ids the gateway has confirmed. Idempotent over ids
+// that are no longer inflight -- Ack skips them -- so a late ack for something
+// the session-end sweep already returned is harmless: it costs one duplicate,
+// which is the price this whole change is paying on purpose.
+func (m *streamManager) applyDeliveryAcks(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	if err := m.queue.Ack(ids); err != nil {
+		if errors.Is(err, queue.ErrClosed) {
+			return
+		}
+		m.log.Err(err).Warn("could not persist delivery acks",
+			logger.F("count", len(ids)),
+		)
+		if m.streamMetrics != nil {
+			m.streamMetrics.IncStreamError("delivery_ack")
+		}
+	}
+}
+
+// ackSettleLoop drains ackCh so recvLoop never blocks on the queue's mutex or
+// on WAL compaction.
+func (m *streamManager) ackSettleLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ids := <-m.ackCh:
+			m.applyDeliveryAcks(ids)
+		}
+	}
 }
 
 // defaultHeartbeatInterval is used when the gateway states none. Thirty
@@ -793,6 +850,27 @@ func (m *streamManager) endSession() {
 		_ = stream.CloseSend()
 	}
 	m.sessionWG.Wait()
+
+	// Every item the gateway never acked comes back. This runs after
+	// sessionWG.Wait(), so the drain goroutine has exited and nothing else is
+	// touching inflight.
+	//
+	// Only under delivery acks: without them the drain loop already settled
+	// every item before returning, and sweeping would find nothing.
+	if m.deliveryAcks.Load() {
+		if n, err := m.queue.NackInflight(); err != nil {
+			if !errors.Is(err, queue.ErrClosed) {
+				m.log.Err(err).Warn("could not return unacked items at session end",
+					logger.F("count", n),
+				)
+			}
+		} else if n > 0 {
+			m.log.Info("returned unacked items to the queue at session end",
+				logger.F("count", n),
+			)
+		}
+	}
+
 	if conn != nil {
 		_ = conn.Close()
 	}
@@ -889,7 +967,21 @@ func (m *streamManager) handleGatewayMessage(ctx context.Context, msg *agentv1.G
 			logger.F("reason", p.Shutdown.GetReason()),
 		)
 	case *agentv1.GatewayMessage_Ack:
-		// delivery acks handled by higher layers when wired
+		ids := p.Ack.GetMessageIds()
+		if len(ids) == 0 {
+			break
+		}
+		select {
+		case m.ackCh <- ids:
+		default:
+			// The settle worker is behind. Dropping the ack is safe and the
+			// only non-blocking option: the items stay inflight, the session-end
+			// sweep returns them, and the gateway gets them again. A blocking
+			// send here would stall recvLoop behind disk work.
+			m.log.Warn("delivery ack settle queue full; these items will be redelivered",
+				logger.F("count", len(ids)),
+			)
+		}
 	case *agentv1.GatewayMessage_ResourceQuery:
 		m.handleResourceQuery(ctx, p.ResourceQuery)
 	default:
@@ -1115,10 +1207,17 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				// disjoint, and this ordering keeps them so under any future
 				// edit.
 				m.settleNacks([]string{item.ID})
+				// Same rule as the batch-level settle: under delivery acks the
+				// already-sent items are unproven and belong to the session-end
+				// sweep, not to an ack here.
+				settleSent := sentIDs
+				if m.deliveryAcks.Load() {
+					settleSent = nil
+				}
 				// The session is ending on the send error either way, so the
 				// settle result only matters for what it did, not what it
 				// reports: it has already returned or dropped everything.
-				_ = m.settleAcks(sentIDs, terminalIDs)
+				_ = m.settleAcks(settleSent, terminalIDs)
 				m.log.Err(err).Warn("failed to send buffered message")
 				m.abortSession()
 				return
@@ -1130,7 +1229,19 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				logger.F("count", skippedLogs),
 			)
 		}
-		if err := m.settleAcks(sentIDs, terminalIDs); err != nil {
+		// Under delivery acks, sentIDs are NOT settled here: Send returning nil
+		// only means the message entered a send buffer. They stay inflight
+		// until the gateway's Ack arrives, or until the session-end sweep or
+		// the deadline sweep returns them.
+		//
+		// terminalIDs are settled either way. Those never went near the wire --
+		// unparseable, disabled, too old -- and the agent judged them
+		// undeliverable itself, so acking them locally is correct.
+		settleSent := sentIDs
+		if m.deliveryAcks.Load() {
+			settleSent = nil
+		}
+		if err := m.settleAcks(settleSent, terminalIDs); err != nil {
 			if errors.Is(err, queue.ErrClosed) {
 				// Shutdown. Nothing to back off from and nothing left to
 				// drain; the WAL replays whatever is still inflight.
