@@ -485,10 +485,10 @@ func TestRemovingAnAlreadyDeletedSegmentStillCorrectsTheByteCount(t *testing.T) 
 	if err != nil {
 		t.Fatalf("newDiskStore: %v", err)
 	}
-	defer ds.close()
+	t.Cleanup(func() { _ = ds.close() })
 
-	// Two segments: one to retire, one to stay active. rotate() is what the
-	// writer uses, so the numbering matches production.
+	// Two segments: one to retire, one to stay active. removeSegment refuses
+	// to touch the active write segment, so there has to be a later one.
 	if _, _, err := ds.appendItem(Item{Payload: []byte("first")}); err != nil {
 		t.Fatalf("appendItem: %v", err)
 	}
