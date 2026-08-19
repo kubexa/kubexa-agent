@@ -430,3 +430,45 @@ func TestRecoverDoesNotAllocatePayloadBytes(t *testing.T) {
 			growth, (count*payloadLen)>>10, ceiling)
 	}
 }
+
+// The disk cap bounds buffered DATA, not the file. An ack record is what makes
+// space reclaimable -- compaction retires a segment only once every item in it
+// is acked -- so refusing one at the cap removes the queue's only exit: the
+// items cannot be acked because the disk is full, and the disk cannot be
+// emptied because the items are not acked.
+//
+// Reproducing it needs the LAST few bytes of the budget gone, not merely a
+// budget too small for another item: an item record is larger than an ack
+// record, so a store that rejects items usually still has room for an ack.
+// Observed on e12-preprod on 2026-08-19 with 33 bytes left under a 512 MiB cap
+// and an ack record needing 45 -- 512 MiB pinned, ack_total frozen, every
+// dequeue nacked straight back.
+func TestAppendAckSucceedsWhenTheDiskCapIsExhausted(t *testing.T) {
+	ds := newTestDiskStore(t, 4096)
+
+	id := strings.Repeat("i", 36)
+	for i := 0; ; i++ {
+		if _, _, err := ds.appendItem(testItem(id, 64)); err != nil {
+			if errors.Is(err, ErrDiskFull) {
+				break
+			}
+			t.Fatalf("appendItem() error = %v", err)
+		}
+		if i > 1000 {
+			t.Fatalf("appendItem never reached the cap")
+		}
+	}
+
+	// Exhaust the budget to the byte. Production got here by spending the last
+	// bytes on ack records; setting the cap to what is already written states
+	// the same condition without depending on how it was reached, and without
+	// a fill loop that changes meaning the moment acks stop being charged.
+	ds.mu.Lock()
+	ds.maxBytes = ds.totalBytes
+	ds.mu.Unlock()
+
+	// This is the ack that unsticks the queue, and the one the cap refused.
+	if err := ds.appendAck(id); err != nil {
+		t.Fatalf("appendAck() with the cap exhausted error = %v, want nil", err)
+	}
+}
