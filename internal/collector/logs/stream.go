@@ -384,9 +384,26 @@ func (c *Collector) handleLogLine(ctx context.Context, target streamTarget, pars
 	// so a joined record can exceed a max_line_bytes configured below that.
 	// Only here are the bytes that will actually ship.
 	rules := c.rules.Get()
-	if rules.MaxLineBytes > 0 && len(parsed.Raw) > rules.MaxLineBytes {
-		parsed.Raw = trimToRune(parsed.Raw[:rules.MaxLineBytes], true)
-		parsed.Truncated = true
+	if rules.MaxLineBytes > 0 {
+		if len(parsed.Raw) > rules.MaxLineBytes {
+			parsed.Raw = trimToRune(parsed.Raw[:rules.MaxLineBytes], true)
+			parsed.Truncated = true
+		}
+		// Message is cut separately, not derived from the Raw cut. For a plain
+		// line the two hold the same bytes, but for a JSON line Message is the
+		// extracted `message` field while Raw is the whole document, so one can
+		// be over the limit while the other is not.
+		//
+		// Cutting only Raw is what shipped until 2026-08-19, and the consumer
+		// indexes Message: the gateway logged message_bytes 262177 against a
+		// negotiated max_line_bytes of 262144. That is the reader's cap
+		// (max_line_bytes + maxK8sLogPrefixBytes) less the 31-byte RFC3339Nano
+		// prefix -- i.e. every over-long line shipped at the reader's cap, and
+		// the limit bound nothing on the field that is actually queried.
+		if len(parsed.Message) > rules.MaxLineBytes {
+			parsed.Message = string(trimToRune([]byte(parsed.Message[:rules.MaxLineBytes]), true))
+			parsed.Truncated = true
+		}
 	}
 	if parsed.Truncated {
 		c.metrics.incTruncated(target.pod.Namespace, target.pod.Name)

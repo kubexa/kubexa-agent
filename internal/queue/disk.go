@@ -410,6 +410,22 @@ func (ds *diskStore) removeSegment(num int) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// The file is gone but its bytes may still be in totalBytes: a
+			// crash between the unlink and the subtraction, or anything that
+			// cleaned the spill directory from outside. Returning here without
+			// correcting the counter leaves it permanently overstating the
+			// directory, and the byte cap is checked against that counter --
+			// so the store would refuse writes with disk to spare. Recount
+			// from the directory rather than guess at a size we can no longer
+			// stat.
+			ds.mu.Lock()
+			ds.refreshTotalBytes()
+			total := ds.totalBytes
+			ds.mu.Unlock()
+			if ds.metrics != nil {
+				ds.metrics.SetDiskBytes(float64(total))
+			}
+			ds.updateSegmentsGauge()
 			return nil
 		}
 		return fmt.Errorf("stat segment %q: %w", path, err)

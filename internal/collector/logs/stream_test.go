@@ -2,6 +2,7 @@ package logs
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/kubexa/kubexa-agent/internal/ingestrules"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 	commonv1 "github.com/kubexa/kubexa-agent/proto/gen/go/common/v1"
@@ -147,5 +149,61 @@ func TestFlushJoinerDeliversAPendingRecordAfterTheStreamContextIsCanceled(t *tes
 	}
 	if w.sawDoneCtx {
 		t.Fatal("flushJoiner handed the writer a context that was already Done; it must detach from the stream context")
+	}
+}
+
+// The wire entry carries two payload fields, Raw and Message, and the
+// consumer indexes Message. handleLogLine's cut reached only Raw, so a line
+// longer than max_line_bytes shipped with Message at full length. Observed
+// live on 2026-08-19: the gateway logged message_bytes 262177 against a
+// negotiated max_line_bytes of 262144 -- the reader's cap
+// (max_line_bytes + maxK8sLogPrefixBytes) less the 31-byte RFC3339Nano
+// prefix, to the byte.
+func TestTheCutReachesMessageAndNotOnlyRaw(t *testing.T) {
+	const limit = 128
+
+	m, err := newMetrics(prometheus.NewRegistry())
+	if err != nil {
+		t.Fatalf("newMetrics: %v", err)
+	}
+	rules := ingestrules.NewStore()
+	rules.Set(ingestrules.Rules{MaxLineBytes: limit})
+
+	w := &recordingWriter{}
+	c := &Collector{
+		writer:       w,
+		log:          logger.New("test"),
+		metrics:      m,
+		agentMeta:    &commonv1.AgentMetadata{},
+		workloads:    newWorkloadResolver(fake.NewSimpleClientset(), time.Minute),
+		rules:        rules,
+		limiter:      ingestrules.NewLimiter(),
+		counters:     ingestrules.NewCounters(),
+		writeTimeout: 50 * time.Millisecond,
+	}
+
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "report-1", Namespace: "e12"}}
+	target := streamTarget{pod: pod, container: "app"}
+
+	// A plain (non-JSON) line: ParseLine leaves Message and Raw holding the
+	// same bytes, which is exactly the shape the live 262 KB SQL lines had.
+	payload := strings.Repeat("s", limit+49)
+	parsed := ParseLine(payload, time.Unix(0, 1))
+
+	if err := c.handleLogLine(context.Background(), target, parsed); err != nil {
+		t.Fatalf("handleLogLine: %v", err)
+	}
+	if len(w.entries) != 1 {
+		t.Fatalf("writes = %d, want 1", len(w.entries))
+	}
+	entry := w.entries[0]
+	if got := len(entry.GetRaw()); got > limit {
+		t.Errorf("Raw = %d bytes, want <= %d", got, limit)
+	}
+	if got := len(entry.GetMessage()); got > limit {
+		t.Errorf("Message = %d bytes, want <= %d -- the cut never reached Message", got, limit)
+	}
+	if !entry.GetTruncated() {
+		t.Error("Truncated = false, want true")
 	}
 }
