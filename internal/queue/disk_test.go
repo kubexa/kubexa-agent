@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -470,5 +471,65 @@ func TestAppendAckSucceedsWhenTheDiskCapIsExhausted(t *testing.T) {
 	// This is the ack that unsticks the queue, and the one the cap refused.
 	if err := ds.appendAck(id); err != nil {
 		t.Fatalf("appendAck() with the cap exhausted error = %v, want nil", err)
+	}
+}
+
+// removeSegment returns early when the file is already gone, and until
+// 2026-08-19 it returned without subtracting those bytes from totalBytes. The
+// counter then overstates the spill directory forever, and since the byte cap
+// is checked against that counter, the store can refuse writes while the disk
+// is empty -- the same shape as the ack deadlock this cap caused in v0.7.1.
+func TestRemovingAnAlreadyDeletedSegmentStillCorrectsTheByteCount(t *testing.T) {
+	dir := t.TempDir()
+	ds, err := newDiskStore(dir, 0, logger.New("test"), nil)
+	if err != nil {
+		t.Fatalf("newDiskStore: %v", err)
+	}
+	t.Cleanup(func() { _ = ds.close() })
+
+	// Two segments: one to retire, one to stay active. removeSegment refuses
+	// to touch the active write segment, so there has to be a later one.
+	if _, _, err := ds.appendItem(Item{Payload: []byte("first")}); err != nil {
+		t.Fatalf("appendItem: %v", err)
+	}
+	ds.mu.Lock()
+	err = ds.createSegment(ds.segmentNum + 1)
+	ds.mu.Unlock()
+	if err != nil {
+		t.Fatalf("createSegment: %v", err)
+	}
+	if _, _, err := ds.appendItem(Item{Payload: []byte("second")}); err != nil {
+		t.Fatalf("appendItem: %v", err)
+	}
+
+	// Delete segment 0 behind the store's back: a crash mid-compaction, a
+	// manual cleanup, anything that unlinks the file without telling it.
+	if err := os.Remove(filepath.Join(dir, segmentFilename(0))); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	if err := ds.removeSegment(0); err != nil {
+		t.Fatalf("removeSegment: %v", err)
+	}
+
+	var onDisk int64
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			t.Fatalf("Info: %v", err)
+		}
+		onDisk += info.Size()
+	}
+
+	ds.mu.Lock()
+	total := ds.totalBytes
+	ds.mu.Unlock()
+
+	if total != onDisk {
+		t.Errorf("totalBytes = %d, want %d (the bytes of an already-deleted segment were never subtracted)", total, onDisk)
 	}
 }
