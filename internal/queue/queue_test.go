@@ -3,6 +3,7 @@ package queue
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -1530,15 +1531,18 @@ func TestFailedAckLeavesTheSegmentReclaimable(t *testing.T) {
 		ids[i] = it.ID
 	}
 
-	// Jam the WAL exactly the way a full disk does: the next append, ack
-	// records included, exceeds the byte cap.
+	// Jam the WAL the way a real write failure does -- a bad device, ENOSPC on
+	// the volume, a segment closed under us. The byte cap is deliberately NOT
+	// the jam any more: ack records are exempt from it, because an ack is what
+	// makes space reclaimable and refusing one at the cap leaves the queue no
+	// way out. Every remaining way an ack write can fail is store-wide like
+	// this one, which is what this invariant has to survive.
 	q.disk.mu.Lock()
-	restore := q.disk.maxBytes
-	q.disk.maxBytes = q.disk.totalBytes
+	_ = q.disk.segment.Close()
 	q.disk.mu.Unlock()
 
 	if err := q.Ack(ids); err == nil {
-		t.Fatalf("Ack() with a full WAL returned nil, want an error")
+		t.Fatalf("Ack() with an unwritable WAL returned nil, want an error")
 	}
 
 	q.mu.Lock()
@@ -1560,8 +1564,11 @@ func TestFailedAckLeavesTheSegmentReclaimable(t *testing.T) {
 
 	// Unjam and retry the same ids, as a caller that got an error would.
 	q.disk.mu.Lock()
-	q.disk.maxBytes = restore
+	reopenErr := q.disk.openLatestSegment()
 	q.disk.mu.Unlock()
+	if reopenErr != nil {
+		t.Fatalf("reopening the WAL segment error = %v", reopenErr)
+	}
 
 	if err := q.Ack(ids); err != nil {
 		t.Fatalf("retried Ack() error = %v", err)
@@ -2559,5 +2566,81 @@ func TestNackInflightOlderThanRefreshesTheGaugeEvenWhenNothingIsSwept(t *testing
 	after := queueGauge(t, reg, "kubexa_queue_oldest_inflight_age_seconds")
 	if after-before < 0.03 {
 		t.Fatalf("gauge = %v before the sweep, %v after one 50ms later with nothing swept -- want it refreshed, not stale", before, after)
+	}
+}
+
+// A queue pinned at its disk cap must still be able to drain, and draining it
+// must give the space back. This is the end-to-end shape of the e12-preprod
+// deadlock of 2026-08-19: the WAL sat at 512 MiB, every ack failed to persist,
+// so every delivered item was redelivered and nacked straight back. dequeued
+// and nack climbed in lockstep, ack_total never moved, and the queue could
+// never empty, because emptying it required a write.
+func TestQueueAtTheDiskCapCanDrainAndReclaim(t *testing.T) {
+	dir := t.TempDir()
+	q := newTestBufferedQueue(t, &config.BufferConfig{
+		MaxMemoryBytes: 1 << 10,
+		SpillDir:       dir,
+		MaxDiskBytes:   64 << 10,
+		BatchSize:      8,
+	}, nil)
+	ctx := context.Background()
+
+	// Fill until the disk budget refuses another item.
+	var stored int
+	for i := 0; ; i++ {
+		err := q.Enqueue(ctx, Item{
+			ID:         fmt.Sprintf("item-%04d", i),
+			Payload:    []byte(strings.Repeat("x", 512)),
+			EnqueuedAt: time.Unix(1755000000, 0).UTC(),
+		})
+		if errors.Is(err, ErrDiskFull) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Enqueue() error = %v", err)
+		}
+		stored++
+		if i > 10000 {
+			t.Fatalf("Enqueue never reached the disk cap")
+		}
+	}
+
+	// Spend what the budget has left, so an ack record cannot fit either. A
+	// full queue is merely full; this is what turns it into a stuck one, and
+	// it is the state production reached.
+	q.disk.mu.Lock()
+	q.disk.maxBytes = q.disk.totalBytes
+	q.disk.mu.Unlock()
+
+	// Drain it. One ack proves nothing about reclaim -- compaction retires a
+	// segment only once every item in it is acked, so space returns a segment
+	// at a time. What production could not do was drain at all.
+	drained := 0
+	for drained < stored {
+		batch, err := q.DequeueBatch(ctx, 8)
+		if err != nil {
+			t.Fatalf("DequeueBatch() error = %v", err)
+		}
+		if len(batch) == 0 {
+			t.Fatalf("DequeueBatch() returned nothing with %d of %d items left", stored-drained, stored)
+		}
+		ids := make([]string, len(batch))
+		for i, item := range batch {
+			ids[i] = item.ID
+		}
+		if err := q.Ack(ids); err != nil {
+			t.Fatalf("Ack() at the disk cap error = %v, want nil", err)
+		}
+		drained += len(batch)
+	}
+
+	// The drain is only worth anything if it gave the space back. Enqueue is
+	// the honest test of that: it is what production could never do again.
+	if err := q.Enqueue(ctx, Item{
+		ID:         "after-drain",
+		Payload:    []byte(strings.Repeat("y", 512)),
+		EnqueuedAt: time.Unix(1755000000, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("Enqueue() after draining at the cap error = %v, want nil", err)
 	}
 }

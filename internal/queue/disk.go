@@ -237,7 +237,21 @@ func (ds *diskStore) appendRecord(recType byte, body []byte) (int, int64, error)
 	if ds.closed {
 		return 0, 0, errStoreClosed
 	}
-	if ds.maxBytes > 0 && ds.totalBytes+int64(5+len(body)) > ds.maxBytes {
+	// The cap bounds buffered DATA, so it gates item records only. An ack
+	// record is the opposite of data: it is what lets compaction retire the
+	// item it names, and a segment is reclaimed only once every item in it is
+	// acked. Gating acks too closes the queue's only exit -- the items cannot
+	// be acked because the disk is full, and the disk cannot be emptied
+	// because the items are not acked. That deadlock is not theoretical: it
+	// pinned e12-preprod at 512 MiB on 2026-08-19 with 33 bytes to spare and
+	// an ack record needing 45.
+	//
+	// The exemption is bounded, not open-ended. Only an item still awaiting an
+	// ack can produce one, and diskSlotCapacity already bounds those to
+	// maxBytes/avgItemSizeEstimate -- 131,072 at 512 MiB. At 5+4+len(id) bytes
+	// each that is ~5.9 MB of overshoot in the worst case, and only until
+	// compaction retires the acked prefix.
+	if recType == recordTypeItem && ds.maxBytes > 0 && ds.totalBytes+int64(5+len(body)) > ds.maxBytes {
 		return 0, 0, fmt.Errorf("%w (%d bytes)", ErrDiskFull, ds.maxBytes)
 	}
 
