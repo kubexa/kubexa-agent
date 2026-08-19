@@ -484,6 +484,16 @@ func (m *streamManager) transition(next ConnState, reason string, err error) {
 	}
 	if m.connMetrics != nil {
 		m.connMetrics.SetState(next.String())
+		// Counted here rather than at the dial site because this is the one
+		// place that knows the previous state. StateConnecting is reached once
+		// per pass of the run loop, and the loop only comes back around after a
+		// session was lost -- so every entry but the first from StateIdle is a
+		// reconnect. Without this the counter read 0 while the same process was
+		// logging hundreds of recv errors, and the one metric that measures
+		// reconnects was the one place a 150-second stream cap stayed invisible.
+		if next == StateConnecting && prev != StateIdle {
+			m.connMetrics.IncReconnects()
+		}
 	}
 }
 
