@@ -10,9 +10,11 @@ type: application
 # install and one only visible later as a rule collecting its whole namespace.
 # The schema also refuses a duration written as a number (`pod_interval: 30`),
 # which the agent rejects at startup: helm now says no instead of rendering a
-# CrashLoopBackOff. It deliberately does NOT tighten anything else: a string
-# field accepts any scalar because yaml.v3 does, so `labels: {version: 1}` in
-# an existing release still upgrades. appVersion stays 0.7.3.
+# CrashLoopBackOff, and it marks `resources` required on the state, metrics
+# and query rule lists -- exactly what the agent's own Validate refuses to
+# start without. It deliberately tightens nothing beyond that: a string field
+# accepts any scalar because yaml.v3 does, so `labels: {version: 1}` in an
+# existing release still upgrades. appVersion stays 0.7.3.
 #
 # 0.7.4 changes no template and no image: it corrects the values.yaml examples
 # for the passthrough `rules` lists. Those lists are copied into the agent's
