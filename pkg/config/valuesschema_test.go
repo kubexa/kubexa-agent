@@ -478,6 +478,12 @@ func TestHelmAcceptsTheShippedChart(t *testing.T) {
 			args: []string{"--values", filepath.Join("testdata", "disabled-section-rule.yaml")},
 		},
 		{
+			// A negative tail count is refused by the agent only while logs are
+			// enabled, so the schema cannot carry a `minimum` for it.
+			name: "values the agent does not check while the section is disabled",
+			args: []string{"--values", filepath.Join("testdata", "unvalidated-while-disabled.yaml")},
+		},
+		{
 			// Everything time.ParseDuration takes, including the bare "0" that
 			// turns a resync off -- refusing these would fail an upgrade.
 			name: "the duration forms the agent parses",
