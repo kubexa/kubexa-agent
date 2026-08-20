@@ -92,11 +92,14 @@ helm upgrade kubexa-agent ./helm/kubexa-agent \
 Keys inside a `rules` entry are snake_case (`pod_names`, `label_selector`),
 unlike the camelCase chart values around them: the chart copies these lists
 into the agent's config file verbatim, so the keys are the agent's own config
-keys. `values.schema.json` names every key these lists accept, so helm refuses
-the command above with `additional properties 'podNames' not allowed` rather
-than installing a rule that silently lost its filter -- which would collect
-more than intended, not less. The same check covers the camelCase keys around
-the lists: `--set collect.logs.tail_lines=50` is refused too.
+keys. `values.schema.json` names every key these lists accept, so the same
+command written with `podNames` is refused by name -- `additional properties
+'podNames' not allowed` -- instead of installing a rule that silently lost its
+filter, which would collect more than intended, not less. The check covers the
+camelCase keys around the lists as well (`--set collect.logs.tail_lines=50` is
+refused), and the durations inside them: `pod_interval: 30` is a config the
+agent rejects at startup, so helm refuses it rather than rendering a
+CrashLoopBackOff.
 
 Charts older than 0.7.5 describe only `query.rules`, so everything under
 `collect.*` installs unchecked there. Agent images newer than 0.7.3 log
