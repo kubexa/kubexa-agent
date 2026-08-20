@@ -42,6 +42,12 @@ jobs:
       - name: Generate proto
         run: make proto
 
+      # TestHelmAcceptsTheShippedChart runs the real validator over
+      # values.schema.json; without helm it skips, and the schema's types,
+      # patterns and required fields go unchecked on every PR.
+      - name: Setup Helm
+        uses: azure/setup-helm@v5
+
       - name: Download dependencies
         run: go mod download
 

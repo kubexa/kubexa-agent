@@ -41,6 +41,7 @@
     },
     "collect": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "logs": {
           "type": "object",
@@ -50,7 +51,8 @@
               "type": "boolean"
             },
             "tailLines": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": 0
             },
             "follow": {
               "type": "boolean"
@@ -59,7 +61,10 @@
               "type": "string"
             },
             "excludeNamespaces": {
-              "type": "array",
+              "type": [
+                "array",
+                "null"
+              ],
               "items": {
                 "type": [
                   "boolean",
@@ -79,6 +84,7 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
@@ -87,12 +93,16 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
                   },
                   "pod_names": {
-                    "type": "array",
+                    "type": [
+                      "array",
+                      "null"
+                    ],
                     "items": {
                       "type": [
                         "boolean",
@@ -106,6 +116,7 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
@@ -114,12 +125,16 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
                   },
                   "labels": {
-                    "type": "object",
+                    "type": [
+                      "null",
+                      "object"
+                    ],
                     "additionalProperties": {
                       "type": [
                         "boolean",
@@ -130,7 +145,10 @@
                     }
                   },
                   "containers": {
-                    "type": "array",
+                    "type": [
+                      "array",
+                      "null"
+                    ],
                     "items": {
                       "type": [
                         "boolean",
@@ -141,10 +159,17 @@
                     }
                   },
                   "follow": {
-                    "type": "boolean"
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
                   },
                   "tail_lines": {
-                    "type": "integer"
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
                   }
                 }
               }
@@ -159,7 +184,8 @@
               "type": "boolean"
             },
             "resyncPeriod": {
-              "type": "string"
+              "type": "string",
+              "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
             },
             "redactSecrets": {
               "type": "boolean"
@@ -174,6 +200,7 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
@@ -182,12 +209,16 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
                   },
                   "resources": {
-                    "type": "array",
+                    "type": [
+                      "array",
+                      "null"
+                    ],
                     "items": {
                       "type": [
                         "boolean",
@@ -195,13 +226,13 @@
                         "number",
                         "string"
                       ]
-                    },
-                    "minItems": 1
+                    }
                   },
                   "label_selector": {
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
@@ -210,18 +241,20 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
                   },
                   "resync_period": {
-                    "type": "string",
-                    "description": "A Go duration such as \"30s\". A bare number is rejected by the agent at startup."
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                    "description": "A Go duration such as \"30s\". A number, quoted or not, is rejected by the agent at startup."
                   }
-                },
-                "required": [
-                  "resources"
-                ]
+                }
               }
             }
           }
@@ -234,10 +267,12 @@
               "type": "boolean"
             },
             "podInterval": {
-              "type": "string"
+              "type": "string",
+              "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
             },
             "nodeInterval": {
-              "type": "string"
+              "type": "string",
+              "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
             },
             "kubeMetrics": {
               "type": "boolean"
@@ -252,6 +287,7 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
@@ -260,12 +296,16 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
                   },
                   "resources": {
-                    "type": "array",
+                    "type": [
+                      "array",
+                      "null"
+                    ],
                     "items": {
                       "type": [
                         "boolean",
@@ -273,11 +313,13 @@
                         "number",
                         "string"
                       ]
-                    },
-                    "minItems": 1
+                    }
                   },
                   "pod_names": {
-                    "type": "array",
+                    "type": [
+                      "array",
+                      "null"
+                    ],
                     "items": {
                       "type": [
                         "boolean",
@@ -288,7 +330,10 @@
                     }
                   },
                   "node_names": {
-                    "type": "array",
+                    "type": [
+                      "array",
+                      "null"
+                    ],
                     "items": {
                       "type": [
                         "boolean",
@@ -302,6 +347,7 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
@@ -310,12 +356,16 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
                   },
                   "labels": {
-                    "type": "object",
+                    "type": [
+                      "null",
+                      "object"
+                    ],
                     "additionalProperties": {
                       "type": [
                         "boolean",
@@ -326,17 +376,22 @@
                     }
                   },
                   "pod_interval": {
-                    "type": "string",
-                    "description": "A Go duration such as \"30s\". A bare number is rejected by the agent at startup."
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                    "description": "A Go duration such as \"30s\". A number, quoted or not, is rejected by the agent at startup."
                   },
                   "node_interval": {
-                    "type": "string",
-                    "description": "A Go duration such as \"30s\". A bare number is rejected by the agent at startup."
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                    "description": "A Go duration such as \"30s\". A number, quoted or not, is rejected by the agent at startup."
                   }
-                },
-                "required": [
-                  "resources"
-                ]
+                }
               }
             },
             "customEndpoints": {
@@ -349,6 +404,7 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
@@ -357,16 +413,24 @@
                     "type": [
                       "boolean",
                       "integer",
+                      "null",
                       "number",
                       "string"
                     ]
                   },
                   "interval": {
-                    "type": "string",
-                    "description": "A Go duration such as \"30s\". A bare number is rejected by the agent at startup."
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                    "description": "A Go duration such as \"30s\". A number, quoted or not, is rejected by the agent at startup."
                   },
                   "extra_labels": {
-                    "type": "object",
+                    "type": [
+                      "null",
+                      "object"
+                    ],
                     "additionalProperties": {
                       "type": [
                         "boolean",
@@ -403,6 +467,7 @@
                 "type": [
                   "boolean",
                   "integer",
+                  "null",
                   "number",
                   "string"
                 ]
@@ -411,6 +476,7 @@
                 "type": [
                   "boolean",
                   "integer",
+                  "null",
                   "number",
                   "string"
                 ]
@@ -428,7 +494,10 @@
                 "minItems": 1
               },
               "names": {
-                "type": "array",
+                "type": [
+                  "array",
+                  "null"
+                ],
                 "items": {
                   "type": [
                     "boolean",
@@ -439,7 +508,10 @@
                 }
               },
               "verbs": {
-                "type": "array",
+                "type": [
+                  "array",
+                  "null"
+                ],
                 "items": {
                   "type": "string",
                   "enum": [
@@ -452,6 +524,7 @@
                 "type": [
                   "boolean",
                   "integer",
+                  "null",
                   "number",
                   "string"
                 ]
@@ -460,6 +533,7 @@
                 "type": [
                   "boolean",
                   "integer",
+                  "null",
                   "number",
                   "string"
                 ]
