@@ -43,10 +43,15 @@ jobs:
         run: make proto
 
       # TestHelmAcceptsTheShippedChart runs the real validator over
-      # values.schema.json; without helm it skips, and the schema's types,
-      # patterns and required fields go unchecked on every PR.
+      # values.schema.json, and without helm it skips silently. The runner
+      # image ships one already, so this is here to PIN it: the action's
+      # default is `latest`, which would move CI onto helm 4 while operators
+      # install with helm 3, and the two validators word their refusals
+      # differently.
       - name: Setup Helm
         uses: azure/setup-helm@v5
+        with:
+          version: v3.19.0
 
       - name: Download dependencies
         run: go mod download
