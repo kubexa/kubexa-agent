@@ -1,0 +1,7 @@
+# A leftover rule under a disabled section: StateCollectConfig.validate returns
+# before it looks at the rules, so the agent starts.
+collect:
+  state:
+    enabled: false
+    rules:
+      - id: leftover

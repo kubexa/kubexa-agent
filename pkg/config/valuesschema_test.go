@@ -99,6 +99,7 @@ func jsonTypes(field reflect.Type) []string {
 	if field == durationType {
 		return []string{"string"}
 	}
+	//nolint:exhaustive // every kind the rule structs use is listed; the rest fall through.
 	switch field.Kind() {
 	case reflect.String:
 		return []string{"boolean", "integer", "number", "string"}
@@ -122,7 +123,14 @@ func jsonTypes(field reflect.Type) []string {
 // element type, and that is where the string widening above actually matters
 // (pod_names, labels). A node that enumerates its allowed values is left
 // narrow -- no integer equals "list", so widening it would say nothing.
-func checkType(t *testing.T, where string, field reflect.Type, node map[string]any) {
+//
+// nullable is true for a rule's own fields and false for what is inside them.
+// Helm coalesces map values and drops nulls, but list items are replaced
+// wholesale, so a blank field inside a rule -- `pod_names:` with nothing after
+// it, which yaml.v3 binds as the zero value -- reaches the validator and must
+// be allowed. `pod_names: [null]` is a different thing: it decodes to [""], a
+// filter that matches nothing, so the elements stay non-nullable.
+func checkType(t *testing.T, where string, field reflect.Type, node map[string]any, nullable bool) {
 	t.Helper()
 	for field.Kind() == reflect.Pointer {
 		field = field.Elem()
@@ -131,9 +139,22 @@ func checkType(t *testing.T, where string, field reflect.Type, node map[string]a
 	if _, enumerated := node["enum"]; enumerated && field.Kind() == reflect.String {
 		want = []string{"string"}
 	}
+	if nullable {
+		want = append(want, "null")
+		sort.Strings(want)
+	}
 	if got := declaredTypes(node); !reflect.DeepEqual(want, got) {
 		t.Errorf("%s: type %v in the schema, want %v (%s)", where, got, want, field)
 		return
+	}
+	if field == durationType {
+		// "30" is as fatal as 30: yaml.v3 refuses !!str into time.Duration
+		// just as it refuses !!int, and the agent exits on the rendered file.
+		// Only a pattern separates a duration from any other string.
+		if pattern, ok := node["pattern"].(string); !ok || pattern == "" {
+			t.Errorf("%s: a duration with no `pattern`, so a quoted number passes helm and "+
+				"the agent exits on the config it renders", where)
+		}
 	}
 	switch field.Kind() {
 	case reflect.Slice, reflect.Array:
@@ -142,27 +163,31 @@ func checkType(t *testing.T, where string, field reflect.Type, node map[string]a
 			t.Errorf("%s: an array with no `items`, so its elements are unchecked", where)
 			return
 		}
-		checkType(t, where+"[]", field.Elem(), items)
+		checkType(t, where+"[]", field.Elem(), items, false)
 	case reflect.Map:
 		values, ok := node["additionalProperties"].(map[string]any)
 		if !ok {
 			t.Errorf("%s: a map with no `additionalProperties` schema, so its values are unchecked", where)
 			return
 		}
-		checkType(t, where+"{}", field.Elem(), values)
+		checkType(t, where+"{}", field.Elem(), values, false)
+	default:
 	}
 }
 
 // requiredByPath is what the agent's own Validate rejects a config for, and so
 // the only thing the schema may mark required: anything more refuses a config
 // the agent runs, and anything less lets helm install one it will not.
-// collect.metrics.customEndpoints is absent deliberately -- nothing validates
-// name or url (pkg/config/collect.go), so the schema does not either.
+//
+// Only query.rules qualifies. validateQuery walks the rules whatever
+// query.enabled says, while StateCollectConfig.validate and
+// MetricsCollectConfig.validate return before looking at a rule when their
+// section is disabled -- so a resource-less rule left behind under
+// `enabled: false` starts fine, and helm must not refuse it.
+// collect.metrics.customEndpoints validates neither name nor url at all.
 func requiredByPath() map[string][]string {
 	return map[string][]string{
-		"collect.state.rules":   {"resources"}, // StateNamespaceRule.validate
-		"collect.metrics.rules": {"resources"}, // MetricsNamespaceRule.validate
-		"query.rules":           {"resources"}, // QueryConfig validation, query.go
+		"query.rules": {"resources"}, // query.go: rejected however query.enabled reads
 	}
 }
 
@@ -205,6 +230,11 @@ func TestSchemaPassthroughItemsMatchAgentStructs(t *testing.T) {
 		props, _ := items["properties"].(map[string]any)
 		fields := fieldsByYAMLKey(ruleType)
 
+		mandatory := map[string]bool{}
+		for _, key := range requiredByPath()[path] {
+			mandatory[key] = true
+		}
+
 		for key := range fields {
 			if _, ok := props[key]; !ok {
 				t.Errorf("%s items: schema omits %q, which %s binds -- with "+
@@ -219,7 +249,10 @@ func TestSchemaPassthroughItemsMatchAgentStructs(t *testing.T) {
 					"blesses a key the agent drops", path, key, ruleType.Name())
 				continue
 			}
-			checkType(t, fmt.Sprintf("%s items: %q", path, key), field, props[key].(map[string]any))
+			// A key the agent refuses to start without is not nullable: a null
+			// there is the empty value it already rejects.
+			checkType(t, fmt.Sprintf("%s items: %q", path, key), field,
+				props[key].(map[string]any), !mandatory[key])
 		}
 
 		var required []string
@@ -269,6 +302,15 @@ func templateKeys(t *testing.T) map[string]map[string]bool {
 					keys[m[1]] = map[string]bool{}
 				}
 				keys[m[1]][m[2]] = true
+				// `collect` is a block too: .Values.collect.logs.enabled says
+				// `logs` is one of its keys, and `collect.log.enabled` -- the
+				// singular typo -- is the same silent mistake one level up.
+				if parent, child, found := strings.Cut(m[1], "."); found {
+					if keys[parent] == nil {
+						keys[parent] = map[string]bool{}
+					}
+					keys[parent][child] = true
+				}
 			}
 		}
 	}
@@ -284,7 +326,7 @@ func TestSchemaBlocksRejectUnknownChartKeys(t *testing.T) {
 	schema := loadSchema(t)
 	fromTemplate := templateKeys(t)
 
-	for _, path := range []string{"collect.logs", "collect.state", "collect.metrics", "query"} {
+	for _, path := range []string{"collect", "collect.logs", "collect.state", "collect.metrics", "query"} {
 		want := fromTemplate[path]
 		if len(want) == 0 {
 			t.Fatalf("%s: no .Values references found in the templates; this test is pinning nothing", path)
@@ -368,7 +410,9 @@ func TestShippedValuesSatisfyTheSchema(t *testing.T) {
 func TestHelmAcceptsTheShippedChart(t *testing.T) {
 	helm, err := exec.LookPath("helm")
 	if err != nil {
-		t.Skip("helm not installed; the same check runs in `make helm-lint`")
+		// `make helm-lint` validates the DEFAULT values only, so it exercises
+		// none of the refusals below. Nothing else covers them.
+		t.Skip("helm not installed: the schema's types, patterns and required fields go unchecked")
 	}
 
 	cases := []struct {
@@ -396,13 +440,38 @@ func TestHelmAcceptsTheShippedChart(t *testing.T) {
 			want: "tail_lines",
 		},
 		{
-			// An integer here renders a config the agent refuses at startup,
-			// so helm has to be the one to say no.
+			// A number here -- quoted or not -- renders a config the agent
+			// refuses at startup, so helm has to be the one to say no.
 			name: "a duration given as a number",
 			args: []string{
 				"--set-json", `collect.metrics.rules[0]={"resources":["pods"],"pod_interval":30}`,
 			},
 			want: "pod_interval",
+		},
+		{
+			name: "a duration given as a quoted number",
+			args: []string{
+				"--set-json", `collect.metrics.rules[0]={"resources":["pods"],"pod_interval":"30"}`,
+			},
+			want: "pod_interval",
+		},
+		{
+			name: "a block key misspelled one level up",
+			args: []string{"--set", "collect.log.enabled=false"},
+			want: "log",
+		},
+		{
+			// Helm replaces list items wholesale instead of coalescing them,
+			// so unlike a chart-level null this one reaches the validator --
+			// and the agent binds it as "filter not set".
+			name: "a rule field left blank",
+			args: []string{"--values", filepath.Join("testdata", "blank-rule-fields.yaml")},
+		},
+		{
+			// state and metrics validate nothing while disabled, so helm must
+			// not refuse what the agent would start with.
+			name: "a resource-less rule under a disabled section",
+			args: []string{"--values", filepath.Join("testdata", "disabled-section-rule.yaml")},
 		},
 	}
 
