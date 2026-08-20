@@ -93,8 +93,10 @@ Keys inside a `rules` entry are snake_case (`pod_names`, `label_selector`),
 unlike the camelCase chart values around them: the chart copies these lists
 into the agent's config file verbatim, so the keys are the agent's own config
 keys. A key the agent does not know is dropped and the install still succeeds
--- the rule then runs without that filter, collecting more than intended. The
-agent logs `unrecognized config key ignored` for each one at startup.
+-- the rule then runs without that filter, collecting more than intended.
+Agent images that carry the startup check log `unrecognized config key
+ignored` for each one; images up to and including 0.7.3 say nothing, so on
+those the only evidence is the rule's own behaviour.
 
 Or pass a custom `values.yaml` with full rule definitions.
 

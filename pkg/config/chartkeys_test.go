@@ -124,6 +124,57 @@ func TestChartDefaultRuleKeysAreAgentKeys(t *testing.T) {
 	}
 }
 
+// scalarPassthroughs are values the template passes through verbatim that have
+// no keys to get wrong -- plain lists of strings. They are named here so the
+// coverage check below can tell "no keys to check" from "nobody checked".
+var scalarPassthroughs = map[string]bool{
+	"collect.logs.excludeNamespaces": true,
+}
+
+var toYamlValue = regexp.MustCompile(`\.Values\.([A-Za-z0-9_.]+)`)
+
+// rulePaths is a hand-written registry, and a registry that nothing pins goes
+// stale the moment a passthrough is added: the new list's examples would go
+// unchecked, which is this bug happening again. The template is the authority
+// on what passes through, so it is read directly.
+func TestEveryPassthroughListIsChecked(t *testing.T) {
+	template := chartFile(t, "helm", "kubexa-agent", "templates", "configmap.yaml")
+
+	rendered := map[string]bool{}
+	context := ""
+	for _, line := range strings.Split(template, "\n") {
+		if m := toYamlValue.FindStringSubmatch(line); m != nil {
+			context = m[1]
+		}
+		if !strings.Contains(line, "toYaml") {
+			continue
+		}
+		if context == "" {
+			t.Fatalf("toYaml with no preceding .Values path: %q", strings.TrimSpace(line))
+		}
+		rendered[context] = true
+	}
+	if len(rendered) == 0 {
+		t.Fatal("no toYaml passthroughs found in configmap.yaml; this test is pinning nothing")
+	}
+
+	known := rulePaths()
+	for path := range rendered {
+		if _, ok := known[path]; ok || scalarPassthroughs[path] {
+			continue
+		}
+		t.Errorf("configmap.yaml renders %s with toYaml, so its keys reach the agent "+
+			"verbatim, but no test checks them: add it to rulePaths (or to "+
+			"scalarPassthroughs if it carries no keys)", path)
+	}
+	for path := range known {
+		if !rendered[path] {
+			t.Errorf("rulePaths lists %s, which the template no longer passes through; "+
+				"the check it stands for is now aimed at nothing", path)
+		}
+	}
+}
+
 // commentBlock is a run of comment lines in values.yaml, with the path of the
 // last real key above it -- which is what says which struct it illustrates.
 type commentBlock struct {
@@ -208,7 +259,7 @@ func dedent(lines []string) string {
 // is shipped advice, not a typo in a comment.
 func TestChartExampleRuleKeysAreAgentKeys(t *testing.T) {
 	paths := rulePaths()
-	found := 0
+	found := map[string]bool{}
 
 	for _, block := range commentBlocks(chartFile(t, "helm", "kubexa-agent", "values.yaml")) {
 		ruleType, ok := paths[block.path]
@@ -220,7 +271,7 @@ func TestChartExampleRuleKeysAreAgentKeys(t *testing.T) {
 		// enclosing key repeated with its list underneath.
 		var asList []any
 		if err := yaml.Unmarshal([]byte(block.body), &asList); err == nil && len(asList) > 0 {
-			found++
+			found[block.path] = true
 			checkItems(t, "values.yaml example under "+block.path, ruleType, asList)
 			continue
 		}
@@ -233,15 +284,22 @@ func TestChartExampleRuleKeysAreAgentKeys(t *testing.T) {
 		if len(list) == 0 {
 			continue
 		}
-		found++
+		found[block.path] = true
 		checkItems(t, "values.yaml example under "+block.path, ruleType, list)
 	}
 
-	// Three example blocks exist today: logs rules, custom endpoints, query
-	// rules. Fewer means the extraction broke and the test now proves nothing.
-	if found < 3 {
-		t.Fatalf("found %d rule examples in values.yaml, want at least 3; the extraction "+
-			"no longer sees them and this test is pinning nothing", found)
+	// Named rather than counted: a count stays satisfied when one example
+	// moves out of the extractor's reach and an unrelated one appears.
+	for _, path := range []string{
+		"collect.logs.rules",
+		"collect.metrics.customEndpoints",
+		"query.rules",
+	} {
+		if !found[path] {
+			t.Errorf("no %s example found in values.yaml; either the example was removed "+
+				"or the extraction no longer sees it, and in both cases nothing checks "+
+				"the keys an operator copies from there", path)
+		}
 	}
 }
 

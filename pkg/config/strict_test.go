@@ -177,3 +177,44 @@ func TestLoadWithWarningsQuietOnAValidFile(t *testing.T) {
 		t.Errorf("warnings = %v, want none", warnings)
 	}
 }
+
+// The warnings are useless if a config that also fails validation swallows
+// them: an unknown key is a plausible reason for the failure, and main prints
+// them ahead of the error precisely because of that.
+func TestLoadWithWarningsReportsThemWhenTheConfigIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	// No tenant_token, so Validate rejects it.
+	src := "gateway:\n  address: gateway.kubexa.dev:443\ncollect:\n  logs:\n    rules:\n      - podNames: [api-*]\n"
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, warnings, err := config.LoadWithWarnings(path)
+	if err == nil {
+		t.Fatal("LoadWithWarnings accepted a config with no tenant token")
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "podNames") {
+		t.Errorf("warnings = %v, want one naming podNames alongside the error", warnings)
+	}
+}
+
+// Same for a file that does not parse at all: the unknown key is still worth
+// naming, and UnknownKeys is collected before the parse can fail.
+func TestLoadWithWarningsReportsThemWhenTheYAMLIsMalformed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	src := "collect:\n  logs:\n    tail_lines: 100\n    rules:\n      - podNames: [api-*]\n  state: [this is not a mapping]\n"
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, warnings, err := config.LoadWithWarnings(path)
+	if err == nil {
+		t.Fatal("LoadWithWarnings accepted a malformed config")
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "podNames") {
+		t.Errorf("warnings = %v, want one naming podNames; otherwise the operator fixes "+
+			"the parse error, restarts, and only then hears about the key", warnings)
+	}
+}
