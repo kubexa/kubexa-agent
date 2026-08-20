@@ -3,17 +3,21 @@ package config
 import (
 	"bytes"
 	"errors"
-	"strings"
+	"regexp"
 
 	"gopkg.in/yaml.v3"
 )
 
-// unknownFieldPhrase is what yaml.v3 puts in a KnownFields error, as in
+// unknownFieldError matches what yaml.v3 puts in a KnownFields error, as in
 // `line 12: field podNames not found in type config.LogNamespaceRule`. The
 // line, the key and the rejecting type are all in that one string, which is
 // why the warnings are passed through verbatim rather than reformatted: the
 // type name is what tells an operator which block the key came from.
-const unknownFieldPhrase = "not found in type"
+//
+// It is anchored on the whole message rather than matched as a substring so a
+// type error quoting a value that happens to contain the phrase cannot be
+// reported as an unknown key.
+var unknownFieldError = regexp.MustCompile(`^(line \d+: )?field \S+ not found in type \S+$`)
 
 // UnknownKeys returns one warning per key in data that no config field
 // accepts. It never fails: a key the agent does not know is dropped in
@@ -28,6 +32,10 @@ const unknownFieldPhrase = "not found in type"
 // Type errors are deliberately not reported. Load's own parse pass already
 // refuses to start on those, and repeating them here would attach "unknown
 // key" to a key that is known.
+//
+// Only the first YAML document is examined, matching what Load itself binds:
+// yaml.Unmarshal also reads one document and drops any that follow. The chart
+// never renders more than one.
 func UnknownKeys(data []byte) []string {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
@@ -46,7 +54,7 @@ func UnknownKeys(data []byte) []string {
 
 	warnings := make([]string, 0, len(typeErr.Errors))
 	for _, e := range typeErr.Errors {
-		if strings.Contains(e, unknownFieldPhrase) {
+		if unknownFieldError.MatchString(e) {
 			warnings = append(warnings, e)
 		}
 	}

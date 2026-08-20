@@ -61,12 +61,7 @@ func run() int {
 
 	cfg, cfgWarnings, err := config.LoadWithWarnings(*configPath)
 	if err != nil {
-		// The logger does not exist yet -- it is built from this config. An
-		// unknown key is a plausible reason the config failed to validate, so
-		// it goes out ahead of the failure rather than with it.
-		for _, w := range cfgWarnings {
-			fmt.Fprintf(os.Stderr, "config: unrecognized key ignored: %s\n", w)
-		}
+		printConfigWarnings(cfgWarnings)
 		fmt.Fprintf(os.Stderr, "load config: %v\n", err)
 		return 1
 	}
@@ -79,6 +74,7 @@ func run() int {
 
 	level, err := logger.ParseLevel(cfg.Log.Level)
 	if err != nil {
+		printConfigWarnings(cfgWarnings)
 		fmt.Fprintf(os.Stderr, "parse log level: %v\n", err)
 		return 1
 	}
@@ -526,6 +522,17 @@ func isContextClosed(err error) bool {
 		return true
 	}
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// printConfigWarnings reports unrecognized config keys on the paths that exit
+// before the logger exists -- the logger is built from this same config, so
+// every failure between reading it and constructing the logger would otherwise
+// swallow the warnings. An unknown key is a plausible reason for such a
+// failure, so it goes out ahead of the error rather than with it.
+func printConfigWarnings(warnings []string) {
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "config: unrecognized key ignored: %s\n", w)
+	}
 }
 
 func printBanner(w interface{ Write([]byte) (int, error) }) {
