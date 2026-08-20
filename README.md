@@ -84,10 +84,19 @@ helm upgrade kubexa-agent ./helm/kubexa-agent \
   --reuse-values \
   --set collect.logs.rules[0].id=stage-api \
   --set collect.logs.rules[0].namespace=stage \
-  --set collect.logs.rules[0].labelSelector=log=backend-log \
-  --set-json 'collect.logs.rules[0].podNames=["be-*"]' \
+  --set collect.logs.rules[0].label_selector=log=backend-log \
+  --set-json 'collect.logs.rules[0].pod_names=["be-*"]' \
   --set-json 'collect.logs.rules[0].containers=["backend-admin"]'
 ```
+
+Keys inside a `rules` entry are snake_case (`pod_names`, `label_selector`),
+unlike the camelCase chart values around them: the chart copies these lists
+into the agent's config file verbatim, so the keys are the agent's own config
+keys. A key the agent does not know is dropped and the install still succeeds
+-- the rule then runs without that filter, collecting more than intended.
+Agent images that carry the startup check log `unrecognized config key
+ignored` for each one; images up to and including 0.7.3 say nothing, so on
+those the only evidence is the rule's own behaviour.
 
 Or pass a custom `values.yaml` with full rule definitions.
 

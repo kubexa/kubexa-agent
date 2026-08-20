@@ -59,8 +59,9 @@ func run() int {
 	devFlag := flag.Bool("dev", false, "enable local development mode")
 	flag.Parse()
 
-	cfg, err := config.Load(*configPath)
+	cfg, cfgWarnings, err := config.LoadWithWarnings(*configPath)
 	if err != nil {
+		printConfigWarnings(cfgWarnings)
 		fmt.Fprintf(os.Stderr, "load config: %v\n", err)
 		return 1
 	}
@@ -73,6 +74,7 @@ func run() int {
 
 	level, err := logger.ParseLevel(cfg.Log.Level)
 	if err != nil {
+		printConfigWarnings(cfgWarnings)
 		fmt.Fprintf(os.Stderr, "parse log level: %v\n", err)
 		return 1
 	}
@@ -94,6 +96,17 @@ func run() int {
 		logger.F("dev", devMode),
 		logger.F("config", *configPath),
 	)
+
+	// An unknown key is dropped, so the rule it belonged to is in force
+	// WITHOUT the setting it was meant to carry -- a log rule that lost its
+	// pod filter collects every pod in its namespace. That reads as an
+	// over-broad rule and never as a typo, which is why it is said out loud.
+	for _, w := range cfgWarnings {
+		rootLog.Warn("unrecognized config key ignored; the setting it carried is NOT in force",
+			logger.F("detail", w),
+			logger.F("config", *configPath),
+		)
+	}
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -509,6 +522,17 @@ func isContextClosed(err error) bool {
 		return true
 	}
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// printConfigWarnings reports unrecognized config keys on the paths that exit
+// before the logger exists -- the logger is built from this same config, so
+// every failure between reading it and constructing the logger would otherwise
+// swallow the warnings. An unknown key is a plausible reason for such a
+// failure, so it goes out ahead of the error rather than with it.
+func printConfigWarnings(warnings []string) {
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "config: unrecognized key ignored: %s\n", w)
+	}
 }
 
 func printBanner(w interface{ Write([]byte) (int, error) }) {
