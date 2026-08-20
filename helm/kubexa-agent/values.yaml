@@ -140,14 +140,23 @@ collect:
     excludeNamespaces:
       - kube-system
       - kube-public
+    # NOTE -- keys inside `rules` are snake_case, unlike every chart value
+    # around them. This list is copied into the agent's config file verbatim
+    # (toYaml), so its keys are the agent's OWN config keys: pod_names, not
+    # podNames. A key the agent does not know is dropped without failing the
+    # install, and a rule that lost its filters collects EVERYTHING in its
+    # namespace -- so the mistake shows up as an over-broad rule, never as a
+    # typo. The agent logs `unrecognized config key ignored` for each one at
+    # startup. Same for collect.state.rules, collect.metrics.rules,
+    # collect.metrics.customEndpoints and query.rules below.
     rules: []
     # Example:
     # rules:
     #   - id: prod-api
     #     namespace: production
-    #     podNames:
+    #     pod_names:
     #       - api-*
-    #     labelSelector: app=api
+    #     label_selector: app=api
     #     containers:
     #       - api
 
@@ -187,7 +196,7 @@ collect:
     #   - name: my-app
     #     url: http://my-app.metrics.svc:8080/metrics
     #     interval: 30s
-    #     extraLabels:
+    #     extra_labels:
     #       service: my-app
 
 # Live, on-demand resource reads requested by the Kubexa platform — distinct

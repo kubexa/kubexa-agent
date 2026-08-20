@@ -2,7 +2,15 @@ apiVersion: v2
 name: kubexa-agent
 description: Kubexa agent — collects Kubernetes logs, state, and metrics and streams them to the Kubexa gateway.
 type: application
-# 0.7.3 changes no template either; it moves appVersion to 0.7.3, which carries
+# 0.7.4 changes no template and no image: it corrects the values.yaml examples
+# for the passthrough `rules` lists. Those lists are copied into the agent's
+# config with toYaml, so their keys are the agent's own snake_case config keys
+# (pod_names, label_selector, extra_labels) -- the examples showed podNames /
+# labelSelector / extraLabels, which the agent drops in silence, leaving a rule
+# with no filter that collects everything in its namespace. appVersion stays
+# 0.7.3; the startup warning for unknown keys ships with the next image.
+#
+# 0.7.3 changed no template either; it moved appVersion to 0.7.3, which carries
 # three fixes batched since 0.7.2:
 #   - max_line_bytes was applied to the wire record's Raw field only, so the
 #     Message field -- the one the consumer indexes and the one Loki caps at
@@ -15,7 +23,7 @@ type: application
 #     so the only metric that measures reconnects read 0 while the same process
 #     logged 550 recv errors.
 # No install order constraint: the gateway is unaffected.
-version: 0.7.3
+version: 0.7.4
 appVersion: "0.7.3"
 keywords:
   - kubexa
