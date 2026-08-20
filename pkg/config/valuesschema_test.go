@@ -3,6 +3,9 @@ package config_test
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -76,20 +79,29 @@ func declaredTypes(node map[string]any) []string {
 
 var durationType = reflect.TypeOf(time.Duration(0))
 
-// jsonTypes is the set of JSON types a value must be allowed to take for the
-// agent's YAML decoder to bind it to this field.
+// jsonTypes is the set of JSON types a value may take without the agent's
+// decoder rejecting it. These are yaml.v3's actual rules, measured rather than
+// assumed, because the two interesting cases are opposites:
+//
+//	dur: 30       -> cannot unmarshal !!int `30` into time.Duration
+//	str: 7        -> binds, Str == "7"
+//	labels: {v:1} -> binds, Labels == map[v:1]
+//	bool: "true"  -> cannot unmarshal !!str `true` into bool
+//
+// So a duration must be declared string-only -- an integer there renders a
+// config the agent refuses at startup, which is a CrashLoopBackOff, not a
+// dropped key -- while every string field must accept any scalar, or the
+// schema refuses values that install and work today (`labels: {version: 1}`).
 func jsonTypes(field reflect.Type) []string {
 	for field.Kind() == reflect.Pointer {
 		field = field.Elem()
 	}
 	if field == durationType {
-		// yaml.v3 takes "30s" or a bare nanosecond count; the chart writes the
-		// first, and refusing the second would reject a config the agent loads.
-		return []string{"integer", "string"}
+		return []string{"string"}
 	}
 	switch field.Kind() {
 	case reflect.String:
-		return []string{"string"}
+		return []string{"boolean", "integer", "number", "string"}
 	case reflect.Bool:
 		return []string{"boolean"}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
@@ -103,6 +115,55 @@ func jsonTypes(field reflect.Type) []string {
 		return []string{"object"}
 	}
 	return nil
+}
+
+// checkType compares one schema node against the field it has to admit, and
+// descends: a list's `items` and a map's `additionalProperties` carry the
+// element type, and that is where the string widening above actually matters
+// (pod_names, labels). A node that enumerates its allowed values is left
+// narrow -- no integer equals "list", so widening it would say nothing.
+func checkType(t *testing.T, where string, field reflect.Type, node map[string]any) {
+	t.Helper()
+	for field.Kind() == reflect.Pointer {
+		field = field.Elem()
+	}
+	want := jsonTypes(field)
+	if _, enumerated := node["enum"]; enumerated && field.Kind() == reflect.String {
+		want = []string{"string"}
+	}
+	if got := declaredTypes(node); !reflect.DeepEqual(want, got) {
+		t.Errorf("%s: type %v in the schema, want %v (%s)", where, got, want, field)
+		return
+	}
+	switch field.Kind() {
+	case reflect.Slice, reflect.Array:
+		items, ok := node["items"].(map[string]any)
+		if !ok {
+			t.Errorf("%s: an array with no `items`, so its elements are unchecked", where)
+			return
+		}
+		checkType(t, where+"[]", field.Elem(), items)
+	case reflect.Map:
+		values, ok := node["additionalProperties"].(map[string]any)
+		if !ok {
+			t.Errorf("%s: a map with no `additionalProperties` schema, so its values are unchecked", where)
+			return
+		}
+		checkType(t, where+"{}", field.Elem(), values)
+	}
+}
+
+// requiredByPath is what the agent's own Validate rejects a config for, and so
+// the only thing the schema may mark required: anything more refuses a config
+// the agent runs, and anything less lets helm install one it will not.
+// collect.metrics.customEndpoints is absent deliberately -- nothing validates
+// name or url (pkg/config/collect.go), so the schema does not either.
+func requiredByPath() map[string][]string {
+	return map[string][]string{
+		"collect.state.rules":   {"resources"}, // StateNamespaceRule.validate
+		"collect.metrics.rules": {"resources"}, // MetricsNamespaceRule.validate
+		"query.rules":           {"resources"}, // QueryConfig validation, query.go
+	}
 }
 
 // fieldsByYAMLKey indexes a rule struct by the key it binds.
@@ -158,12 +219,22 @@ func TestSchemaPassthroughItemsMatchAgentStructs(t *testing.T) {
 					"blesses a key the agent drops", path, key, ruleType.Name())
 				continue
 			}
-			want := jsonTypes(field)
-			got := declaredTypes(props[key].(map[string]any))
-			if !reflect.DeepEqual(want, got) {
-				t.Errorf("%s items: %q is type %v in the schema, want %v (%s)",
-					path, key, got, want, field)
-			}
+			checkType(t, fmt.Sprintf("%s items: %q", path, key), field, props[key].(map[string]any))
+		}
+
+		var required []string
+		declared, _ := items["required"].([]any)
+		for _, one := range declared {
+			name, _ := one.(string)
+			required = append(required, name)
+		}
+		sort.Strings(required)
+		want := requiredByPath()[path]
+		sort.Strings(want)
+		if !reflect.DeepEqual(required, want) {
+			t.Errorf("%s items: required = %v, want %v -- the schema may demand exactly what "+
+				"the agent's Validate demands, no more (helm would refuse a config that runs) "+
+				"and no less (helm would pass one that does not)", path, required, want)
 		}
 	}
 }
@@ -176,11 +247,22 @@ var (
 )
 
 // templateKeys returns, per block, the chart keys the templates actually read.
+// The file list is globbed rather than written out: a hand-written list goes
+// stale the moment a template starts reading a new key, and the schema would
+// then refuse a key the chart itself uses, with no test failing.
 func templateKeys(t *testing.T) map[string]map[string]bool {
 	t.Helper()
+	templates, err := filepath.Glob(filepath.Join("..", "..", "helm", "kubexa-agent", "templates", "*"))
+	if err != nil || len(templates) == 0 {
+		t.Fatalf("glob chart templates: %v (found %d)", err, len(templates))
+	}
 	keys := map[string]map[string]bool{}
-	for _, name := range []string{"configmap.yaml", "clusterrole.yaml", "NOTES.txt"} {
-		body := chartFile(t, "helm", "kubexa-agent", "templates", name)
+	for _, path := range templates {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(raw)
 		for _, re := range []*regexp.Regexp{valuesRef, hasKeyRef} {
 			for _, m := range re.FindAllStringSubmatch(body, -1) {
 				if keys[m[1]] == nil {
@@ -277,4 +359,75 @@ func TestShippedValuesSatisfyTheSchema(t *testing.T) {
 		}
 	}
 	walk(schema, values, "")
+}
+
+// The walk above judges keys only. Everything else the schema says -- types,
+// required, enums, minItems -- is enforced by helm's validator, not by any Go
+// code here, and a schema that refuses the chart's own defaults would fail
+// every install of an untouched chart. So the check is helm itself.
+func TestHelmAcceptsTheShippedChart(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm not installed; the same check runs in `make helm-lint`")
+	}
+
+	cases := []struct {
+		name string
+		args []string
+		want string // empty: helm must accept
+	}{
+		{name: "defaults"},
+		{
+			name: "a rule written with the agent's keys",
+			args: []string{
+				"--set", "collect.logs.rules[0].namespace=prod",
+				"--set-json", `collect.logs.rules[0].pod_names=["api-*"]`,
+				"--set-json", `collect.logs.rules[0].labels={"version":1}`,
+			},
+		},
+		{
+			name: "a rule written with the chart's camelCase",
+			args: []string{"--set-json", `collect.logs.rules[0]={"namespace":"prod","podNames":["api-*"]}`},
+			want: "podNames",
+		},
+		{
+			name: "a chart key written in the agent's snake_case",
+			args: []string{"--set", "collect.logs.tail_lines=50"},
+			want: "tail_lines",
+		},
+		{
+			// An integer here renders a config the agent refuses at startup,
+			// so helm has to be the one to say no.
+			name: "a duration given as a number",
+			args: []string{
+				"--set-json", `collect.metrics.rules[0]={"resources":["pods"],"pod_interval":30}`,
+			},
+			want: "pod_interval",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{
+				"template", "t", filepath.Join("..", "..", "helm", "kubexa-agent"),
+				"--set", "secret.tenantToken=x",
+			}, tc.args...)
+			out, err := exec.Command(helm, args...).CombinedOutput()
+
+			if tc.want == "" {
+				if err != nil {
+					t.Errorf("helm refused a valid chart: %v\n%s", err, out)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("helm accepted %s; the schema is the only gate that runs before "+
+					"the config reaches the cluster", tc.want)
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Errorf("helm refused it without naming %q, so the operator is not told what "+
+					"to fix:\n%s", tc.want, out)
+			}
+		})
+	}
 }

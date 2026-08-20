@@ -61,7 +61,12 @@
             "excludeNamespaces": {
               "type": "array",
               "items": {
-                "type": "string"
+                "type": [
+                  "boolean",
+                  "integer",
+                  "number",
+                  "string"
+                ]
               }
             },
             "rules": {
@@ -71,33 +76,68 @@
                 "additionalProperties": false,
                 "properties": {
                   "id": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "namespace": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "pod_names": {
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "number",
+                        "string"
+                      ]
                     }
                   },
                   "label_selector": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "field_selector": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "labels": {
                     "type": "object",
                     "additionalProperties": {
-                      "type": "string"
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "number",
+                        "string"
+                      ]
                     }
                   },
                   "containers": {
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "number",
+                        "string"
+                      ]
                     }
                   },
                   "follow": {
@@ -131,31 +171,57 @@
                 "additionalProperties": false,
                 "properties": {
                   "id": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "namespace": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "resources": {
                     "type": "array",
                     "items": {
-                      "type": "string"
-                    }
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "number",
+                        "string"
+                      ]
+                    },
+                    "minItems": 1
                   },
                   "label_selector": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "field_selector": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "resync_period": {
-                    "type": [
-                      "integer",
-                      "string"
-                    ],
-                    "description": "A Go duration such as \"30s\"; a bare number is nanoseconds."
+                    "type": "string",
+                    "description": "A Go duration such as \"30s\". A bare number is rejected by the agent at startup."
                   }
-                }
+                },
+                "required": [
+                  "resources"
+                ]
               }
             }
           }
@@ -183,56 +249,94 @@
                 "additionalProperties": false,
                 "properties": {
                   "id": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "namespace": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "resources": {
                     "type": "array",
                     "items": {
-                      "type": "string"
-                    }
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "number",
+                        "string"
+                      ]
+                    },
+                    "minItems": 1
                   },
                   "pod_names": {
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "number",
+                        "string"
+                      ]
                     }
                   },
                   "node_names": {
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "number",
+                        "string"
+                      ]
                     }
                   },
                   "label_selector": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "field_selector": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "labels": {
                     "type": "object",
                     "additionalProperties": {
-                      "type": "string"
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "number",
+                        "string"
+                      ]
                     }
                   },
                   "pod_interval": {
-                    "type": [
-                      "integer",
-                      "string"
-                    ],
-                    "description": "A Go duration such as \"30s\"; a bare number is nanoseconds."
+                    "type": "string",
+                    "description": "A Go duration such as \"30s\". A bare number is rejected by the agent at startup."
                   },
                   "node_interval": {
-                    "type": [
-                      "integer",
-                      "string"
-                    ],
-                    "description": "A Go duration such as \"30s\"; a bare number is nanoseconds."
+                    "type": "string",
+                    "description": "A Go duration such as \"30s\". A bare number is rejected by the agent at startup."
                   }
-                }
+                },
+                "required": [
+                  "resources"
+                ]
               }
             },
             "customEndpoints": {
@@ -242,29 +346,37 @@
                 "additionalProperties": false,
                 "properties": {
                   "name": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "url": {
-                    "type": "string"
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "number",
+                      "string"
+                    ]
                   },
                   "interval": {
-                    "type": [
-                      "integer",
-                      "string"
-                    ],
-                    "description": "A Go duration such as \"30s\"; a bare number is nanoseconds."
+                    "type": "string",
+                    "description": "A Go duration such as \"30s\". A bare number is rejected by the agent at startup."
                   },
                   "extra_labels": {
                     "type": "object",
                     "additionalProperties": {
-                      "type": "string"
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "number",
+                        "string"
+                      ]
                     }
                   }
-                },
-                "required": [
-                  "name",
-                  "url"
-                ]
+                }
               }
             }
           }
@@ -288,22 +400,42 @@
             "additionalProperties": false,
             "properties": {
               "id": {
-                "type": "string"
+                "type": [
+                  "boolean",
+                  "integer",
+                  "number",
+                  "string"
+                ]
               },
               "namespace": {
-                "type": "string"
+                "type": [
+                  "boolean",
+                  "integer",
+                  "number",
+                  "string"
+                ]
               },
               "resources": {
                 "type": "array",
                 "items": {
-                  "type": "string"
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "number",
+                    "string"
+                  ]
                 },
                 "minItems": 1
               },
               "names": {
                 "type": "array",
                 "items": {
-                  "type": "string"
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "number",
+                    "string"
+                  ]
                 }
               },
               "verbs": {
@@ -317,10 +449,20 @@
                 }
               },
               "label_selector": {
-                "type": "string"
+                "type": [
+                  "boolean",
+                  "integer",
+                  "number",
+                  "string"
+                ]
               },
               "field_selector": {
-                "type": "string"
+                "type": [
+                  "boolean",
+                  "integer",
+                  "number",
+                  "string"
+                ]
               }
             },
             "required": [

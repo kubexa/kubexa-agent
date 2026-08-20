@@ -8,7 +8,11 @@ type: application
 # `query.rules[0].labelSelector` by name while accepting
 # `collect.logs.rules[0].podNames` -- the same mistake, one caught before the
 # install and one only visible later as a rule collecting its whole namespace.
-# appVersion stays 0.7.3.
+# The schema also refuses a duration written as a number (`pod_interval: 30`),
+# which the agent rejects at startup: helm now says no instead of rendering a
+# CrashLoopBackOff. It deliberately does NOT tighten anything else: a string
+# field accepts any scalar because yaml.v3 does, so `labels: {version: 1}` in
+# an existing release still upgrades. appVersion stays 0.7.3.
 #
 # 0.7.4 changes no template and no image: it corrects the values.yaml examples
 # for the passthrough `rules` lists. Those lists are copied into the agent's
