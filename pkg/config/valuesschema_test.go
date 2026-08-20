@@ -258,7 +258,11 @@ func TestShippedValuesSatisfyTheSchema(t *testing.T) {
 			return
 		}
 		props, _ := node["properties"].(map[string]any)
-		closed, _ := node["additionalProperties"].(bool)
+		// `additionalProperties: false` decodes to the bool false, which is also
+		// the zero value a missing key yields: the second result is what tells
+		// the two apart, and dropping it made this walk skip every closed node.
+		extra, present := node["additionalProperties"].(bool)
+		closed := present && !extra
 		for key, sub := range fields {
 			child, described := props[key].(map[string]any)
 			if !described {
