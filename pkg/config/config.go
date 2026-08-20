@@ -299,10 +299,14 @@ func LoadWithWarnings(path string) (*Config, []string, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("read config file %q: %w", path, err)
 		}
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, nil, fmt.Errorf("parse config YAML: %w", err)
-		}
+		// Collected before the parse can fail, so a file that carries both a
+		// malformed value and an unknown key reports both at once. Otherwise
+		// the operator fixes the value, restarts, and only then hears about
+		// the key.
 		warnings = UnknownKeys(data)
+		if err := yaml.Unmarshal(data, cfg); err != nil {
+			return nil, warnings, fmt.Errorf("parse config YAML: %w", err)
+		}
 	}
 
 	applyEnvOverrides(cfg)

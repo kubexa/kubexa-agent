@@ -146,9 +146,11 @@ collect:
     # podNames. A key the agent does not know is dropped without failing the
     # install, and a rule that lost its filters collects EVERYTHING in its
     # namespace -- so the mistake shows up as an over-broad rule, never as a
-    # typo. The agent logs `unrecognized config key ignored` for each one at
-    # startup. Same for collect.state.rules, collect.metrics.rules,
-    # collect.metrics.customEndpoints and query.rules below.
+    # typo. Agent images that carry the startup check log `unrecognized config
+    # key ignored` for each one; the appVersion this chart pins today (0.7.3)
+    # predates it and says nothing. Same for collect.state.rules,
+    # collect.metrics.rules, collect.metrics.customEndpoints and query.rules
+    # below.
     rules: []
     # Example:
     # rules:
