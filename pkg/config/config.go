@@ -274,17 +274,35 @@ func Default() *Config {
 
 // Load reads configuration from path (when non-empty), applies environment overrides,
 // ensures agent_id is set, and validates the result.
+//
+// Keys the agent does not know are dropped without comment. Use
+// LoadWithWarnings to hear about them.
 func Load(path string) (*Config, error) {
+	cfg, _, err := LoadWithWarnings(path)
+	return cfg, err
+}
+
+// LoadWithWarnings is Load, plus one warning per unrecognized key in the file
+// (see UnknownKeys). The warnings are advisory: an unknown key has never
+// stopped the agent from starting and still does not, because a stale key in
+// a values file an operator has carried forward is not a reason to take their
+// telemetry down.
+//
+// Warnings are returned even when the config is rejected -- an unknown key is
+// a plausible reason for a validation failure, so the operator should see both.
+func LoadWithWarnings(path string) (*Config, []string, error) {
 	cfg := Default()
+	var warnings []string
 
 	if path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("read config file %q: %w", path, err)
+			return nil, nil, fmt.Errorf("read config file %q: %w", path, err)
 		}
 		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("parse config YAML: %w", err)
+			return nil, nil, fmt.Errorf("parse config YAML: %w", err)
 		}
+		warnings = UnknownKeys(data)
 	}
 
 	applyEnvOverrides(cfg)
@@ -292,10 +310,10 @@ func Load(path string) (*Config, error) {
 	cfg.Normalize()
 
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("validate config: %w", err)
+		return nil, warnings, fmt.Errorf("validate config: %w", err)
 	}
 
-	return cfg, nil
+	return cfg, warnings, nil
 }
 
 // LoadFromYAML parses configuration from YAML bytes (used in tests and tooling).
