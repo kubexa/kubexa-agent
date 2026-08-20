@@ -1,61 +1,331 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["gateway", "secret"],
+  "required": [
+    "gateway",
+    "secret"
+  ],
   "properties": {
     "gateway": {
       "type": "object",
       "properties": {
-        "address": { "type": "string" },
-        "host": { "type": "string" },
-        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "tls": { "type": "boolean" }
+        "address": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "tls": {
+          "type": "boolean"
+        }
       }
     },
     "secret": {
       "type": "object",
       "properties": {
-        "create": { "type": "boolean" },
-        "existingSecret": { "type": "string" },
-        "tenantToken": { "type": "string" }
+        "create": {
+          "type": "boolean"
+        },
+        "existingSecret": {
+          "type": "string"
+        },
+        "tenantToken": {
+          "type": "string"
+        }
       }
     },
     "collect": {
       "type": "object",
       "properties": {
-        "logs": { "type": "object" },
-        "state": { "type": "object" },
-        "metrics": { "type": "object" }
+        "logs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "tailLines": {
+              "type": "integer"
+            },
+            "follow": {
+              "type": "boolean"
+            },
+            "checkpointDir": {
+              "type": "string"
+            },
+            "excludeNamespaces": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "pod_names": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "label_selector": {
+                    "type": "string"
+                  },
+                  "field_selector": {
+                    "type": "string"
+                  },
+                  "labels": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "containers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "follow": {
+                    "type": "boolean"
+                  },
+                  "tail_lines": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "state": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "resyncPeriod": {
+              "type": "string"
+            },
+            "redactSecrets": {
+              "type": "boolean"
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "resources": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "label_selector": {
+                    "type": "string"
+                  },
+                  "field_selector": {
+                    "type": "string"
+                  },
+                  "resync_period": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ],
+                    "description": "A Go duration such as \"30s\"; a bare number is nanoseconds."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "podInterval": {
+              "type": "string"
+            },
+            "nodeInterval": {
+              "type": "string"
+            },
+            "kubeMetrics": {
+              "type": "boolean"
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "resources": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "pod_names": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "node_names": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "label_selector": {
+                    "type": "string"
+                  },
+                  "field_selector": {
+                    "type": "string"
+                  },
+                  "labels": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "pod_interval": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ],
+                    "description": "A Go duration such as \"30s\"; a bare number is nanoseconds."
+                  },
+                  "node_interval": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ],
+                    "description": "A Go duration such as \"30s\"; a bare number is nanoseconds."
+                  }
+                }
+              }
+            },
+            "customEndpoints": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "interval": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ],
+                    "description": "A Go duration such as \"30s\"; a bare number is nanoseconds."
+                  },
+                  "extra_labels": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "name",
+                  "url"
+                ]
+              }
+            }
+          }
+        }
       }
     },
     "query": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "redactSecrets": { "type": "boolean" },
+        "enabled": {
+          "type": "boolean"
+        },
+        "redactSecrets": {
+          "type": "boolean"
+        },
         "rules": {
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "id": { "type": "string" },
-              "namespace": { "type": "string" },
+              "id": {
+                "type": "string"
+              },
+              "namespace": {
+                "type": "string"
+              },
               "resources": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "minItems": 1
               },
-              "names": { "type": "array", "items": { "type": "string" } },
+              "names": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
               "verbs": {
                 "type": "array",
-                "items": { "type": "string", "enum": ["list", "get"] }
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "list",
+                    "get"
+                  ]
+                }
               },
-              "label_selector": { "type": "string" },
-              "field_selector": { "type": "string" }
+              "label_selector": {
+                "type": "string"
+              },
+              "field_selector": {
+                "type": "string"
+              }
             },
-            "required": ["resources"]
+            "required": [
+              "resources"
+            ]
           }
         }
       }

@@ -146,11 +146,12 @@ collect:
     # podNames. A key the agent does not know is dropped without failing the
     # install, and a rule that lost its filters collects EVERYTHING in its
     # namespace -- so the mistake shows up as an over-broad rule, never as a
-    # typo. Agent images that carry the startup check log `unrecognized config
-    # key ignored` for each one; the appVersion this chart pins today (0.7.3)
-    # predates it and says nothing. Same for collect.state.rules,
-    # collect.metrics.rules, collect.metrics.customEndpoints and query.rules
-    # below.
+    # typo. values.schema.json now names every key these lists accept, so helm
+    # refuses the install and says which key is wrong -- before anything runs.
+    # (The agent also logs `unrecognized config key ignored` at startup, but
+    # only in images newer than the appVersion this chart pins today, 0.7.3.)
+    # Same for collect.state.rules, collect.metrics.rules,
+    # collect.metrics.customEndpoints and query.rules below.
     rules: []
     # Example:
     # rules:
