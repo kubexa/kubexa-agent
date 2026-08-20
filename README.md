@@ -92,11 +92,15 @@ helm upgrade kubexa-agent ./helm/kubexa-agent \
 Keys inside a `rules` entry are snake_case (`pod_names`, `label_selector`),
 unlike the camelCase chart values around them: the chart copies these lists
 into the agent's config file verbatim, so the keys are the agent's own config
-keys. A key the agent does not know is dropped and the install still succeeds
--- the rule then runs without that filter, collecting more than intended.
-Agent images that carry the startup check log `unrecognized config key
-ignored` for each one; images up to and including 0.7.3 say nothing, so on
-those the only evidence is the rule's own behaviour.
+keys. `values.schema.json` names every key these lists accept, so helm refuses
+the command above with `additional properties 'podNames' not allowed` rather
+than installing a rule that silently lost its filter -- which would collect
+more than intended, not less. The same check covers the camelCase keys around
+the lists: `--set collect.logs.tail_lines=50` is refused too.
+
+Charts older than 0.7.5 describe only `query.rules`, so everything under
+`collect.*` installs unchecked there. Agent images newer than 0.7.3 log
+`unrecognized config key ignored` at startup as a second line of defence.
 
 Or pass a custom `values.yaml` with full rule definitions.
 

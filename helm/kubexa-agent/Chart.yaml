@@ -2,6 +2,14 @@ apiVersion: v2
 name: kubexa-agent
 description: Kubexa agent — collects Kubernetes logs, state, and metrics and streams them to the Kubexa gateway.
 type: application
+# 0.7.5 changes no template and no image either: values.schema.json now
+# describes the four collect.* passthrough lists and the chart keys around
+# them, the way it already described query.rules. Before this, helm refused
+# `query.rules[0].labelSelector` by name while accepting
+# `collect.logs.rules[0].podNames` -- the same mistake, one caught before the
+# install and one only visible later as a rule collecting its whole namespace.
+# appVersion stays 0.7.3.
+#
 # 0.7.4 changes no template and no image: it corrects the values.yaml examples
 # for the passthrough `rules` lists. Those lists are copied into the agent's
 # config with toYaml, so their keys are the agent's own snake_case config keys
@@ -23,7 +31,7 @@ type: application
 #     so the only metric that measures reconnects read 0 while the same process
 #     logged 550 recv errors.
 # No install order constraint: the gateway is unaffected.
-version: 0.7.4
+version: 0.7.5
 appVersion: "0.7.3"
 keywords:
   - kubexa
