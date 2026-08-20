@@ -10,12 +10,18 @@ type: application
 # install and one only visible later as a rule collecting its whole namespace.
 # The schema also refuses a duration written as a number (`pod_interval: 30`),
 # which the agent rejects at startup: helm now says no instead of rendering a
-# CrashLoopBackOff, and it marks `resources` required on query.rules, which is
-# the one list the agent validates however the section is configured (state and
-# metrics skip validation entirely while disabled, so a leftover rule there
-# still installs). It tightens nothing else: a string field accepts any scalar
-# because yaml.v3 does, and every field inside a rule accepts null, so
-# `labels: {version: 1}` and a rule with blank filters both still upgrade.
+# CrashLoopBackOff, and it refuses an infix `*` in a query rule's namespace or
+# names, which the agent also exits on. Everything else stays as permissive as
+# the agent is: a string field accepts any scalar because yaml.v3 does, a blank
+# value is allowed wherever yaml.v3 reads one as "not set", and `resources` is
+# required only on query.rules -- state and metrics skip validation entirely
+# while disabled, so a leftover rule there still installs.
+#
+# UPGRADE: this is the release where a rule written with the chart's old
+# camelCase examples stops installing. If `helm upgrade` reports `additional
+# properties 'podNames' not allowed` (or labelSelector / extraLabels), rename
+# those keys to pod_names / label_selector / extra_labels -- the agent never
+# read the camelCase spelling, so the rule was running without that filter.
 # appVersion stays 0.7.3.
 #
 # 0.7.4 changes no template and no image: it corrects the values.yaml examples
