@@ -7,8 +7,11 @@ collect:
         namespace:
         pod_names:
         label_selector:
+        field_selector:
         labels:
+          team:
         containers:
+          -
         follow:
         tail_lines:
   metrics:
@@ -17,3 +20,8 @@ collect:
         url: http://my-app:8080/metrics
         interval:
         extra_labels:
+  state:
+    rules:
+      - resources: [pods]
+        namespace:
+        resync_period:

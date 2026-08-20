@@ -124,12 +124,17 @@ func jsonTypes(field reflect.Type) []string {
 // (pod_names, labels). A node that enumerates its allowed values is left
 // narrow -- no integer equals "list", so widening it would say nothing.
 //
-// nullable is true for a rule's own fields and false for what is inside them.
-// Helm coalesces map values and drops nulls, but list items are replaced
-// wholesale, so a blank field inside a rule -- `pod_names:` with nothing after
-// it, which yaml.v3 binds as the zero value -- reaches the validator and must
-// be allowed. `pod_names: [null]` is a different thing: it decodes to [""], a
-// filter that matches nothing, so the elements stay non-nullable.
+// nullable says whether a blank value is allowed here, and it is inherited by
+// everything nested. Helm coalesces map values and drops nulls, but list items
+// are replaced wholesale, so a blank inside a rule reaches the validator -- and
+// yaml.v3 reads every spelling of it as "not set":
+//
+//	pod_names:        -> nil slice
+//	pod_names: [null] -> the entry is SKIPPED, len 0
+//	labels: {team: }  -> binds ""
+//
+// It is false only under a key the agent refuses to start without, where a
+// blank is the empty value it already rejects.
 func checkType(t *testing.T, where string, field reflect.Type, node map[string]any, nullable bool) {
 	t.Helper()
 	for field.Kind() == reflect.Pointer {
@@ -163,14 +168,14 @@ func checkType(t *testing.T, where string, field reflect.Type, node map[string]a
 			t.Errorf("%s: an array with no `items`, so its elements are unchecked", where)
 			return
 		}
-		checkType(t, where+"[]", field.Elem(), items, false)
+		checkType(t, where+"[]", field.Elem(), items, nullable)
 	case reflect.Map:
 		values, ok := node["additionalProperties"].(map[string]any)
 		if !ok {
 			t.Errorf("%s: a map with no `additionalProperties` schema, so its values are unchecked", where)
 			return
 		}
-		checkType(t, where+"{}", field.Elem(), values, false)
+		checkType(t, where+"{}", field.Elem(), values, nullable)
 	default:
 	}
 }
@@ -275,8 +280,8 @@ func TestSchemaPassthroughItemsMatchAgentStructs(t *testing.T) {
 // hasKeyRef catches `hasKey .Values.query "redactSecrets"`, which reads a value
 // without ever writing its dotted path.
 var (
-	valuesRef = regexp.MustCompile(`\.Values\.((?:collect\.(?:logs|state|metrics))|query)\.([A-Za-z0-9]+)`)
-	hasKeyRef = regexp.MustCompile(`hasKey\s+\.Values\.((?:collect\.(?:logs|state|metrics))|query)\s+"([A-Za-z0-9]+)"`)
+	valuesRef = regexp.MustCompile(`\.Values\.((?:collect\.[A-Za-z0-9]+)|query)\.([A-Za-z0-9]+)`)
+	hasKeyRef = regexp.MustCompile(`hasKey\s+\.Values\.((?:collect\.[A-Za-z0-9]+)|query)\s+"([A-Za-z0-9]+)"`)
 )
 
 // templateKeys returns, per block, the chart keys the templates actually read.
@@ -326,11 +331,10 @@ func TestSchemaBlocksRejectUnknownChartKeys(t *testing.T) {
 	schema := loadSchema(t)
 	fromTemplate := templateKeys(t)
 
-	for _, path := range []string{"collect", "collect.logs", "collect.state", "collect.metrics", "query"} {
-		want := fromTemplate[path]
-		if len(want) == 0 {
-			t.Fatalf("%s: no .Values references found in the templates; this test is pinning nothing", path)
-		}
+	if len(fromTemplate) == 0 {
+		t.Fatal("no .Values references found in the templates; this test is pinning nothing")
+	}
+	for path, want := range fromTemplate {
 		node := schemaAt(schema, path)
 		if node == nil {
 			t.Errorf("%s: not described in values.schema.json", path)
@@ -457,8 +461,8 @@ func TestHelmAcceptsTheShippedChart(t *testing.T) {
 		},
 		{
 			name: "a block key misspelled one level up",
-			args: []string{"--set", "collect.log.enabled=false"},
-			want: "log",
+			args: []string{"--set", "collect.logz.enabled=false"},
+			want: "logz",
 		},
 		{
 			// Helm replaces list items wholesale instead of coalescing them,
@@ -472,6 +476,32 @@ func TestHelmAcceptsTheShippedChart(t *testing.T) {
 			// not refuse what the agent would start with.
 			name: "a resource-less rule under a disabled section",
 			args: []string{"--values", filepath.Join("testdata", "disabled-section-rule.yaml")},
+		},
+		{
+			// Everything time.ParseDuration takes, including the bare "0" that
+			// turns a resync off -- refusing these would fail an upgrade.
+			name: "the duration forms the agent parses",
+			args: []string{"--values", filepath.Join("testdata", "duration-forms.yaml")},
+		},
+		{
+			// validatePattern allows "*" only at the end, however query.enabled
+			// reads, so an infix one is a startup failure helm can prevent.
+			name: "an infix wildcard in a query namespace",
+			args: []string{
+				"--set-json", `query.rules[0]={"resources":["pods"],"namespace":"pr*d"}`,
+			},
+			want: "namespace",
+		},
+		{
+			name: "a partial resource wildcard",
+			args: []string{"--set-json", `query.rules[0]={"resources":["apps/*"]}`},
+			want: "resources",
+		},
+		{
+			name: "a trailing wildcard, which the agent supports",
+			args: []string{
+				"--set-json", `query.rules[0]={"resources":["*"],"namespace":"prod*","names":["api-*"]}`,
+			},
 		},
 	}
 
