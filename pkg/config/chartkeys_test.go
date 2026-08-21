@@ -52,6 +52,10 @@ func acceptedKeys(t reflect.Type) map[string]bool {
 	return keys
 }
 
+// chartFile reads a file from the chart, which lives outside this package's
+// directory. `go test` can serve a cached PASS after a chart-only edit, so a
+// mutation that should be red reads as green -- pass -count=1 when checking
+// one by hand. `make test` and the CI step already do.
 func chartFile(t *testing.T, parts ...string) string {
 	t.Helper()
 	path := filepath.Join(append([]string{"..", ".."}, parts...)...)

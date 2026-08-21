@@ -1,0 +1,27 @@
+# Every filter left blank: yaml.v3 binds each to its zero value, so the agent
+# reads this as a rule with no filters -- not as an error.
+collect:
+  logs:
+    rules:
+      - id: prod-api
+        namespace:
+        pod_names:
+        label_selector:
+        field_selector:
+        labels:
+          team:
+        containers:
+          -
+        follow:
+        tail_lines:
+  metrics:
+    customEndpoints:
+      - name: my-app
+        url: http://my-app:8080/metrics
+        interval:
+        extra_labels:
+  state:
+    rules:
+      - resources: [pods]
+        namespace:
+        resync_period:

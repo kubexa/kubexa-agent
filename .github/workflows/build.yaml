@@ -42,6 +42,17 @@ jobs:
       - name: Generate proto
         run: make proto
 
+      # TestHelmAcceptsTheShippedChart runs the real validator over
+      # values.schema.json, and without helm it skips silently. The runner
+      # image ships one already, so this is here to PIN it: the action's
+      # default is `latest`, so CI would drift with whatever helm ships next.
+      # 3.19 and 4.x share a validator and word their refusals identically;
+      # helm before 3.18 does not, which is what the pin holds still.
+      - name: Setup Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.19.0
+
       - name: Download dependencies
         run: go mod download
 
