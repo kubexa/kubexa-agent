@@ -118,6 +118,10 @@ agent:
   agentId: ""
   # cluster_id is not configurable; derived at runtime from the kube-system namespace UID.
 
+# Durations here are Go duration strings ("10s", "1m30s"). A bare number is
+# refused at install: the chart quotes what it renders, so `dialTimeout: 30`
+# would reach the agent as "30", which it cannot parse, and the pod would
+# crash-loop instead of connecting. A bare 0 is allowed -- "0" parses.
 gateway:
   # Full host:port address. When set, overrides gateway.host/port.
   address: ""
@@ -264,6 +268,8 @@ query:
   #    names: ["be-*"]
   #    verbs: [list, get]
 
+# Byte counts are plain integers -- a Kubernetes quantity ("512Mi") is refused,
+# because the agent's loader reads these as numbers, not as quantities.
 buffer:
   maxMemoryBytes: 67108864 # 64 MiB
   spillDir: /var/lib/kubexa/spill
