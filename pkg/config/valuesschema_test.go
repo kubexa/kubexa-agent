@@ -549,6 +549,12 @@ func TestHelmAcceptsTheShippedChart(t *testing.T) {
 				"--set-json", `query.rules[0]={"resources":["*"],"namespace":"prod*","names":["api-*"]}`,
 			},
 		},
+		{
+			// hasWildcard trims before comparing, so a padded bare "*" is a
+			// working cluster-wide grant, not a partial form.
+			name: "a padded bare wildcard",
+			args: []string{"--set-json", `query.rules[0]={"resources":["* "]}`},
+		},
 	}
 
 	for _, tc := range cases {
