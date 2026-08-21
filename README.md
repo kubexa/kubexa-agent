@@ -98,15 +98,35 @@ command written with `podNames` is refused, and the message names the key
 instead of installing a rule that
 silently lost its filter -- which would collect more than intended, not less.
 The check covers the camelCase keys around the lists as well (`--set
-collect.logs.tail_lines=50` is refused), and the durations inside them:
-`pod_interval: 30` -- or `"30"` -- is a config the agent rejects at startup, so
-helm refuses it rather than rendering a CrashLoopBackOff. Leaving a rule's field blank stays
-legal -- yaml.v3 binds a blank to the zero value and skips a blank list entry
-entirely, so the agent loads it as a filter that was never set.
+collect.logs.tail_lines=50` is refused), and every other block that ends up
+inside the agent's config file: `agent`, `gateway`, `buffer`, `observability`
+and `log`. A misspelled key there is refused by name instead of rendering
+nothing and reading as a setting that took effect, and so is a value of the
+wrong type -- `--set buffer.maxDiskBytes=512Mi` never reaches a running agent,
+because the agent's own loader wants a byte count there. Leaving a rule's field
+blank stays legal -- yaml.v3 binds a blank to the zero value and skips a blank
+list entry entirely, so the agent loads it as a filter that was never set.
+
+Durations are the case worth knowing, because the two positions differ:
+
+```bash
+--set gateway.dialTimeout=30            # refused: reaches the agent as "30"
+--set gateway.dialTimeout=30s           # fine
+--set collect.state.resyncPeriod=0      # fine: "0" is how a resync is turned off
+--set-json 'collect.metrics.rules[0]={"resources":["pods"],"pod_interval":0}'  # refused
+```
+
+The chart quotes a duration written beside a block key, so the agent parses the
+value's string form and a bare `0` still reads as a zero duration. Inside a
+`rules` entry nothing quotes anything, and the agent refuses any number there
+at startup -- which is a CrashLoopBackOff, so helm refuses it first.
 
 Charts older than 0.7.5 describe only `query.rules`, so everything under
-`collect.*` installs unchecked there. Agent images newer than 0.7.3 log
-`unrecognized config key ignored` at startup as a second line of defence.
+`collect.*` installs unchecked there; older than 0.7.6 and the same is true of
+`gateway`, `buffer`, `observability` and `log`. Agent images newer than 0.7.3
+log `unrecognized config key ignored` at startup as a second line of defence,
+but only for keys inside the passed-through lists -- a chart key the template
+never reads leaves no trace in the rendered config at all.
 
 Or pass a custom `values.yaml` with full rule definitions.
 
