@@ -1,0 +1,10 @@
+# LogsCollectConfig.validate returns before it reads anything when logs are
+# disabled, so none of this is checked by the agent -- and a bound the agent
+# applies conditionally must not sit unconditionally in the schema.
+collect:
+  logs:
+    enabled: false
+    tailLines: -1
+    rules:
+      - id: leftover
+        tail_lines: -1

@@ -2,6 +2,29 @@ apiVersion: v2
 name: kubexa-agent
 description: Kubexa agent — collects Kubernetes logs, state, and metrics and streams them to the Kubexa gateway.
 type: application
+# 0.7.5 changes no template and no image either: values.schema.json now
+# describes the four collect.* passthrough lists and the chart keys around
+# them, the way it already described query.rules. Before this, helm refused
+# `query.rules[0].labelSelector` by name while accepting
+# `collect.logs.rules[0].podNames` -- the same mistake, one caught before the
+# install and one only visible later as a rule collecting its whole namespace.
+# The schema also refuses a duration written as a number (`pod_interval: 30`),
+# which the agent rejects at startup: helm now says no instead of rendering a
+# CrashLoopBackOff, and it refuses an infix `*` in a query rule's namespace or
+# names, which the agent also exits on. Everything else stays as permissive as
+# the agent is: a string field accepts any scalar because yaml.v3 does, a blank
+# value is allowed wherever yaml.v3 reads one as "not set", and `resources` is
+# required only on query.rules -- state and metrics skip validation entirely
+# while disabled, so a leftover rule there still installs.
+#
+# UPGRADE: this is the release where a rule written with the chart's old
+# camelCase examples stops installing. If `helm upgrade` refuses it naming
+# podNames (or labelSelector / extraLabels -- the wording differs before and
+# after helm 3.18, the key does not), rename
+# those keys to pod_names / label_selector / extra_labels -- the agent never
+# read the camelCase spelling, so the rule was running without that filter.
+# appVersion stays 0.7.3.
+#
 # 0.7.4 changes no template and no image: it corrects the values.yaml examples
 # for the passthrough `rules` lists. Those lists are copied into the agent's
 # config with toYaml, so their keys are the agent's own snake_case config keys
@@ -23,7 +46,7 @@ type: application
 #     so the only metric that measures reconnects read 0 while the same process
 #     logged 550 recv errors.
 # No install order constraint: the gateway is unaffected.
-version: 0.7.4
+version: 0.7.5
 appVersion: "0.7.3"
 keywords:
   - kubexa

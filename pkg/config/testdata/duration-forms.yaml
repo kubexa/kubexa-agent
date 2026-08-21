@@ -1,0 +1,19 @@
+# Every one of these is accepted by time.ParseDuration, so the agent runs on
+# them. "0" is the ordinary way to turn a resync off.
+collect:
+  state:
+    resyncPeriod: "0"
+    rules:
+      - resources: [pods]
+        resync_period: +5s
+  metrics:
+    podInterval: 1h30m
+    nodeInterval: .5s
+    rules:
+      - resources: [pods]
+        pod_interval: 10μs
+        node_interval: "-0"
+    customEndpoints:
+      - name: my-app
+        url: http://my-app:8080/metrics
+        interval: 500ms
