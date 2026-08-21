@@ -94,6 +94,16 @@ var durationType = reflect.TypeOf(time.Duration(0))
 // config the agent refuses at startup, which is a CrashLoopBackOff, not a
 // dropped key -- while every string field must accept any scalar, or the
 // schema refuses values that install and work today (`labels: {version: 1}`).
+//
+// The reverse widening is deliberately NOT done. Around the lists the template
+// renders a boolean and an integer unquoted, so `--set-string gateway.tls=true`
+// or a values file with `maxMemoryBytes: "67108864"` would render a config the
+// agent reads correctly, and the schema refuses both. That is the one place
+// this file knowingly says no to something that works: the message names the
+// key and the fix is to drop the quotes, whereas widening these would cost the
+// integer bounds that catch `batchSize: 0` -- a config the agent will not
+// start on. It is the chart's existing convention too; every boolean here has
+// been declared this way since before the schema described anything else.
 func jsonTypes(field reflect.Type) []string {
 	for field.Kind() == reflect.Pointer {
 		field = field.Elem()
@@ -415,6 +425,12 @@ func TestSchemaBlocksRejectUnknownChartKeys(t *testing.T) {
 // rendering them, so there is no struct type to check them against. Every
 // other key in a config block has to pair with one, or nothing checks its
 // type at all.
+//
+// Their types are therefore hand-written in the schema, and one of them is a
+// knowing trade: the helper builds the address with `printf "%s:%v"`, so a
+// quoted `port: "443"` renders a working address, and `"type": "integer"`
+// refuses it. Keeping the 1-65535 bound is worth an error message that names
+// the key and is fixed by removing two quotes.
 func chartOnlyKeys() map[string]string {
 	return map[string]string{
 		"gateway.address": "rendered by the gatewayAddress helper, which falls back to host:port",
