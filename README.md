@@ -121,6 +121,16 @@ value's string form and a bare `0` still reads as a zero duration. Inside a
 `rules` entry nothing quotes anything, and the agent refuses any number there
 at startup -- which is a CrashLoopBackOff, so helm refuses it first.
 
+That is also why the refusal reads the way it does. Zero being the one number
+that works is expressed as a bound, and helm reports the bound rather than the
+reason:
+
+```
+at '/gateway/dialTimeout': maximum: got 30, want 0
+```
+
+The path names the key; the fix is `30s`, not a smaller number.
+
 Charts older than 0.7.5 describe only `query.rules`, so everything under
 `collect.*` installs unchecked there; older than 0.7.6 and the same is true of
 `gateway`, `buffer`, `observability` and `log`. Agent images newer than 0.7.3
