@@ -45,9 +45,9 @@ jobs:
       # TestHelmAcceptsTheShippedChart runs the real validator over
       # values.schema.json, and without helm it skips silently. The runner
       # image ships one already, so this is here to PIN it: the action's
-      # default is `latest`, which would move CI onto helm 4 while operators
-      # install with helm 3, and the two validators word their refusals
-      # differently.
+      # default is `latest`, so CI would drift with whatever helm ships next.
+      # 3.19 and 4.x share a validator and word their refusals identically;
+      # helm before 3.18 does not, which is what the pin holds still.
       - name: Setup Helm
         uses: azure/setup-helm@v5
         with:

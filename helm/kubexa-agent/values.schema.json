@@ -514,7 +514,8 @@
                     "number",
                     "string"
                   ],
-                  "pattern": "^(\\*|[^*]*)$"
+                  "pattern": "^(\\s*\\*\\s*|[^*]*)$",
+                  "minLength": 1
                 },
                 "minItems": 1
               },
@@ -544,11 +545,7 @@
                     "null",
                     "string"
                   ],
-                  "enum": [
-                    "list",
-                    "get",
-                    null
-                  ]
+                  "pattern": "^\\s*([Ll][Ii][Ss][Tt]|[Gg][Ee][Tt])\\s*$"
                 }
               },
               "label_selector": {

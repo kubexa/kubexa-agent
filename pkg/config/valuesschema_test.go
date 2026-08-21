@@ -131,17 +131,19 @@ func jsonTypes(field reflect.Type) []string {
 //
 //	pod_names:        -> nil slice
 //	pod_names: [null] -> the entry is SKIPPED, len 0
-//	labels: {team: }  -> binds ""
+//	labels: {team: }  -> binds "", which normalize turns into the selector
+//	                     `team=` -- an active filter, not an absent one, but
+//	                     one the agent accepts and runs, so helm may not refuse it
 //
 // It is false only under a key the agent refuses to start without, where a
 // blank is the empty value it already rejects.
-func checkType(t *testing.T, where string, field reflect.Type, node map[string]any, nullable bool) {
+func checkType(t *testing.T, where string, field reflect.Type, node map[string]any, nullable, narrow bool) {
 	t.Helper()
 	for field.Kind() == reflect.Pointer {
 		field = field.Elem()
 	}
 	want := jsonTypes(field)
-	if _, enumerated := node["enum"]; enumerated && field.Kind() == reflect.String {
+	if narrow && field.Kind() == reflect.String {
 		want = []string{"string"}
 	}
 	if nullable {
@@ -168,15 +170,27 @@ func checkType(t *testing.T, where string, field reflect.Type, node map[string]a
 			t.Errorf("%s: an array with no `items`, so its elements are unchecked", where)
 			return
 		}
-		checkType(t, where+"[]", field.Elem(), items, nullable)
+		checkType(t, where+"[]", field.Elem(), items, nullable, narrow)
 	case reflect.Map:
 		values, ok := node["additionalProperties"].(map[string]any)
 		if !ok {
 			t.Errorf("%s: a map with no `additionalProperties` schema, so its values are unchecked", where)
 			return
 		}
-		checkType(t, where+"{}", field.Elem(), values, nullable)
+		checkType(t, where+"{}", field.Elem(), values, nullable, narrow)
 	default:
+	}
+}
+
+// narrowStringPaths are the string fields the schema may declare as "string"
+// alone. Everywhere else a string field takes the whole scalar union, because
+// yaml.v3 does and refusing `namespace: 2024` would break an install that
+// works. A verb is the exception: the agent accepts only list/get in any
+// casing, so every other scalar there -- `verbs: [5]`, which binds "5" -- is a
+// config it exits on, and only a narrow type lets the pattern do its work.
+func narrowStringPaths() map[string]bool {
+	return map[string]bool{
+		`query.rules items: "verbs"`: true,
 	}
 }
 
@@ -231,6 +245,13 @@ func TestSchemaPassthroughItemsMatchAgentStructs(t *testing.T) {
 			t.Errorf("%s items: additionalProperties is not false, so a misspelled key is "+
 				"accepted by helm and dropped by the agent", path)
 		}
+		// A blank entry in the list -- a bare `- ` left behind when a rule is
+		// deleted -- is skipped by yaml.v3 before the agent sees it, so the
+		// item schema itself must admit null.
+		if got := declaredTypes(items); !reflect.DeepEqual(got, []string{"null", "object"}) {
+			t.Errorf("%s items: type %v, want [null object]: a blank list entry is one the "+
+				"agent loads, so helm must not refuse it", path, got)
+		}
 
 		props, _ := items["properties"].(map[string]any)
 		fields := fieldsByYAMLKey(ruleType)
@@ -256,8 +277,9 @@ func TestSchemaPassthroughItemsMatchAgentStructs(t *testing.T) {
 			}
 			// A key the agent refuses to start without is not nullable: a null
 			// there is the empty value it already rejects.
-			checkType(t, fmt.Sprintf("%s items: %q", path, key), field,
-				props[key].(map[string]any), !mandatory[key])
+			where := fmt.Sprintf("%s items: %q", path, key)
+			checkType(t, where, field, props[key].(map[string]any),
+				!mandatory[key], narrowStringPaths()[where])
 		}
 
 		var required []string
@@ -501,6 +523,24 @@ func TestHelmAcceptsTheShippedChart(t *testing.T) {
 		{
 			name: "a partial resource wildcard",
 			args: []string{"--set-json", `query.rules[0]={"resources":["apps/*"]}`},
+			want: "resources",
+		},
+		{
+			// The agent lowercases and trims a verb before reading it.
+			name: "a verb the agent normalizes",
+			args: []string{
+				"--set-json", `query.rules[0]={"resources":["pods"],"verbs":["LIST"," get"]}`,
+			},
+		},
+		{
+			name: "a blank entry left in a rules list",
+			args: []string{"--values", filepath.Join("testdata", "blank-rule-entry.yaml")},
+		},
+		{
+			// The agent refuses to start on a rule with no resources, however
+			// query.enabled reads, so helm has to refuse it first.
+			name: "a query rule with no resources",
+			args: []string{"--set-json", `query.rules[0]={"resources":[]}`},
 			want: "resources",
 		},
 		{
