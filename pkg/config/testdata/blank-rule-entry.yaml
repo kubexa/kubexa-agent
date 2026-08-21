@@ -1,0 +1,12 @@
+# A bare `-` left behind when a rule is deleted: yaml.v3 skips the entry, so
+# the agent loads exactly the rules that are left.
+collect:
+  logs:
+    rules:
+      - id: prod-api
+        namespace: production
+      -
+query:
+  rules:
+    -
+    - resources: [pods]

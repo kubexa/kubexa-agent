@@ -18,8 +18,9 @@ type: application
 # while disabled, so a leftover rule there still installs.
 #
 # UPGRADE: this is the release where a rule written with the chart's old
-# camelCase examples stops installing. If `helm upgrade` reports `additional
-# properties 'podNames' not allowed` (or labelSelector / extraLabels), rename
+# camelCase examples stops installing. If `helm upgrade` refuses it naming
+# podNames (or labelSelector / extraLabels -- the wording differs before and
+# after helm 3.18, the key does not), rename
 # those keys to pod_names / label_selector / extra_labels -- the agent never
 # read the camelCase spelling, so the rule was running without that filter.
 # appVersion stays 0.7.3.

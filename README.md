@@ -94,13 +94,15 @@ unlike the camelCase chart values around them: the chart copies these lists
 into the agent's config file verbatim, so the keys are the agent's own config
 keys. `values.schema.json` names every key these lists accept, so the same
 command written with `podNames` is refused, and the message names the key
-(helm 3 and helm 4 word it differently), instead of installing a rule that
+(helm 3.18 replaced the validator, so older helm 3 words it differently),
+instead of installing a rule that
 silently lost its filter -- which would collect more than intended, not less.
 The check covers the camelCase keys around the lists as well (`--set
 collect.logs.tail_lines=50` is refused), and the durations inside them:
 `pod_interval: 30` -- or `"30"` -- is a config the agent rejects at startup, so
-helm refuses it rather than rendering a CrashLoopBackOff. Leaving a rule's
-field blank stays legal, because the agent reads it as "filter not set".
+helm refuses it rather than rendering a CrashLoopBackOff. Leaving a rule's field blank stays
+legal -- yaml.v3 binds a blank to the zero value and skips a blank list entry
+entirely, so the agent loads it as a filter that was never set.
 
 Charts older than 0.7.5 describe only `query.rules`, so everything under
 `collect.*` installs unchecked there. Agent images newer than 0.7.3 log
