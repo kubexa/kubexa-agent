@@ -1,61 +1,575 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["gateway", "secret"],
+  "required": [
+    "gateway",
+    "secret"
+  ],
   "properties": {
     "gateway": {
       "type": "object",
       "properties": {
-        "address": { "type": "string" },
-        "host": { "type": "string" },
-        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "tls": { "type": "boolean" }
+        "address": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "tls": {
+          "type": "boolean"
+        }
       }
     },
     "secret": {
       "type": "object",
       "properties": {
-        "create": { "type": "boolean" },
-        "existingSecret": { "type": "string" },
-        "tenantToken": { "type": "string" }
+        "create": {
+          "type": "boolean"
+        },
+        "existingSecret": {
+          "type": "string"
+        },
+        "tenantToken": {
+          "type": "string"
+        }
       }
     },
     "collect": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "logs": { "type": "object" },
-        "state": { "type": "object" },
-        "metrics": { "type": "object" }
+        "logs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "tailLines": {
+              "type": "integer"
+            },
+            "follow": {
+              "type": "boolean"
+            },
+            "checkpointDir": {
+              "type": "string"
+            },
+            "excludeNamespaces": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "null",
+                  "number",
+                  "string"
+                ]
+              }
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": [
+                  "null",
+                  "object"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "namespace": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "pod_names": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ]
+                    }
+                  },
+                  "label_selector": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "field_selector": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "labels": {
+                    "type": [
+                      "null",
+                      "object"
+                    ],
+                    "additionalProperties": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ]
+                    }
+                  },
+                  "containers": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ]
+                    }
+                  },
+                  "follow": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "tail_lines": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "state": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "resyncPeriod": {
+              "type": "string",
+              "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$"
+            },
+            "redactSecrets": {
+              "type": "boolean"
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": [
+                  "null",
+                  "object"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "namespace": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "resources": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ]
+                    }
+                  },
+                  "label_selector": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "field_selector": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "resync_period": {
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+                    "description": "A Go duration such as \"30s\". A number, quoted or not, is rejected by the agent at startup."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "podInterval": {
+              "type": "string",
+              "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$"
+            },
+            "nodeInterval": {
+              "type": "string",
+              "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$"
+            },
+            "kubeMetrics": {
+              "type": "boolean"
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": [
+                  "null",
+                  "object"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "namespace": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "resources": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ]
+                    }
+                  },
+                  "pod_names": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ]
+                    }
+                  },
+                  "node_names": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ]
+                    }
+                  },
+                  "label_selector": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "field_selector": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "labels": {
+                    "type": [
+                      "null",
+                      "object"
+                    ],
+                    "additionalProperties": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ]
+                    }
+                  },
+                  "pod_interval": {
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+                    "description": "A Go duration such as \"30s\". A number, quoted or not, is rejected by the agent at startup."
+                  },
+                  "node_interval": {
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+                    "description": "A Go duration such as \"30s\". A number, quoted or not, is rejected by the agent at startup."
+                  }
+                }
+              }
+            },
+            "customEndpoints": {
+              "type": "array",
+              "items": {
+                "type": [
+                  "null",
+                  "object"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "url": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "interval": {
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+                    "description": "A Go duration such as \"30s\". A number, quoted or not, is rejected by the agent at startup."
+                  },
+                  "extra_labels": {
+                    "type": [
+                      "null",
+                      "object"
+                    ],
+                    "additionalProperties": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "query": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "redactSecrets": { "type": "boolean" },
+        "enabled": {
+          "type": "boolean"
+        },
+        "redactSecrets": {
+          "type": "boolean"
+        },
         "rules": {
           "type": "array",
           "items": {
-            "type": "object",
+            "type": [
+              "null",
+              "object"
+            ],
             "additionalProperties": false,
             "properties": {
-              "id": { "type": "string" },
-              "namespace": { "type": "string" },
+              "id": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "null",
+                  "number",
+                  "string"
+                ]
+              },
+              "namespace": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "null",
+                  "number",
+                  "string"
+                ],
+                "pattern": "^[^*]*\\*?$"
+              },
               "resources": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "number",
+                    "string"
+                  ],
+                  "pattern": "^(\\s*\\*\\s*|[^*]*)$",
+                  "minLength": 1
+                },
                 "minItems": 1
               },
-              "names": { "type": "array", "items": { "type": "string" } },
-              "verbs": {
-                "type": "array",
-                "items": { "type": "string", "enum": ["list", "get"] }
+              "names": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "null",
+                    "number",
+                    "string"
+                  ],
+                  "pattern": "^[^*]*\\*?$"
+                }
               },
-              "label_selector": { "type": "string" },
-              "field_selector": { "type": "string" }
+              "verbs": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": [
+                    "null",
+                    "string"
+                  ],
+                  "pattern": "^\\s*([Ll][Ii][Ss][Tt]|[Gg][Ee][Tt])\\s*$"
+                }
+              },
+              "label_selector": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "null",
+                  "number",
+                  "string"
+                ]
+              },
+              "field_selector": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "null",
+                  "number",
+                  "string"
+                ]
+              }
             },
-            "required": ["resources"]
+            "required": [
+              "resources"
+            ]
           }
         }
       }
