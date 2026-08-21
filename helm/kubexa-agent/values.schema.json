@@ -6,8 +6,33 @@
     "secret"
   ],
   "properties": {
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tenantToken": {
+          "type": [
+            "boolean",
+            "integer",
+            "null",
+            "number",
+            "string"
+          ]
+        },
+        "agentId": {
+          "type": [
+            "boolean",
+            "integer",
+            "null",
+            "number",
+            "string"
+          ]
+        }
+      }
+    },
     "gateway": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "address": {
           "type": "string"
@@ -21,7 +46,69 @@
           "maximum": 65535
         },
         "tls": {
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "insecureSkipVerify": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "caCertPath": {
+          "type": [
+            "boolean",
+            "integer",
+            "null",
+            "number",
+            "string"
+          ]
+        },
+        "reconnectInitialDelay": {
+          "type": [
+            "integer",
+            "null",
+            "string"
+          ],
+          "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+          "minimum": 0,
+          "maximum": 0,
+          "description": "A Go duration such as \"30s\". The chart quotes this value, so every number other than 0 reaches the agent as a string time.ParseDuration refuses, and the agent exits before it connects."
+        },
+        "reconnectMaxDelay": {
+          "type": [
+            "integer",
+            "null",
+            "string"
+          ],
+          "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+          "minimum": 0,
+          "maximum": 0,
+          "description": "A Go duration such as \"30s\". The chart quotes this value, so every number other than 0 reaches the agent as a string time.ParseDuration refuses, and the agent exits before it connects."
+        },
+        "dialTimeout": {
+          "type": [
+            "integer",
+            "null",
+            "string"
+          ],
+          "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+          "minimum": 0,
+          "maximum": 0,
+          "description": "A Go duration such as \"30s\". The chart quotes this value, so every number other than 0 reaches the agent as a string time.ParseDuration refuses, and the agent exits before it connects."
+        },
+        "handshakeTimeout": {
+          "type": [
+            "integer",
+            "null",
+            "string"
+          ],
+          "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+          "minimum": 0,
+          "maximum": 0,
+          "description": "A Go duration such as \"30s\". The chart quotes this value, so every number other than 0 reaches the agent as a string time.ParseDuration refuses, and the agent exits before it connects."
         }
       }
     },
@@ -48,16 +135,31 @@
           "additionalProperties": false,
           "properties": {
             "enabled": {
-              "type": "boolean"
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "tailLines": {
-              "type": "integer"
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "follow": {
-              "type": "boolean"
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "checkpointDir": {
-              "type": "string"
+              "type": [
+                "boolean",
+                "integer",
+                "null",
+                "number",
+                "string"
+              ]
             },
             "excludeNamespaces": {
               "type": [
@@ -186,14 +288,27 @@
           "additionalProperties": false,
           "properties": {
             "enabled": {
-              "type": "boolean"
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "resyncPeriod": {
-              "type": "string",
-              "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$"
+              "type": [
+                "integer",
+                "null",
+                "string"
+              ],
+              "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+              "minimum": 0,
+              "maximum": 0,
+              "description": "A Go duration such as \"30s\". The chart quotes this value, so every number other than 0 reaches the agent as a string time.ParseDuration refuses, and the agent exits before it connects."
             },
             "redactSecrets": {
-              "type": "boolean"
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "rules": {
               "type": "array",
@@ -273,18 +388,38 @@
           "additionalProperties": false,
           "properties": {
             "enabled": {
-              "type": "boolean"
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "podInterval": {
-              "type": "string",
-              "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$"
+              "type": [
+                "integer",
+                "null",
+                "string"
+              ],
+              "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+              "minimum": 0,
+              "maximum": 0,
+              "description": "A Go duration such as \"30s\". The chart quotes this value, so every number other than 0 reaches the agent as a string time.ParseDuration refuses, and the agent exits before it connects."
             },
             "nodeInterval": {
-              "type": "string",
-              "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$"
+              "type": [
+                "integer",
+                "null",
+                "string"
+              ],
+              "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+              "minimum": 0,
+              "maximum": 0,
+              "description": "A Go duration such as \"30s\". The chart quotes this value, so every number other than 0 reaches the agent as a string time.ParseDuration refuses, and the agent exits before it connects."
             },
             "kubeMetrics": {
-              "type": "boolean"
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "rules": {
               "type": "array",
@@ -472,10 +607,16 @@
       "additionalProperties": false,
       "properties": {
         "enabled": {
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "redactSecrets": {
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "rules": {
           "type": "array",
@@ -571,6 +712,109 @@
               "resources"
             ]
           }
+        }
+      }
+    },
+    "buffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxMemoryBytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "spillDir": {
+          "type": [
+            "boolean",
+            "integer",
+            "null",
+            "number",
+            "string"
+          ]
+        },
+        "maxDiskBytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "batchSize": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "flushInterval": {
+          "type": [
+            "integer",
+            "null",
+            "string"
+          ],
+          "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+          "minimum": 0,
+          "maximum": 0,
+          "description": "A Go duration such as \"30s\". The chart quotes this value, so every number other than 0 reaches the agent as a string time.ParseDuration refuses, and the agent exits before it connects."
+        }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "metricsAddr": {
+          "type": [
+            "boolean",
+            "integer",
+            "null",
+            "number",
+            "string"
+          ]
+        },
+        "healthAddr": {
+          "type": [
+            "boolean",
+            "integer",
+            "null",
+            "number",
+            "string"
+          ]
+        },
+        "pprofAddr": {
+          "type": [
+            "boolean",
+            "integer",
+            "null",
+            "number",
+            "string"
+          ]
+        }
+      }
+    },
+    "log": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": [
+            "boolean",
+            "integer",
+            "null",
+            "number",
+            "string"
+          ]
+        },
+        "format": {
+          "type": [
+            "boolean",
+            "integer",
+            "null",
+            "number",
+            "string"
+          ]
         }
       }
     }

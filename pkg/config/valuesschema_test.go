@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kubexa/kubexa-agent/pkg/config"
 )
 
 // values.schema.json is the only check that runs before the config reaches the
@@ -92,6 +94,16 @@ var durationType = reflect.TypeOf(time.Duration(0))
 // config the agent refuses at startup, which is a CrashLoopBackOff, not a
 // dropped key -- while every string field must accept any scalar, or the
 // schema refuses values that install and work today (`labels: {version: 1}`).
+//
+// The reverse widening is deliberately NOT done. Around the lists the template
+// renders a boolean and an integer unquoted, so `--set-string gateway.tls=true`
+// or a values file with `maxMemoryBytes: "67108864"` would render a config the
+// agent reads correctly, and the schema refuses both. That is the one place
+// this file knowingly says no to something that works: the message names the
+// key and the fix is to drop the quotes, whereas widening these would cost the
+// integer bounds that catch `batchSize: 0` -- a config the agent will not
+// start on. It is the chart's existing convention too; every boolean here has
+// been declared this way since before the schema described anything else.
 func jsonTypes(field reflect.Type) []string {
 	for field.Kind() == reflect.Pointer {
 		field = field.Elem()
@@ -299,12 +311,37 @@ func TestSchemaPassthroughItemsMatchAgentStructs(t *testing.T) {
 	}
 }
 
+// configBlocks are the values blocks whose contents end up inside the agent's
+// own config.yaml: the root fields of config.Config. A key misspelled in one
+// of these is not a setting that fails to apply, it is a setting the agent
+// never receives -- and for a duration or a byte count it is a startup
+// failure. They are read off the struct rather than listed, so a block added
+// to the agent cannot be left undescribed here without a test saying so.
+func configBlocks() []string {
+	root := reflect.TypeOf(config.Config{})
+	var out []string
+	for i := 0; i < root.NumField(); i++ {
+		name, _, _ := strings.Cut(root.Field(i).Tag.Get("yaml"), ",")
+		if name != "" && name != "-" {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // hasKeyRef catches `hasKey .Values.query "redactSecrets"`, which reads a value
 // without ever writing its dotted path.
-var (
-	valuesRef = regexp.MustCompile(`\.Values\.((?:collect\.[A-Za-z0-9]+)|query)\.([A-Za-z0-9]+)`)
-	hasKeyRef = regexp.MustCompile(`hasKey\s+\.Values\.((?:collect\.[A-Za-z0-9]+)|query)\s+"([A-Za-z0-9]+)"`)
-)
+//
+// `collect.<section>` is listed ahead of the plain block names because Go's
+// alternation is leftmost-FIRST rather than longest: with `collect` first,
+// `.Values.collect.logs.enabled` would read as block `collect`, key `logs`,
+// and the keys of all three sections would go unchecked.
+func blockRefs() (valuesRef, hasKeyRef *regexp.Regexp) {
+	blocks := `((?:collect\.[A-Za-z0-9]+)|` + strings.Join(configBlocks(), "|") + `)`
+	return regexp.MustCompile(`\.Values\.` + blocks + `\.([A-Za-z0-9]+)`),
+		regexp.MustCompile(`hasKey\s+\.Values\.` + blocks + `\s+"([A-Za-z0-9]+)"`)
+}
 
 // templateKeys returns, per block, the chart keys the templates actually read.
 // The file list is globbed rather than written out: a hand-written list goes
@@ -323,6 +360,7 @@ func templateKeys(t *testing.T) map[string]map[string]bool {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		body := string(raw)
+		valuesRef, hasKeyRef := blockRefs()
 		for _, re := range []*regexp.Regexp{valuesRef, hasKeyRef} {
 			for _, m := range re.FindAllStringSubmatch(body, -1) {
 				if keys[m[1]] == nil {
@@ -378,6 +416,209 @@ func TestSchemaBlocksRejectUnknownChartKeys(t *testing.T) {
 				t.Errorf("%s: schema allows %q, which no template reads -- it renders nothing "+
 					"and reads as a setting that took effect", path, key)
 			}
+		}
+	}
+}
+
+// chartOnlyKeys are the keys in a config block with no agent field behind
+// them: the template folds them into some other config key instead of
+// rendering them, so there is no struct type to check them against. Every
+// other key in a config block has to pair with one, or nothing checks its
+// type at all.
+//
+// Their types are therefore hand-written in the schema, and one of them is a
+// knowing trade: the helper builds the address with `printf "%s:%v"`, so a
+// quoted `port: "443"` renders a working address, and `"type": "integer"`
+// refuses it. Keeping the 1-65535 bound is worth an error message that names
+// the key and is fixed by removing two quotes.
+func chartOnlyKeys() map[string]string {
+	return map[string]string{
+		"gateway.address": "rendered by the gatewayAddress helper, which falls back to host:port",
+		"gateway.host":    "joined with port into gateway.address by the gatewayAddress helper",
+		"gateway.port":    "joined with host into gateway.address by the gatewayAddress helper",
+	}
+}
+
+// valuesInLine and renderedKey read the two halves of a rendering line.
+var (
+	valuesInLine = regexp.MustCompile(`\.Values\.([A-Za-z0-9_.]+)`)
+	renderedKey  = regexp.MustCompile(`^\s*([a-z0-9_]+):`)
+)
+
+// renderedPairs reads configmap.yaml and returns, for each chart value it
+// renders into the agent's config, the agent key it becomes:
+//
+//	dial_timeout: {{ .Values.gateway.dialTimeout | quote }}
+//
+// pairs gateway.dialTimeout with dial_timeout. A `{{- with ... }}` puts the
+// path a line or two above the key it guards, so the most recent path is
+// carried forward -- and a pair is recorded only when the two names are the
+// same identifier in the two spellings, which is what stops
+// `address: {{ include ... }}` from pairing with whatever path came before it.
+func renderedPairs(t *testing.T) map[string]string {
+	t.Helper()
+	pairs := map[string]string{}
+	path := ""
+	for _, line := range strings.Split(chartFile(t, "helm", "kubexa-agent", "templates", "configmap.yaml"), "\n") {
+		if m := valuesInLine.FindStringSubmatch(line); m != nil {
+			path = m[1]
+		}
+		m := renderedKey.FindStringSubmatch(line)
+		if m == nil || path == "" {
+			continue
+		}
+		last := path[strings.LastIndex(path, ".")+1:]
+		if !strings.EqualFold(strings.ReplaceAll(m[1], "_", ""), last) {
+			continue
+		}
+		pairs[path] = m[1]
+	}
+	return pairs
+}
+
+// agentField resolves the struct field behind a rendered pair. Every segment
+// of the values path but the last names a block, spelled the same on both
+// sides; the last is the chart's spelling, and the agent key the template
+// rendered is what indexes the struct.
+func agentField(path, key string) (reflect.Type, bool) {
+	segments := strings.Split(path, ".")
+	cur := reflect.TypeOf(config.Config{})
+	for _, segment := range segments[:len(segments)-1] {
+		next, ok := fieldsByYAMLKey(cur)[segment]
+		if !ok {
+			return nil, false
+		}
+		for next.Kind() == reflect.Pointer {
+			next = next.Elem()
+		}
+		cur = next
+	}
+	field, ok := fieldsByYAMLKey(cur)[key]
+	return field, ok
+}
+
+// checkQuotedDuration is the schema a duration needs OUTSIDE the passthrough
+// lists, where the template quotes it. What the agent parses is the value's
+// string form, so the two numbers behave differently:
+//
+//	dialTimeout: 30  -> "30", which time.ParseDuration refuses, and the agent exits
+//	dialTimeout: 0   -> "0",  which it accepts as a zero duration
+//
+// Inside a passthrough list nothing quotes anything and yaml.v3 refuses any
+// !!int into a time.Duration, so there the type is string alone. Here it has
+// to admit the one integer that works: `minimum`/`maximum` bind numbers only
+// and `pattern` binds strings only, so the two constraints never overlap.
+func checkQuotedDuration(t *testing.T, where string, node map[string]any) {
+	t.Helper()
+	if got := declaredTypes(node); !reflect.DeepEqual(got, []string{"integer", "null", "string"}) {
+		t.Errorf("%s: type %v, want [integer null string] -- the template quotes this value, "+
+			"so a bare 0 reaches the agent as \"0\" and parses", where, got)
+	}
+	if pattern, _ := node["pattern"].(string); pattern == "" {
+		t.Errorf("%s: a duration with no `pattern`, so a quoted number passes helm and the "+
+			"agent exits on the config it renders", where)
+	}
+	for _, bound := range []string{"minimum", "maximum"} {
+		if value, ok := node[bound].(float64); !ok || value != 0 {
+			t.Errorf("%s: %s = %v, want 0 -- zero is the only number whose quoted form is a "+
+				"duration, and without both bounds `dialTimeout: 30` installs", where, bound, node[bound])
+		}
+	}
+}
+
+// Inside the passthrough lists the keys are the agent's; around them they are
+// the chart's, and the template is what turns one into the other. A wrong TYPE
+// on this side is louder than a wrong key: `--set gateway.dialTimeout=30`
+// renders `dial_timeout: "30"`, which yaml.v3 refuses, so the agent exits on a
+// value helm accepted -- a CrashLoopBackOff instead of an install error.
+func TestSchemaConfigBlocksMatchAgentFields(t *testing.T) {
+	schema := loadSchema(t)
+	pairs := renderedPairs(t)
+	rules := rulePaths()
+
+	checked := 0
+	for path, key := range pairs {
+		if _, passthrough := rules[path]; passthrough {
+			continue // its items are the previous test's subject
+		}
+		field, ok := agentField(path, key)
+		if !ok {
+			t.Errorf("configmap.yaml renders %s as %q, but no field of config.Config binds "+
+				"that key, so the value goes nowhere", path, key)
+			continue
+		}
+		node := schemaAt(schema, path)
+		if node == nil {
+			t.Errorf("%s: not described in values.schema.json, so nothing checks its type and "+
+				"a value the agent refuses -- a duration written as a number, a byte count "+
+				"written as a string -- installs and crash-loops", path)
+			continue
+		}
+		checked++
+		if field == durationType {
+			checkQuotedDuration(t, "values."+path, node)
+			continue
+		}
+		// Nullable throughout: helm deletes a null map value while coalescing,
+		// so `resyncPeriod: null` in a values file never reaches the validator
+		// (measured), and the rendered `resync_period:` that follows is a YAML
+		// null, which yaml.v3 reads as "not set" and leaves at the default.
+		// Inside a list it is different -- items are replaced wholesale -- and
+		// that is exactly where this nullability is doing work.
+		checkType(t, "values."+path, field, node, true, false)
+	}
+	if checked == 0 {
+		t.Fatal("no chart-level config keys checked; this test is pinning nothing")
+	}
+}
+
+// A key nothing pairs is a key nothing type-checks, and the pairing is derived
+// from the template, so it goes quiet on its own the moment a line stops
+// matching the shape it looks for.
+func TestEveryConfigBlockKeyIsTypeChecked(t *testing.T) {
+	pairs := renderedPairs(t)
+	rules := rulePaths()
+	exempt := chartOnlyKeys()
+	fromTemplate := templateKeys(t)
+
+	blocks := map[string]bool{}
+	for _, name := range configBlocks() {
+		blocks[name] = true
+	}
+
+	for path, keys := range fromTemplate {
+		root, _, _ := strings.Cut(path, ".")
+		if !blocks[root] {
+			continue
+		}
+		for key := range keys {
+			full := path + "." + key
+			if fromTemplate[full] != nil {
+				continue // a block in its own right, e.g. collect.logs
+			}
+			if _, ok := pairs[full]; ok {
+				continue
+			}
+			if _, ok := rules[full]; ok {
+				continue
+			}
+			if _, ok := exempt[full]; ok {
+				continue
+			}
+			t.Errorf("%s is read by a template but paired with no agent config key, so no test "+
+				"checks its type: either configmap.yaml renders it under a name this pairing "+
+				"does not recognize, or it belongs in chartOnlyKeys with the reason", full)
+		}
+	}
+
+	for full, reason := range exempt {
+		if _, ok := pairs[full]; ok {
+			t.Errorf("%s is exempted as chart-only (%q) but the template does render it, so the "+
+				"exemption is now hiding a real check", full, reason)
+		}
+		block, key, _ := strings.Cut(full, ".")
+		if !fromTemplate[block][key] {
+			t.Errorf("%s is exempted as chart-only but no template reads it at all", full)
 		}
 	}
 }
@@ -544,6 +785,61 @@ func TestHelmAcceptsTheShippedChart(t *testing.T) {
 			want: "resources",
 		},
 		{
+			// The template quotes it, so this reaches the agent as "30", which
+			// time.ParseDuration refuses -- and the failure is a crash loop
+			// after install, not an install error, unless helm says no here.
+			name: "a gateway duration given as a number",
+			args: []string{"--set", "gateway.dialTimeout=30"},
+			want: "dialTimeout",
+		},
+		{
+			name: "a buffer duration given as a number",
+			args: []string{"--set", "buffer.flushInterval=5"},
+			want: "flushInterval",
+		},
+		{
+			// The one number that survives quoting: "0" parses as a zero
+			// duration, so refusing it would refuse a config that runs.
+			name: "a duration turned off with a bare zero",
+			args: []string{
+				"--set", "gateway.reconnectInitialDelay=0",
+				"--set", "collect.state.resyncPeriod=0",
+			},
+		},
+		{
+			name: "a gateway key misspelled",
+			args: []string{"--set", "gateway.dialTimout=5s"},
+			want: "dialTimout",
+		},
+		{
+			name: "an observability key misspelled",
+			args: []string{"--set", "observability.metricsAddress=:9090"},
+			want: "metricsAddress",
+		},
+		{
+			// Validate refuses either at zero however the rest is configured.
+			name: "a batch size of zero",
+			args: []string{"--set", "buffer.batchSize=0"},
+			want: "batchSize",
+		},
+		{
+			name: "a negative memory budget",
+			args: []string{"--set", "buffer.maxMemoryBytes=-1"},
+			want: "maxMemoryBytes",
+		},
+		{
+			// Nothing quotes this one, so a Kubernetes-style quantity renders
+			// as a bare !!str the agent cannot read as an int64.
+			name: "a byte count written as a quantity",
+			args: []string{"--set-string", "buffer.maxDiskBytes=512Mi"},
+			want: "maxDiskBytes",
+		},
+		{
+			// The agent validates neither, so helm may not either.
+			name: "a log level and format the agent does not check",
+			args: []string{"--set", "log.level=trace", "--set", "log.format=logfmt"},
+		},
+		{
 			name: "a trailing wildcard, which the agent supports",
 			args: []string{
 				"--set-json", `query.rules[0]={"resources":["*"],"namespace":"prod*","names":["api-*"]}`,
@@ -568,7 +864,9 @@ func TestHelmAcceptsTheShippedChart(t *testing.T) {
 			if tc.want == "" {
 				if err != nil {
 					t.Errorf("helm refused a valid chart: %v\n%s", err, out)
+					return
 				}
+				loadRenderedConfig(t, string(out))
 				return
 			}
 			if err == nil {
@@ -580,5 +878,43 @@ func TestHelmAcceptsTheShippedChart(t *testing.T) {
 					"to fix:\n%s", tc.want, out)
 			}
 		})
+	}
+}
+
+// helm accepting a values file only means the config reaches the agent; the
+// other half of the rule -- that the agent then starts on it -- is invisible
+// from the schema, and it is the half a permissive type gets wrong. So every
+// accepted case above is loaded the way cmd/agent loads it.
+func loadRenderedConfig(t *testing.T, rendered string) {
+	t.Helper()
+
+	body := ""
+	for _, doc := range strings.Split(rendered, "\n---") {
+		var manifest struct {
+			Kind string            `yaml:"kind"`
+			Data map[string]string `yaml:"data"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &manifest); err != nil {
+			continue
+		}
+		if manifest.Kind == "ConfigMap" && manifest.Data["config.yaml"] != "" {
+			body = manifest.Data["config.yaml"]
+		}
+	}
+	if body == "" {
+		t.Fatal("no config.yaml in the rendered chart, so nothing below is being loaded")
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write rendered config: %v", err)
+	}
+	// The rendered file carries an empty tenant_token on purpose: the
+	// Deployment supplies it from the Secret, through this same variable.
+	t.Setenv("KUBEXA_TENANT_TOKEN", "x")
+
+	if _, _, err := config.LoadWithWarnings(path); err != nil {
+		t.Errorf("helm accepted these values and the agent will not start on what they "+
+			"render: %v\n%s", err, body)
 	}
 }

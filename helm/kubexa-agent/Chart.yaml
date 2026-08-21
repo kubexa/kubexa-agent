@@ -2,6 +2,29 @@ apiVersion: v2
 name: kubexa-agent
 description: Kubexa agent — collects Kubernetes logs, state, and metrics and streams them to the Kubexa gateway.
 type: application
+# 0.7.6 changes no image and one template line's worth of nothing: it finishes
+# values.schema.json. 0.7.5 described the collect.* passthrough lists and the
+# chart keys immediately around them; everything else that lands in the agent's
+# config file -- agent, gateway, buffer, observability, log -- was still
+# undescribed, so `--set gateway.dialTimeout=30` installed and the agent exited
+# before it connected, and `--set gateway.dialTimout=5s` rendered nothing at all
+# while reading like a setting that had taken effect. Those blocks are now
+# described and closed, with the types the agent's own loader wants: a duration
+# is a string, a byte count an integer, a string field any scalar.
+#
+# It also lifts a refusal 0.7.5 shipped by mistake. Outside the rule lists the
+# template QUOTES a duration, so the agent parses the value's string form and a
+# bare 0 arrives as "0" -- a valid zero duration, and the ordinary way to turn a
+# resync off. 0.7.5 refused `collect.state.resyncPeriod: 0`. Inside a rule list
+# nothing quotes anything and a number really is fatal, so the two positions
+# keep different schemas.
+#
+# UPGRADE: a key under gateway/buffer/observability/log that this chart does not
+# define now fails the upgrade by name instead of being ignored. Every such key
+# was already doing nothing -- the template never read it -- so the fix is to
+# delete it or correct the spelling; nothing that was in force stops working.
+# appVersion stays 0.7.3.
+#
 # 0.7.5 changes no template and no image either: values.schema.json now
 # describes the four collect.* passthrough lists and the chart keys around
 # them, the way it already described query.rules. Before this, helm refused
@@ -46,7 +69,7 @@ type: application
 #     so the only metric that measures reconnects read 0 while the same process
 #     logged 550 recv errors.
 # No install order constraint: the gateway is unaffected.
-version: 0.7.5
+version: 0.7.6
 appVersion: "0.7.3"
 keywords:
   - kubexa
