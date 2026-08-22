@@ -69,8 +69,27 @@ type: application
 #     so the only metric that measures reconnects read 0 while the same process
 #     logged 550 recv errors.
 # No install order constraint: the gateway is unaffected.
-version: 0.7.6
-appVersion: "0.7.3"
+#
+# 0.7.7 is the first chart since 0.7.3 to move appVersion, and it moves it to
+# 0.7.4 -- the image that finally carries what charts 0.7.4 and 0.7.5 were
+# written for. Those two fixed the chart's own values (the passthrough rule keys
+# are the agent's keys -- pod_names, label_selector, extra_labels -- not the
+# chart's camelCase spellings) and gave values.schema.json the same
+# additionalProperties gate over collect.* that query.rules already had. The
+# schema half worked the moment the chart shipped, because helm enforces it.
+# The other half needed a binary: pkg/config now decodes a second time with
+# KnownFields(true) and cmd/agent prints `unrecognized config key ignored` with
+# the line, the key and the struct that refused it. It WARNS, it does not
+# refuse -- a stale key carried across an upgrade must not put a running agent
+# into CrashLoopBackOff. Before this image a camelCase key was dropped in
+# silence and the rule that lost its filter collected everything in the
+# namespace.
+#
+# No install order constraint; the gateway is unaffected. Restarting the agent
+# does not lose queued telemetry -- the disk queue survives the pod, and since
+# 0.7.1 the gateway requeues whatever was in flight.
+version: 0.7.7
+appVersion: "0.7.4"
 keywords:
   - kubexa
   - observability
