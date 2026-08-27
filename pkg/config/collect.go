@@ -27,6 +27,37 @@ const (
 	DefaultScrapeTimeout  = 10 * time.Second
 )
 
+// DefaultKubeStateInterval and DefaultKubeStateTimeout are kube-state-metrics'
+// OWN defaults, and they are not the custom-endpoint ones above.
+//
+// KubeStateMetricsConfig.ApplyDefaults fills 60s/20s; validate used to fall
+// back to 30s/10s, so the two disagreed about what an unset field becomes.
+// Load happened to be safe because Normalize runs ApplyDefaults first, but
+// ValidateForTest bypasses Normalize -- and that is the entry point every
+// validation test uses. A test asserting "kube-state `interval: 15s` with no
+// timeout is refused" would have gone green while pinning the opposite of
+// what Load does. One constant per value, used in both places, is what stops
+// the two from drifting again.
+const (
+	DefaultKubeStateInterval = 60 * time.Second
+	DefaultKubeStateTimeout  = 20 * time.Second
+)
+
+// DefaultMaxSamplesPerScrape is what an OMITTED max_samples_per_scrape
+// becomes. cAdvisor is roughly 40 series per container under the default
+// allowlist, so 20,000 admits about 500 containers on one node's scrape --
+// far above any real node and far below a runaway.
+//
+// An explicit 0 is a different configuration and means "no cap"; see
+// MetricsCollectConfig.MaxSamplesPerScrape for why the field is a pointer.
+const DefaultMaxSamplesPerScrape = 20_000
+
+// ReservedScrapeKindLabel is the label the agent stamps on every sample to
+// name the source that produced it. It is agent-owned: custom_endpoints[]
+// .extra_labels is copied verbatim onto a target's samples, so an operator
+// writing this key would label their own app's series as cAdvisor's.
+const ReservedScrapeKindLabel = "scrape_kind"
+
 // Normalize fills default collection rules and assigns rule IDs where missing.
 func (c *Config) Normalize() {
 	if c == nil {
@@ -128,11 +159,12 @@ func (m *MetricsCollectConfig) normalize() {
 	if m.KubeStateMetrics.Enabled {
 		m.KubeStateMetrics.ApplyDefaults()
 	}
-	if m.Enabled && m.MaxSamplesPerScrape == 0 {
-		// cAdvisor is roughly 40 series per container under the default
-		// allowlist, so 20,000 admits about 500 containers on one node's
-		// scrape -- far above any real node and far below a runaway.
-		m.MaxSamplesPerScrape = 20_000
+	if m.Enabled && m.MaxSamplesPerScrape == nil {
+		// UNSET, not zero. An explicit 0 is the documented way to disable the
+		// cap and must survive normalize untouched; only an omitted key gets
+		// the default.
+		def := DefaultMaxSamplesPerScrape
+		m.MaxSamplesPerScrape = &def
 	}
 }
 
@@ -198,8 +230,11 @@ func (m *MetricsCollectConfig) validate() []string {
 	}
 	violations = append(violations, m.CAdvisor.validate()...)
 	violations = append(violations, m.KubeStateMetrics.validate()...)
-	if m.MaxSamplesPerScrape < 0 {
-		violations = append(violations, "collect.metrics.max_samples_per_scrape must not be negative")
+	if m.MaxSamplesPerScrape != nil && *m.MaxSamplesPerScrape < 0 {
+		violations = append(violations,
+			"collect.metrics.max_samples_per_scrape must not be negative "+
+				"(omit the key for the default of "+strconv.Itoa(DefaultMaxSamplesPerScrape)+
+				", or set it to 0 to disable the cap)")
 	}
 	return violations
 }
@@ -234,12 +269,15 @@ func (c *CAdvisorConfig) validate() []string {
 		effectiveTimeout = DefaultScrapeTimeout
 	}
 	if effectiveTimeout >= effectiveInterval {
-		note := ""
-		if c.Timeout <= 0 || c.Interval <= 0 {
-			note = fmt.Sprintf(" (effective timeout %s, effective interval %s; an unset field defaults to %s/%s)",
-				effectiveTimeout, effectiveInterval, DefaultScrapeTimeout, DefaultScrapeInterval)
-		}
-		violations = append(violations, prefix+".timeout must be below interval"+note)
+		// Unconditional, for the reason KubeStateMetricsConfig.validate spells
+		// out: Load runs Normalize first, so post-normalize both fields are
+		// already filled and a guarded note never reaches the operator who
+		// wrote only one of the two.
+		violations = append(violations, fmt.Sprintf(
+			"%s.timeout must be below interval (effective timeout %s, effective interval %s; "+
+				"an unset timeout defaults to %s and an unset interval to %s)",
+			prefix, effectiveTimeout, effectiveInterval,
+			DefaultScrapeTimeout, DefaultScrapeInterval))
 	}
 	if c.RefreshInterval < 0 {
 		violations = append(violations, prefix+".refresh_interval must not be negative")
@@ -302,21 +340,28 @@ func (k *KubeStateMetricsConfig) validate() []string {
 	if k.Timeout < 0 {
 		violations = append(violations, prefix+".timeout must not be negative")
 	}
+	// kube-state-metrics' OWN defaults, not the custom-endpoint ones: its
+	// ApplyDefaults fills 60s/20s, and a validate that fell back to 30s/10s
+	// judged a config against a timeout it will never run with.
 	effectiveInterval := k.Interval
 	if effectiveInterval <= 0 {
-		effectiveInterval = DefaultScrapeInterval
+		effectiveInterval = DefaultKubeStateInterval
 	}
 	effectiveTimeout := k.Timeout
 	if effectiveTimeout <= 0 {
-		effectiveTimeout = DefaultScrapeTimeout
+		effectiveTimeout = DefaultKubeStateTimeout
 	}
 	if effectiveTimeout >= effectiveInterval {
-		note := ""
-		if k.Timeout <= 0 || k.Interval <= 0 {
-			note = fmt.Sprintf(" (effective timeout %s, effective interval %s; an unset field defaults to %s/%s)",
-				effectiveTimeout, effectiveInterval, DefaultScrapeTimeout, DefaultScrapeInterval)
-		}
-		violations = append(violations, prefix+".timeout must be below interval"+note)
+		// The note is UNCONDITIONAL. Load runs Normalize first, so by the time
+		// validate sees this config both fields are already filled in and the
+		// old `if k.Timeout <= 0` guard never fired -- the operator who wrote
+		// only `interval: 15s` was told a timeout they never wrote was wrong,
+		// with no hint where 20s came from.
+		violations = append(violations, fmt.Sprintf(
+			"%s.timeout must be below interval (effective timeout %s, effective interval %s; "+
+				"an unset timeout defaults to %s and an unset interval to %s)",
+			prefix, effectiveTimeout, effectiveInterval,
+			DefaultKubeStateTimeout, DefaultKubeStateInterval))
 	}
 	if k.ProbeInterval < 0 {
 		violations = append(violations, prefix+".probe_interval must not be negative")
@@ -377,12 +422,28 @@ func (e *MetricEndpointConfig) validate(index int) []string {
 		effectiveTimeout = DefaultScrapeTimeout
 	}
 	if effectiveTimeout >= effectiveInterval {
-		note := ""
-		if e.Timeout <= 0 || e.Interval <= 0 {
-			note = fmt.Sprintf(" (effective timeout %s, effective interval %s; an unset field defaults to %s/%s)",
-				effectiveTimeout, effectiveInterval, DefaultScrapeTimeout, DefaultScrapeInterval)
-		}
-		violations = append(violations, prefix+".timeout must be below interval"+note)
+		// Unconditional, for the reason KubeStateMetricsConfig.validate spells
+		// out: Load runs Normalize first, so post-normalize both fields are
+		// already filled and a guarded note never reaches the operator who
+		// wrote only one of the two.
+		violations = append(violations, fmt.Sprintf(
+			"%s.timeout must be below interval (effective timeout %s, effective interval %s; "+
+				"an unset timeout defaults to %s and an unset interval to %s)",
+			prefix, effectiveTimeout, effectiveInterval,
+			DefaultScrapeTimeout, DefaultScrapeInterval))
+	}
+	// scrape_kind is agent-owned. It travels onto every sample so the platform
+	// can tell a cAdvisor series from a kube-state-metrics one, and the agent
+	// sets it from the target's own kind. An operator who writes it into
+	// extra_labels is mislabelling their own samples as another source's --
+	// and before the Kind field existed it also re-filed this endpoint's
+	// scrape health under whatever row they named. Refusing it at startup is
+	// what stops a stale shadow label that looks meaningful and is not.
+	if _, reserved := e.ExtraLabels[ReservedScrapeKindLabel]; reserved {
+		violations = append(violations, fmt.Sprintf(
+			"%s.extra_labels.%s is reserved: the agent sets it from the target's own scrape kind, "+
+				"and a value written here mislabels this endpoint's samples as another source's",
+			prefix, ReservedScrapeKindLabel))
 	}
 	violations = append(violations, validatePatterns(prefix+".metric_allowlist", e.MetricAllowlist)...)
 	violations = append(violations, validatePatterns(prefix+".metric_denylist", e.MetricDenylist)...)

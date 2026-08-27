@@ -50,10 +50,14 @@ type KubernetesMetricsConfig struct {
 // and the aggregation unit ScrapeHealth keys on, so it is agent-owned: it is
 // never read out of a label map an operator can write into.
 const (
-	KindCustom      = "custom"
-	KindCAdvisor    = "cadvisor"
-	KindKubeState   = "kube_state_metrics"
-	ScrapeKindLabel = "scrape_kind"
+	KindCustom    = "custom"
+	KindCAdvisor  = "cadvisor"
+	KindKubeState = "kube_state_metrics"
+	// ScrapeKindLabel is the sample label carrying the kind. It is the same
+	// constant validation refuses in a custom endpoint's extra_labels, not a
+	// second copy of the literal: the two must not drift, or the agent would
+	// reserve one spelling and stamp another.
+	ScrapeKindLabel = pkgconfig.ReservedScrapeKindLabel
 )
 
 // ScrapeTarget defines a custom Prometheus exposition endpoint.
@@ -93,9 +97,12 @@ type Config struct {
 	KubeState    KubeStateTarget
 	WriteTimeout time.Duration
 	// MaxSamplesPerScrape caps the samples one scrape of one target may
-	// publish before it is recorded and published. 0 disables the cap. See
-	// pkgconfig.MetricsCollectConfig.MaxSamplesPerScrape for why this is the
-	// agent's own advisory ceiling rather than the enforcing one.
+	// publish before it is recorded and published. 0 disables the cap -- the
+	// escape hatch a tenant with a legitimately wide allowlist needs, and the
+	// one the yaml, the chart and applySampleBudget all document. See
+	// pkgconfig.MetricsCollectConfig.MaxSamplesPerScrape for why the yaml
+	// side of this is a pointer, and for why this is the agent's own advisory
+	// ceiling rather than the enforcing one.
 	MaxSamplesPerScrape int
 }
 
@@ -141,7 +148,7 @@ func ConfigFromRoot(root *pkgconfig.Config) Config {
 			Rules:        kubeRulesFromRoot(mc),
 		},
 		WriteTimeout:        defaultWriteTimeout,
-		MaxSamplesPerScrape: mc.MaxSamplesPerScrape,
+		MaxSamplesPerScrape: resolveSampleBudget(mc.MaxSamplesPerScrape),
 	}
 	for _, ep := range mc.CustomEndpoints {
 		cfg.CustomTargets = append(cfg.CustomTargets, ScrapeTarget{
@@ -208,6 +215,18 @@ func ConfigFromRoot(root *pkgconfig.Config) Config {
 	}
 	cfg.ApplyDefaults()
 	return cfg
+}
+
+// resolveSampleBudget collapses the yaml's three states into the collector's
+// two. nil is "the key was omitted" and takes the default; an explicit value
+// -- 0 included -- is the operator's, and 0 reaches applySampleBudget as "no
+// ceiling". Load's Normalize already fills nil in, so this is the belt to its
+// braces for a Config built without it.
+func resolveSampleBudget(v *int) int {
+	if v == nil {
+		return pkgconfig.DefaultMaxSamplesPerScrape
+	}
+	return *v
 }
 
 func kubeRulesFromRoot(mc pkgconfig.MetricsCollectConfig) []KubeMetricsRule {
