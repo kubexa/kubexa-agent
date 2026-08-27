@@ -140,3 +140,32 @@ func TestReadAllDoesNotSatisfyRegistryCoverage(t *testing.T) {
 		}
 	}
 }
+
+// The kubelet's own metrics endpoints are a SUBRESOURCE, not a resource:
+// `nodes/metrics` is what authorizes GET /metrics/cadvisor on port 10250.
+// Granting `nodes` alone -- which the state/query block already does -- gets
+// the agent a 403 from every kubelet with nothing in its config to explain it.
+func TestClusterRoleGrantsKubeletMetricsForCAdvisor(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "helm", "kubexa-agent", "templates", "clusterrole.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	chart := string(raw)
+
+	for _, want := range []string{"nodes/metrics", "nodes/proxy"} {
+		if !strings.Contains(chart, want) {
+			t.Errorf("ClusterRole does not name %q; the kubelet answers 403 for every cAdvisor scrape", want)
+		}
+	}
+	// One path segment short of the full ".enabled" dereference: the values
+	// schema admits an explicit `cadvisor: null`, and Helm hard-errors on a
+	// chained field access through a nil map rather than treating it as
+	// false. The gate must dereference the block through a parenthesized
+	// sub-expression -- e.g. `(.Values.collect.metrics.cadvisor).enabled` --
+	// which this substring still matches, so it cannot pass while the gate
+	// is genuinely absent.
+	if !strings.Contains(chart, ".Values.collect.metrics.cadvisor") {
+		t.Error("the kubelet metrics rule is not gated on collect.metrics.cadvisor")
+	}
+}

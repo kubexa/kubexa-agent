@@ -117,6 +117,31 @@ func ConfigFromRoot(root *pkgconfig.Config) Config {
 			MetricDenylist:  append([]string(nil), ep.MetricDenylist...),
 		})
 	}
+	if mc.CAdvisor.Enabled {
+		ca := mc.CAdvisor
+		ca.ApplyDefaults()
+		cfg.DynamicTargets.RefreshInterval = ca.RefreshInterval
+		cfg.DynamicTargets.Templates = append(cfg.DynamicTargets.Templates, TargetTemplate{
+			Kind:       "cadvisor",
+			NamePrefix: "cadvisor",
+			Scheme:     ca.Scheme,
+			Port:       ca.Port,
+			Path:       ca.Path,
+			Interval:   ca.Interval,
+			Timeout:    ca.Timeout,
+			// scrape_kind travels onto every sample so the consumer's writer
+			// and the explorer can tell a cAdvisor series from a
+			// kube-state-metrics one without pattern-matching the name.
+			Labels:          map[string]string{"scrape_kind": "cadvisor"},
+			BearerTokenPath: ca.BearerTokenPath,
+			TLSConfig: TLSConfig{
+				InsecureSkipVerify: ca.TLS.InsecureSkipVerify,
+				CAFile:             ca.TLS.CAFile,
+			},
+			MetricAllowlist: append([]string(nil), ca.MetricAllowlist...),
+			MetricDenylist:  append([]string(nil), ca.MetricDenylist...),
+		})
+	}
 	cfg.ApplyDefaults()
 	return cfg
 }
@@ -180,7 +205,9 @@ func (c *Config) IsEnabled() bool {
 	if c == nil || !c.Enabled {
 		return false
 	}
-	return len(c.KubernetesMetrics.Rules) > 0 || len(c.CustomTargets) > 0
+	return len(c.KubernetesMetrics.Rules) > 0 ||
+		len(c.CustomTargets) > 0 ||
+		len(c.DynamicTargets.Templates) > 0
 }
 
 // HasKubeMetricsRules reports whether any Kubernetes Metrics API rules are configured.

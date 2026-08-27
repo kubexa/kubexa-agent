@@ -65,6 +65,29 @@ data:
         custom_endpoints:
           {{- toYaml . | nindent 10 }}
         {{- end }}
+        {{- /*
+          The values schema admits an explicit `cadvisor: null`, and a chained
+          field access through a nil map (`.Values...cadvisor.enabled`) is a
+          hard Helm render error, not a false. Guarding on the parenthesized
+          block itself -- `(.Values.collect.metrics.cadvisor)` -- evaluates to
+          plain nil without dereferencing anything, so `{{- if }}` treats it as
+          false and the whole block is safely skipped.
+        */ -}}
+        {{- if (.Values.collect.metrics.cadvisor) }}
+        cadvisor:
+          enabled: {{ .Values.collect.metrics.cadvisor.enabled }}
+          interval: {{ .Values.collect.metrics.cadvisor.interval | quote }}
+          timeout: {{ .Values.collect.metrics.cadvisor.timeout | quote }}
+          refresh_interval: {{ .Values.collect.metrics.cadvisor.refreshInterval | quote }}
+          {{- with .Values.collect.metrics.cadvisor.metricAllowlist }}
+          metric_allowlist:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.collect.metrics.cadvisor.metricDenylist }}
+          metric_denylist:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
 
     query:
       enabled: {{ .Values.query.enabled }}

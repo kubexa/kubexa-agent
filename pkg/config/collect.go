@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -121,6 +122,9 @@ func (m *MetricsCollectConfig) normalize() {
 	for i := range m.Rules {
 		m.Rules[i].normalize(i)
 	}
+	if m.CAdvisor.Enabled {
+		m.CAdvisor.ApplyDefaults()
+	}
 }
 
 func (r *MetricsNamespaceRule) normalize(index int) {
@@ -149,8 +153,14 @@ func (m *MetricsCollectConfig) validate() []string {
 	if m == nil || !m.Enabled {
 		return nil
 	}
-	if len(m.Rules) == 0 && len(m.CustomEndpoints) == 0 {
-		return []string{"collect.metrics must define rules and/or custom_endpoints when metrics collection is enabled"}
+	// A cAdvisor-only configuration is a legitimate metrics source on its own
+	// (ConfigFromRoot's IsEnabled treats it the same way), so it must exempt
+	// this guard the same as a rule or a custom endpoint would -- otherwise an
+	// operator who enables only collect.metrics.cadvisor gets "must define
+	// rules and/or custom_endpoints" and cAdvisor's own violations, if any,
+	// never run.
+	if len(m.Rules) == 0 && len(m.CustomEndpoints) == 0 && !m.CAdvisor.Enabled {
+		return []string{"collect.metrics must define rules, custom_endpoints, and/or cadvisor when metrics collection is enabled"}
 	}
 	var violations []string
 	seen := make(map[string]struct{}, len(m.Rules))
@@ -176,6 +186,67 @@ func (m *MetricsCollectConfig) validate() []string {
 		}
 		seenEndpoints[ep.Name] = struct{}{}
 	}
+	violations = append(violations, m.CAdvisor.validate()...)
+	return violations
+}
+
+// validate checks the cAdvisor block. Load's path runs this after normalize,
+// so every defaulted field is already set there and a zero is an operator's
+// value -- but ValidateForTest (used by this package's own tests) calls
+// validate directly, without normalize first. So, like MetricEndpointConfig
+// above, this compares EFFECTIVE values rather than trusting Interval/Timeout
+// to already be defaulted: a written `interval: 5s` with no timeout must be
+// judged against the 10s the timeout will actually run with, not against its
+// own zero value.
+func (c *CAdvisorConfig) validate() []string {
+	if c == nil || !c.Enabled {
+		return nil
+	}
+	const prefix = "collect.metrics.cadvisor"
+	var violations []string
+
+	if c.Interval < 0 {
+		violations = append(violations, prefix+".interval must not be negative")
+	}
+	if c.Timeout < 0 {
+		violations = append(violations, prefix+".timeout must not be negative")
+	}
+	effectiveInterval := c.Interval
+	if effectiveInterval <= 0 {
+		effectiveInterval = DefaultScrapeInterval
+	}
+	effectiveTimeout := c.Timeout
+	if effectiveTimeout <= 0 {
+		effectiveTimeout = DefaultScrapeTimeout
+	}
+	if effectiveTimeout >= effectiveInterval {
+		note := ""
+		if c.Timeout <= 0 || c.Interval <= 0 {
+			note = fmt.Sprintf(" (effective timeout %s, effective interval %s; an unset field defaults to %s/%s)",
+				effectiveTimeout, effectiveInterval, DefaultScrapeTimeout, DefaultScrapeInterval)
+		}
+		violations = append(violations, prefix+".timeout must be below interval"+note)
+	}
+	if c.RefreshInterval < 0 {
+		violations = append(violations, prefix+".refresh_interval must not be negative")
+	}
+	if c.Scheme != "" && c.Scheme != "http" && c.Scheme != "https" {
+		violations = append(violations, prefix+".scheme must be http or https")
+	}
+	if c.Path != "" && !strings.HasPrefix(c.Path, "/") {
+		violations = append(violations, prefix+".path must start with /")
+	}
+	if c.Port != "" {
+		if port, err := strconv.Atoi(c.Port); err != nil || port < 1 || port > 65535 {
+			violations = append(violations, prefix+".port must be a TCP port number")
+		}
+	}
+	if c.TLS.InsecureSkipVerify && c.TLS.CAFile != "" {
+		violations = append(violations,
+			prefix+".tls sets both insecure_skip_verify and ca_file; the CA bundle would never be consulted")
+	}
+	violations = append(violations, validatePatterns(prefix+".metric_allowlist", c.MetricAllowlist)...)
+	violations = append(violations, validatePatterns(prefix+".metric_denylist", c.MetricDenylist)...)
 	return violations
 }
 
@@ -568,11 +639,11 @@ func (c *Config) ToProtoSnapshot() (*agentv1.ConfigSnapshot, error) {
 		})
 	}
 	return &agentv1.ConfigSnapshot{
-		LogCollectors:       logCollectors,
-		Watchers:            watchers,
-		MetricScrapers:      scrapers,
-		BatchSize:           int32(c.Buffer.BatchSize),
-		FlushIntervalMs:     int32(c.Buffer.FlushInterval / time.Millisecond),
+		LogCollectors:   logCollectors,
+		Watchers:        watchers,
+		MetricScrapers:  scrapers,
+		BatchSize:       int32(c.Buffer.BatchSize),
+		FlushIntervalMs: int32(c.Buffer.FlushInterval / time.Millisecond),
 	}, nil
 }
 
