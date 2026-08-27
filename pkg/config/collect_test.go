@@ -435,3 +435,180 @@ func containsSubstring(violations []string, want string) bool {
 	}
 	return false
 }
+
+// TestKubeStateMetricsValidationUsesItsOwnDefaults is finding 4: ApplyDefaults
+// filled Interval 60s / Timeout 20s while validate fell back to the
+// custom-endpoint defaults, 30s / 10s. Load happened to be safe because
+// Normalize runs ApplyDefaults first -- but ValidateForTest bypasses Normalize,
+// and that is the entry point every validation test in this file uses. So a
+// test asserting this exact refusal would have gone GREEN while pinning the
+// opposite of what Load does.
+func TestKubeStateMetricsValidationUsesItsOwnDefaults(t *testing.T) {
+	cases := []struct {
+		name      string
+		ks        config.KubeStateMetricsConfig
+		want      string
+		wantValid bool
+	}{
+		{
+			// The case the old fallbacks got backwards. 15s interval with no
+			// timeout runs with the 20s kube-state default, which is ABOVE the
+			// interval -- refused. Judged against the 10s custom-endpoint
+			// default it would have passed, and the agent would then hold a
+			// scraper goroutine past every tick.
+			name:      "defaulted timeout above a 15s interval is refused",
+			ks:        config.KubeStateMetricsConfig{Enabled: true, Interval: 15 * time.Second},
+			want:      "timeout must be below interval",
+			wantValid: false,
+		},
+		{
+			// 25s clears the 20s default. Under the wrong 10s fallback this
+			// also passed, so it is the 15s case above that separates them.
+			name:      "a 25s interval clears the 20s default",
+			ks:        config.KubeStateMetricsConfig{Enabled: true, Interval: 25 * time.Second},
+			wantValid: true,
+		},
+		{
+			name:      "neither field written uses 60s/20s, which are valid together",
+			ks:        config.KubeStateMetricsConfig{Enabled: true},
+			wantValid: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Collect.Metrics.Enabled = true
+			cfg.Collect.Metrics.KubeStateMetrics = tc.ks
+
+			violations := config.ValidateForTest(cfg)
+			if tc.wantValid {
+				if len(violations) != 0 {
+					t.Fatalf("violations = %v, want none", violations)
+				}
+				return
+			}
+			if !containsSubstring(violations, tc.want) {
+				t.Fatalf("violations = %v, want one containing %q", violations, tc.want)
+			}
+		})
+	}
+
+	// The exported constants must be what ApplyDefaults actually writes, or
+	// validate is once again judging against numbers nothing runs with.
+	ks := config.KubeStateMetricsConfig{Enabled: true}
+	ks.ApplyDefaults()
+	if ks.Interval != config.DefaultKubeStateInterval {
+		t.Errorf("ApplyDefaults Interval = %v, want %v", ks.Interval, config.DefaultKubeStateInterval)
+	}
+	if ks.Timeout != config.DefaultKubeStateTimeout {
+		t.Errorf("ApplyDefaults Timeout = %v, want %v", ks.Timeout, config.DefaultKubeStateTimeout)
+	}
+	if config.DefaultKubeStateTimeout == config.DefaultScrapeTimeout {
+		t.Error("the kube-state defaults are the custom-endpoint ones again; this test now proves nothing")
+	}
+}
+
+// The violation must name the value the operator never wrote. Load runs
+// Normalize first, so post-normalize both fields are filled and the old
+// guarded note never fired -- the operator who wrote only `interval: 15s` was
+// told a 20s timeout was wrong with no hint where 20s came from.
+func TestTheTimeoutViolationNamesTheDefaultedValue(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Collect.Metrics.Enabled = true
+	cfg.Collect.Metrics.KubeStateMetrics = config.KubeStateMetricsConfig{
+		Enabled: true, Interval: 15 * time.Second,
+	}
+	// Normalize first: this is the path Load takes, and the one where the note
+	// used to go silent.
+	cfg.Normalize()
+
+	violations := config.ValidateForTest(cfg)
+	if !containsSubstring(violations, "effective timeout 20s") {
+		t.Errorf("violations = %v, want the effective timeout named", violations)
+	}
+	if !containsSubstring(violations, "an unset timeout defaults to 20s") {
+		t.Errorf("violations = %v, want the message to say where 20s came from", violations)
+	}
+}
+
+// TestMaxSamplesPerScrapeSeparatesUnsetFromExplicitZero is finding 3.
+// normalize rewrote 0 to 20,000 before validation and the collector read the
+// normalized value, so the escape hatch values.yaml, both config comments and
+// applySampleBudget's own contract all promise -- "0 disables the cap" -- was
+// unreachable. A tenant with a legitimately wide allowlist set 0, kept the
+// 20,000 cap, and went on silently losing families.
+func TestMaxSamplesPerScrapeSeparatesUnsetFromExplicitZero(t *testing.T) {
+	t.Run("unset defaults to 20000", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.Collect.Metrics.Enabled = true
+		cfg.Collect.Metrics.MaxSamplesPerScrape = nil
+		cfg.Normalize()
+
+		if cfg.Collect.Metrics.MaxSamplesPerScrape == nil {
+			t.Fatal("MaxSamplesPerScrape is still nil after Normalize")
+		}
+		if got := *cfg.Collect.Metrics.MaxSamplesPerScrape; got != config.DefaultMaxSamplesPerScrape {
+			t.Fatalf("MaxSamplesPerScrape = %d, want %d", got, config.DefaultMaxSamplesPerScrape)
+		}
+	})
+
+	t.Run("explicit zero survives Normalize", func(t *testing.T) {
+		zero := 0
+		cfg := config.Default()
+		cfg.Collect.Metrics.Enabled = true
+		cfg.Collect.Metrics.MaxSamplesPerScrape = &zero
+		cfg.Normalize()
+
+		if cfg.Collect.Metrics.MaxSamplesPerScrape == nil {
+			t.Fatal("Normalize dropped the explicit 0")
+		}
+		if got := *cfg.Collect.Metrics.MaxSamplesPerScrape; got != 0 {
+			t.Fatalf("MaxSamplesPerScrape = %d, want the operator's 0 kept: it is the "+
+				"documented way to disable the cap", got)
+		}
+	})
+
+	t.Run("negative is refused", func(t *testing.T) {
+		neg := -1
+		cfg := &config.Config{}
+		cfg.Collect.Metrics.Enabled = true
+		cfg.Collect.Metrics.Rules = []config.MetricsNamespaceRule{{Resources: []string{"pods"}}}
+		cfg.Collect.Metrics.MaxSamplesPerScrape = &neg
+
+		violations := config.ValidateForTest(cfg)
+		if !containsSubstring(violations, "max_samples_per_scrape must not be negative") {
+			t.Fatalf("violations = %v, want the negative refusal", violations)
+		}
+		// The message has to say what the two legitimate values are, or the
+		// operator's only next move is to guess.
+		if !containsSubstring(violations, "set it to 0 to disable the cap") {
+			t.Errorf("violations = %v, want the message to name the escape hatch", violations)
+		}
+	})
+}
+
+// scrape_kind is agent-owned: it is copied verbatim from extra_labels onto
+// every sample, so an operator writing it labels their own app's series as
+// another source's. Before the Kind field it also re-filed this endpoint's
+// scrape health under whatever row they named.
+func TestCustomEndpointRejectsTheReservedScrapeKindLabel(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Collect.Metrics.Enabled = true
+	cfg.Collect.Metrics.CustomEndpoints = []config.MetricEndpointConfig{{
+		Name:        "app",
+		URL:         "http://app.svc:8080/metrics",
+		ExtraLabels: map[string]string{config.ReservedScrapeKindLabel: "cadvisor"},
+	}}
+
+	violations := config.ValidateForTest(cfg)
+	if !containsSubstring(violations, "extra_labels.scrape_kind is reserved") {
+		t.Fatalf("violations = %v, want scrape_kind refused as reserved", violations)
+	}
+
+	// Any other label is still an operator's business.
+	cfg.Collect.Metrics.CustomEndpoints[0].ExtraLabels = map[string]string{"service": "app"}
+	if violations := config.ValidateForTest(cfg); len(violations) != 0 {
+		t.Fatalf("violations = %v, want none for an ordinary extra label", violations)
+	}
+}

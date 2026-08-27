@@ -161,14 +161,23 @@ type MetricsCollectConfig struct {
 	// status. None of it is in the Metrics API.
 	KubeStateMetrics KubeStateMetricsConfig `yaml:"kube_state_metrics,omitempty"`
 	// MaxSamplesPerScrape caps the samples one scrape of one target may
-	// publish. 0 disables the cap.
+	// publish. An explicit 0 disables the cap; leaving it unset defaults to
+	// DefaultMaxSamplesPerScrape.
+	//
+	// It is a POINTER because those two are different configurations and an
+	// int cannot tell them apart. normalize used to rewrite 0 to 20,000
+	// before validation, so the escape hatch that values.yaml, both config
+	// comments and applySampleBudget's own contract all promised was
+	// unreachable: a tenant with a legitimately wide allowlist set 0, kept
+	// the 20,000 cap, and silently went on losing families with
+	// dropped_cardinality climbing.
 	//
 	// This is the agent's own ceiling and it is advisory: the enforcing cap
 	// lives in the platform, which is the only side that can bound what a
 	// misconfigured or hostile agent sends. It exists so a normal install
 	// cannot flood its own uplink, and so the drop is visible to the operator
 	// who caused it.
-	MaxSamplesPerScrape int `yaml:"max_samples_per_scrape,omitempty"`
+	MaxSamplesPerScrape *int `yaml:"max_samples_per_scrape,omitempty"`
 }
 
 // CAdvisorConfig configures per-node kubelet scraping.
@@ -325,10 +334,10 @@ func (k *KubeStateMetricsConfig) ApplyDefaults() {
 		k.Path = "/metrics"
 	}
 	if k.Interval <= 0 {
-		k.Interval = 60 * time.Second
+		k.Interval = DefaultKubeStateInterval
 	}
 	if k.Timeout <= 0 {
-		k.Timeout = 20 * time.Second
+		k.Timeout = DefaultKubeStateTimeout
 	}
 	if k.ProbeInterval <= 0 {
 		k.ProbeInterval = 5 * time.Minute

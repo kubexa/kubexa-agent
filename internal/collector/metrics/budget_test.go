@@ -1,6 +1,10 @@
 package metrics
 
-import "testing"
+import (
+	"testing"
+
+	pkgconfig "github.com/kubexa/kubexa-agent/pkg/config"
+)
 
 func fam(name string, n int) ParsedFamily {
 	f := ParsedFamily{Name: name}
@@ -95,5 +99,64 @@ func TestABudgetedDropIsCountedAgainstTheRightKind(t *testing.T) {
 	// A budgeted drop is not a failure: the target answered.
 	if got.State != StateOK {
 		t.Errorf("State = %q, want %q", got.State, StateOK)
+	}
+}
+
+// TestExplicitZeroBudgetDisablesTheCapEndToEnd walks the escape hatch the
+// whole way: the yaml's explicit 0, through Normalize, ConfigFromRoot and into
+// applySampleBudget. applySampleBudget's own "budget <= 0 means no ceiling"
+// contract was always right -- the break was upstream, where normalize
+// rewrote 0 to 20,000 before anyone read it, so a tenant following the
+// documented escape hatch kept the cap and went on losing families.
+func TestExplicitZeroBudgetDisablesTheCapEndToEnd(t *testing.T) {
+	// Comfortably over the 20,000 default: if the cap is still in force this
+	// gets trimmed.
+	oversized := []ParsedFamily{fam("a", 15_000), fam("b", 15_000)}
+
+	zero := 0
+	root := &pkgconfig.Config{}
+	root.Collect.Metrics.Enabled = true
+	root.Collect.Metrics.Rules = []pkgconfig.MetricsNamespaceRule{{Resources: []string{"pods"}}}
+	root.Collect.Metrics.MaxSamplesPerScrape = &zero
+	root.Normalize()
+
+	cfg := ConfigFromRoot(root)
+	if cfg.MaxSamplesPerScrape != 0 {
+		t.Fatalf("MaxSamplesPerScrape = %d, want 0: the operator asked for no cap",
+			cfg.MaxSamplesPerScrape)
+	}
+
+	kept, dropped := applySampleBudget(oversized, cfg.MaxSamplesPerScrape)
+	if dropped != 0 {
+		t.Fatalf("dropped = %d samples with the cap disabled", dropped)
+	}
+	if len(kept) != 2 {
+		t.Fatalf("kept %d families, want both", len(kept))
+	}
+}
+
+// And the omitted key still gets the ceiling, so turning the escape hatch on
+// did not turn the default off.
+func TestAnOmittedBudgetStillCapsAtTheDefault(t *testing.T) {
+	oversized := []ParsedFamily{fam("a", 15_000), fam("b", 15_000)}
+
+	root := &pkgconfig.Config{}
+	root.Collect.Metrics.Enabled = true
+	root.Collect.Metrics.Rules = []pkgconfig.MetricsNamespaceRule{{Resources: []string{"pods"}}}
+	root.Collect.Metrics.MaxSamplesPerScrape = nil
+	root.Normalize()
+
+	cfg := ConfigFromRoot(root)
+	if cfg.MaxSamplesPerScrape != pkgconfig.DefaultMaxSamplesPerScrape {
+		t.Fatalf("MaxSamplesPerScrape = %d, want the %d default",
+			cfg.MaxSamplesPerScrape, pkgconfig.DefaultMaxSamplesPerScrape)
+	}
+
+	kept, dropped := applySampleBudget(oversized, cfg.MaxSamplesPerScrape)
+	if dropped == 0 {
+		t.Fatal("nothing dropped: a 30,000-sample scrape must not pass a 20,000 budget")
+	}
+	if len(kept) != 1 {
+		t.Fatalf("kept %d families, want 1 within budget", len(kept))
 	}
 }
