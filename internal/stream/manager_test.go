@@ -100,7 +100,7 @@ func newTestManager(t *testing.T, cfg *config.Config, q queue.Queue, lis *bufcon
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	_, streamMetrics, connMetrics := newTestAgentMetrics(t, reg)
-	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil, nil, nil, nil)
+	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -967,7 +967,7 @@ func newDrainTestManager(t *testing.T, cfg *config.Config, q queue.Queue) *strea
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	_, streamMetrics, connMetrics := newTestAgentMetrics(t, reg)
-	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil, nil, nil, nil)
+	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2016,5 +2016,37 @@ func TestHeartbeatLoopInvokesTheStaleInflightSweep(t *testing.T) {
 			t.Fatal("heartbeatLoop never called sweepStaleInflight -- the ticker's call site may have been removed")
 		case <-time.After(20 * time.Millisecond):
 		}
+	}
+}
+
+type stubScrapeHealth struct{ entries []*agentv1.ScrapeTargetHealth }
+
+func (s *stubScrapeHealth) ScrapeTargetHealth() []*agentv1.ScrapeTargetHealth { return s.entries }
+
+func TestHeartbeatCarriesScrapeHealthWhenACollectorIsWired(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	sm := newDrainTestManager(t, cfg, newTestQueue(t))
+	sm.scrapeHealth = &stubScrapeHealth{entries: []*agentv1.ScrapeTargetHealth{
+		{Kind: "cadvisor", State: "ok", TargetsTotal: 3},
+	}}
+
+	got := sm.healthSnapshot().GetScrapeTargets()
+	if len(got) != 1 || got[0].GetKind() != "cadvisor" {
+		t.Fatalf("scrape_targets = %+v", got)
+	}
+}
+
+func TestHeartbeatOmitsScrapeHealthWithNoCollector(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	sm := newDrainTestManager(t, cfg, newTestQueue(t))
+
+	// An agent that is not scraping reports nothing rather than an empty "ok".
+	// An empty "ok" would tell the platform every target is healthy.
+	if got := sm.healthSnapshot().GetScrapeTargets(); len(got) != 0 {
+		t.Fatalf("scrape_targets = %+v, want none", got)
 	}
 }

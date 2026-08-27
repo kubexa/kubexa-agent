@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
 
 func TestSnapshotSeparatesFailingFromEmpty(t *testing.T) {
@@ -265,4 +267,49 @@ func TestSnapshotIsOrderedByKind(t *testing.T) {
 		}
 	}
 	_ = time.Now
+}
+
+func TestSnapshotProtoCarriesEveryState(t *testing.T) {
+	h := newScrapeHealth()
+	h.SetTargetCount("cadvisor", 4)
+	h.RecordSuccess("cadvisor", "cadvisor/node-1", 900)
+	h.RecordCardinalityDrop("cadvisor", 15)
+	h.MarkNotInstalled("kube_state_metrics")
+
+	got := HealthProto(h)
+
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	byName := map[string]*agentv1.ScrapeTargetHealth{}
+	for _, e := range got {
+		byName[e.GetKind()] = e
+	}
+
+	ca := byName["cadvisor"]
+	if ca.GetState() != string(StateOK) {
+		t.Errorf("cadvisor state = %q", ca.GetState())
+	}
+	if ca.GetTargetsTotal() != 4 || ca.GetTargetsFailing() != 0 {
+		t.Errorf("cadvisor targets = %d/%d", ca.GetTargetsFailing(), ca.GetTargetsTotal())
+	}
+	if ca.GetSamplesLastScrape() != 900 {
+		t.Errorf("cadvisor samples = %d", ca.GetSamplesLastScrape())
+	}
+	if ca.GetDroppedCardinality() != 15 {
+		t.Errorf("cadvisor dropped = %d", ca.GetDroppedCardinality())
+	}
+	if ca.GetLastSuccessUnixMs() == 0 {
+		t.Error("cadvisor last_success_unix_ms = 0 after a success")
+	}
+
+	ks := byName["kube_state_metrics"]
+	if ks.GetState() != string(StateNotInstalled) {
+		t.Errorf("kube_state_metrics state = %q, want %q", ks.GetState(), StateNotInstalled)
+	}
+	// Never succeeded: 0, and the platform must read that as "never", not as
+	// "at the epoch".
+	if ks.GetLastSuccessUnixMs() != 0 {
+		t.Errorf("kube_state_metrics last_success_unix_ms = %d, want 0", ks.GetLastSuccessUnixMs())
+	}
 }

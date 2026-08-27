@@ -235,10 +235,22 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	// gateway config" stays a property of the collector's own type, not
 	// something the caller has to track separately.
 	var reconciler stream.WatchReconciler
+	// The metrics collector, if enabled, also satisfies
+	// stream.ScrapeHealthSource. Found the same way as reconciler above: an
+	// agent built without metrics collection has no collector to satisfy it,
+	// so scrapeHealth stays nil and the heartbeat reports no scrape_targets
+	// at all rather than a fabricated empty "everything is healthy".
+	var scrapeHealth stream.ScrapeHealthSource
 	for _, coll := range collectors {
-		if r, ok := coll.(stream.WatchReconciler); ok {
-			reconciler = r
-			break
+		if reconciler == nil {
+			if r, ok := coll.(stream.WatchReconciler); ok {
+				reconciler = r
+			}
+		}
+		if scrapeHealth == nil {
+			if s, ok := coll.(stream.ScrapeHealthSource); ok {
+				scrapeHealth = s
+			}
 		}
 	}
 
@@ -252,6 +264,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		queryExecutor,
 		rulesStore,
 		ruleCounters,
+		scrapeHealth,
 	)
 	if err != nil {
 		_ = q.Close()

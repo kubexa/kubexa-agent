@@ -618,8 +618,12 @@ type AgentHealth struct {
 	DroppedTooOld      int64 `protobuf:"varint,5,opt,name=dropped_too_old,json=droppedTooOld,proto3" json:"dropped_too_old,omitempty"`
 	DroppedFuture      int64 `protobuf:"varint,6,opt,name=dropped_future,json=droppedFuture,proto3" json:"dropped_future,omitempty"`
 	DroppedRateLimited int64 `protobuf:"varint,7,opt,name=dropped_rate_limited,json=droppedRateLimited,proto3" json:"dropped_rate_limited,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Scrape health, one entry per target KIND rather than per target. Forty
+	// cAdvisor rows say less than "3 of 40 failing", and a per-target list would
+	// grow the heartbeat with the cluster.
+	ScrapeTargets []*ScrapeTargetHealth `protobuf:"bytes,8,rep,name=scrape_targets,json=scrapeTargets,proto3" json:"scrape_targets,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AgentHealth) Reset() {
@@ -701,6 +705,119 @@ func (x *AgentHealth) GetDroppedRateLimited() int64 {
 	return 0
 }
 
+func (x *AgentHealth) GetScrapeTargets() []*ScrapeTargetHealth {
+	if x != nil {
+		return x.ScrapeTargets
+	}
+	return nil
+}
+
+// ScrapeTargetHealth is the state of one kind of metric scrape target.
+type ScrapeTargetHealth struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Kind  string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"` // "custom" | "cadvisor" | "kube_state_metrics"
+	// state is "ok" | "failing" | "unreachable" | "not_installed".
+	//
+	// The four are not collapsible and the platform must not collapse them
+	// either. "not_installed" means the agent looked for the component and it
+	// was absent; "unreachable" means nothing answered at its address;
+	// "failing" means it answered badly. A scrape that succeeded and returned
+	// zero samples is "ok" -- that is a measured zero, and rendering it as an
+	// absence is the failure this whole field exists to prevent.
+	State          string `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	TargetsTotal   int32  `protobuf:"varint,3,opt,name=targets_total,json=targetsTotal,proto3" json:"targets_total,omitempty"`
+	TargetsFailing int32  `protobuf:"varint,4,opt,name=targets_failing,json=targetsFailing,proto3" json:"targets_failing,omitempty"`
+	// last_success_unix_ms is 0 when this kind has NEVER succeeded, which is a
+	// different statement from "its last scrape failed".
+	LastSuccessUnixMs int64 `protobuf:"varint,5,opt,name=last_success_unix_ms,json=lastSuccessUnixMs,proto3" json:"last_success_unix_ms,omitempty"`
+	// samples_last_scrape is what was PUBLISHED, after the sample budget.
+	SamplesLastScrape int64 `protobuf:"varint,6,opt,name=samples_last_scrape,json=samplesLastScrape,proto3" json:"samples_last_scrape,omitempty"`
+	// dropped_cardinality is CUMULATIVE since process start, like every other
+	// counter in AgentHealth: a dropped heartbeat then loses nothing.
+	DroppedCardinality int64 `protobuf:"varint,7,opt,name=dropped_cardinality,json=droppedCardinality,proto3" json:"dropped_cardinality,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *ScrapeTargetHealth) Reset() {
+	*x = ScrapeTargetHealth{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScrapeTargetHealth) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScrapeTargetHealth) ProtoMessage() {}
+
+func (x *ScrapeTargetHealth) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScrapeTargetHealth.ProtoReflect.Descriptor instead.
+func (*ScrapeTargetHealth) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ScrapeTargetHealth) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ScrapeTargetHealth) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *ScrapeTargetHealth) GetTargetsTotal() int32 {
+	if x != nil {
+		return x.TargetsTotal
+	}
+	return 0
+}
+
+func (x *ScrapeTargetHealth) GetTargetsFailing() int32 {
+	if x != nil {
+		return x.TargetsFailing
+	}
+	return 0
+}
+
+func (x *ScrapeTargetHealth) GetLastSuccessUnixMs() int64 {
+	if x != nil {
+		return x.LastSuccessUnixMs
+	}
+	return 0
+}
+
+func (x *ScrapeTargetHealth) GetSamplesLastScrape() int64 {
+	if x != nil {
+		return x.SamplesLastScrape
+	}
+	return 0
+}
+
+func (x *ScrapeTargetHealth) GetDroppedCardinality() int64 {
+	if x != nil {
+		return x.DroppedCardinality
+	}
+	return 0
+}
+
 type GatewayMessage struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	MessageId string                 `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
@@ -719,7 +836,7 @@ type GatewayMessage struct {
 
 func (x *GatewayMessage) Reset() {
 	*x = GatewayMessage{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -731,7 +848,7 @@ func (x *GatewayMessage) String() string {
 func (*GatewayMessage) ProtoMessage() {}
 
 func (x *GatewayMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -744,7 +861,7 @@ func (x *GatewayMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GatewayMessage.ProtoReflect.Descriptor instead.
 func (*GatewayMessage) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GatewayMessage) GetMessageId() string {
@@ -879,7 +996,7 @@ type HandshakeResponse struct {
 
 func (x *HandshakeResponse) Reset() {
 	*x = HandshakeResponse{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -891,7 +1008,7 @@ func (x *HandshakeResponse) String() string {
 func (*HandshakeResponse) ProtoMessage() {}
 
 func (x *HandshakeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -904,7 +1021,7 @@ func (x *HandshakeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandshakeResponse.ProtoReflect.Descriptor instead.
 func (*HandshakeResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{6}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *HandshakeResponse) GetAccepted() bool {
@@ -972,7 +1089,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -984,7 +1101,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -997,7 +1114,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{7}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Ack) GetMessageIds() []string {
@@ -1017,7 +1134,7 @@ type BackpressureSignal struct {
 
 func (x *BackpressureSignal) Reset() {
 	*x = BackpressureSignal{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1029,7 +1146,7 @@ func (x *BackpressureSignal) String() string {
 func (*BackpressureSignal) ProtoMessage() {}
 
 func (x *BackpressureSignal) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1042,7 +1159,7 @@ func (x *BackpressureSignal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackpressureSignal.ProtoReflect.Descriptor instead.
 func (*BackpressureSignal) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{8}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *BackpressureSignal) GetThrottle() bool {
@@ -1068,7 +1185,7 @@ type Shutdown struct {
 
 func (x *Shutdown) Reset() {
 	*x = Shutdown{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[9]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1080,7 +1197,7 @@ func (x *Shutdown) String() string {
 func (*Shutdown) ProtoMessage() {}
 
 func (x *Shutdown) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[9]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1093,7 +1210,7 @@ func (x *Shutdown) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Shutdown.ProtoReflect.Descriptor instead.
 func (*Shutdown) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{9}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Shutdown) GetReason() string {
@@ -1113,7 +1230,7 @@ type ConfigUpdate struct {
 
 func (x *ConfigUpdate) Reset() {
 	*x = ConfigUpdate{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[10]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1125,7 +1242,7 @@ func (x *ConfigUpdate) String() string {
 func (*ConfigUpdate) ProtoMessage() {}
 
 func (x *ConfigUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[10]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1138,7 +1255,7 @@ func (x *ConfigUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigUpdate.ProtoReflect.Descriptor instead.
 func (*ConfigUpdate) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{10}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ConfigUpdate) GetConfigVersion() string {
@@ -1181,7 +1298,7 @@ type ConfigSnapshot struct {
 
 func (x *ConfigSnapshot) Reset() {
 	*x = ConfigSnapshot{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1193,7 +1310,7 @@ func (x *ConfigSnapshot) String() string {
 func (*ConfigSnapshot) ProtoMessage() {}
 
 func (x *ConfigSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1206,7 +1323,7 @@ func (x *ConfigSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigSnapshot.ProtoReflect.Descriptor instead.
 func (*ConfigSnapshot) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{11}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ConfigSnapshot) GetLogCollectors() []*LogCollectorConfig {
@@ -1285,7 +1402,7 @@ type IngestRules struct {
 
 func (x *IngestRules) Reset() {
 	*x = IngestRules{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1297,7 +1414,7 @@ func (x *IngestRules) String() string {
 func (*IngestRules) ProtoMessage() {}
 
 func (x *IngestRules) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1310,7 +1427,7 @@ func (x *IngestRules) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestRules.ProtoReflect.Descriptor instead.
 func (*IngestRules) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *IngestRules) GetMaxLineBytes() int64 {
@@ -1362,7 +1479,7 @@ type LogCollectorConfig struct {
 
 func (x *LogCollectorConfig) Reset() {
 	*x = LogCollectorConfig{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1374,7 +1491,7 @@ func (x *LogCollectorConfig) String() string {
 func (*LogCollectorConfig) ProtoMessage() {}
 
 func (x *LogCollectorConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1387,7 +1504,7 @@ func (x *LogCollectorConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogCollectorConfig.ProtoReflect.Descriptor instead.
 func (*LogCollectorConfig) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{13}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *LogCollectorConfig) GetId() string {
@@ -1448,7 +1565,7 @@ type WatcherConfig struct {
 
 func (x *WatcherConfig) Reset() {
 	*x = WatcherConfig{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1460,7 +1577,7 @@ func (x *WatcherConfig) String() string {
 func (*WatcherConfig) ProtoMessage() {}
 
 func (x *WatcherConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1473,7 +1590,7 @@ func (x *WatcherConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatcherConfig.ProtoReflect.Descriptor instead.
 func (*WatcherConfig) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *WatcherConfig) GetId() string {
@@ -1523,7 +1640,7 @@ type ResourceRef struct {
 
 func (x *ResourceRef) Reset() {
 	*x = ResourceRef{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1535,7 +1652,7 @@ func (x *ResourceRef) String() string {
 func (*ResourceRef) ProtoMessage() {}
 
 func (x *ResourceRef) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1548,7 +1665,7 @@ func (x *ResourceRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceRef.ProtoReflect.Descriptor instead.
 func (*ResourceRef) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{15}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ResourceRef) GetGroup() string {
@@ -1584,7 +1701,7 @@ type MetricScrapeConfig struct {
 
 func (x *MetricScrapeConfig) Reset() {
 	*x = MetricScrapeConfig{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1596,7 +1713,7 @@ func (x *MetricScrapeConfig) String() string {
 func (*MetricScrapeConfig) ProtoMessage() {}
 
 func (x *MetricScrapeConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1609,7 +1726,7 @@ func (x *MetricScrapeConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricScrapeConfig.ProtoReflect.Descriptor instead.
 func (*MetricScrapeConfig) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{16}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *MetricScrapeConfig) GetId() string {
@@ -1662,7 +1779,7 @@ type ResourceQuery struct {
 
 func (x *ResourceQuery) Reset() {
 	*x = ResourceQuery{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1674,7 +1791,7 @@ func (x *ResourceQuery) String() string {
 func (*ResourceQuery) ProtoMessage() {}
 
 func (x *ResourceQuery) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1687,7 +1804,7 @@ func (x *ResourceQuery) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceQuery.ProtoReflect.Descriptor instead.
 func (*ResourceQuery) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{17}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ResourceQuery) GetQueryId() string {
@@ -1796,7 +1913,7 @@ type ResourceQueryResult struct {
 
 func (x *ResourceQueryResult) Reset() {
 	*x = ResourceQueryResult{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1808,7 +1925,7 @@ func (x *ResourceQueryResult) String() string {
 func (*ResourceQueryResult) ProtoMessage() {}
 
 func (x *ResourceQueryResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1821,7 +1938,7 @@ func (x *ResourceQueryResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceQueryResult.ProtoReflect.Descriptor instead.
 func (*ResourceQueryResult) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{18}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ResourceQueryResult) GetQueryId() string {
@@ -1876,7 +1993,7 @@ type QueryError struct {
 
 func (x *QueryError) Reset() {
 	*x = QueryError{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[19]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1888,7 +2005,7 @@ func (x *QueryError) String() string {
 func (*QueryError) ProtoMessage() {}
 
 func (x *QueryError) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[19]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1901,7 +2018,7 @@ func (x *QueryError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryError.ProtoReflect.Descriptor instead.
 func (*QueryError) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{19}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *QueryError) GetCode() QueryErrorCode {
@@ -1952,7 +2069,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\ametrics\x18\x03 \x01(\bR\ametrics\"f\n" +
 	"\tHeartbeat\x12*\n" +
 	"\x11timestamp_unix_ms\x18\x01 \x01(\x03R\x0ftimestampUnixMs\x12-\n" +
-	"\x06health\x18\x02 \x01(\v2\x15.agent.v1.AgentHealthR\x06health\"\x9b\x02\n" +
+	"\x06health\x18\x02 \x01(\v2\x15.agent.v1.AgentHealthR\x06health\"\xe0\x02\n" +
 	"\vAgentHealth\x12\x1f\n" +
 	"\vqueue_depth\x18\x01 \x01(\x03R\n" +
 	"queueDepth\x12)\n" +
@@ -1961,7 +2078,16 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x0ftruncated_lines\x18\x04 \x01(\x03R\x0etruncatedLines\x12&\n" +
 	"\x0fdropped_too_old\x18\x05 \x01(\x03R\rdroppedTooOld\x12%\n" +
 	"\x0edropped_future\x18\x06 \x01(\x03R\rdroppedFuture\x120\n" +
-	"\x14dropped_rate_limited\x18\a \x01(\x03R\x12droppedRateLimited\"\x84\x03\n" +
+	"\x14dropped_rate_limited\x18\a \x01(\x03R\x12droppedRateLimited\x12C\n" +
+	"\x0escrape_targets\x18\b \x03(\v2\x1c.agent.v1.ScrapeTargetHealthR\rscrapeTargets\"\x9e\x02\n" +
+	"\x12ScrapeTargetHealth\x12\x12\n" +
+	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x14\n" +
+	"\x05state\x18\x02 \x01(\tR\x05state\x12#\n" +
+	"\rtargets_total\x18\x03 \x01(\x05R\ftargetsTotal\x12'\n" +
+	"\x0ftargets_failing\x18\x04 \x01(\x05R\x0etargetsFailing\x12/\n" +
+	"\x14last_success_unix_ms\x18\x05 \x01(\x03R\x11lastSuccessUnixMs\x12.\n" +
+	"\x13samples_last_scrape\x18\x06 \x01(\x03R\x11samplesLastScrape\x12/\n" +
+	"\x13dropped_cardinality\x18\a \x01(\x03R\x12droppedCardinality\"\x84\x03\n" +
 	"\x0eGatewayMessage\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x12;\n" +
@@ -2096,7 +2222,7 @@ func file_proto_agent_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(QueryVerb)(0),                 // 0: agent.v1.QueryVerb
 	(QueryView)(0),                 // 1: agent.v1.QueryView
@@ -2106,71 +2232,73 @@ var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*AgentCapabilities)(nil),      // 5: agent.v1.AgentCapabilities
 	(*Heartbeat)(nil),              // 6: agent.v1.Heartbeat
 	(*AgentHealth)(nil),            // 7: agent.v1.AgentHealth
-	(*GatewayMessage)(nil),         // 8: agent.v1.GatewayMessage
-	(*HandshakeResponse)(nil),      // 9: agent.v1.HandshakeResponse
-	(*Ack)(nil),                    // 10: agent.v1.Ack
-	(*BackpressureSignal)(nil),     // 11: agent.v1.BackpressureSignal
-	(*Shutdown)(nil),               // 12: agent.v1.Shutdown
-	(*ConfigUpdate)(nil),           // 13: agent.v1.ConfigUpdate
-	(*ConfigSnapshot)(nil),         // 14: agent.v1.ConfigSnapshot
-	(*IngestRules)(nil),            // 15: agent.v1.IngestRules
-	(*LogCollectorConfig)(nil),     // 16: agent.v1.LogCollectorConfig
-	(*WatcherConfig)(nil),          // 17: agent.v1.WatcherConfig
-	(*ResourceRef)(nil),            // 18: agent.v1.ResourceRef
-	(*MetricScrapeConfig)(nil),     // 19: agent.v1.MetricScrapeConfig
-	(*ResourceQuery)(nil),          // 20: agent.v1.ResourceQuery
-	(*ResourceQueryResult)(nil),    // 21: agent.v1.ResourceQueryResult
-	(*QueryError)(nil),             // 22: agent.v1.QueryError
-	nil,                            // 23: agent.v1.MetricScrapeConfig.ExtraLabelsEntry
-	(*v1.AgentMetadata)(nil),       // 24: common.v1.AgentMetadata
-	(*LogBatch)(nil),               // 25: agent.v1.LogBatch
-	(*StateEvent)(nil),             // 26: agent.v1.StateEvent
-	(*MetricBatch)(nil),            // 27: agent.v1.MetricBatch
-	(*MetricsEvent)(nil),           // 28: agent.v1.MetricsEvent
-	(*PrometheusMetricsEvent)(nil), // 29: agent.v1.PrometheusMetricsEvent
-	(*ResourceCatalog)(nil),        // 30: agent.v1.ResourceCatalog
-	(ResourceKind)(0),              // 31: agent.v1.ResourceKind
+	(*ScrapeTargetHealth)(nil),     // 8: agent.v1.ScrapeTargetHealth
+	(*GatewayMessage)(nil),         // 9: agent.v1.GatewayMessage
+	(*HandshakeResponse)(nil),      // 10: agent.v1.HandshakeResponse
+	(*Ack)(nil),                    // 11: agent.v1.Ack
+	(*BackpressureSignal)(nil),     // 12: agent.v1.BackpressureSignal
+	(*Shutdown)(nil),               // 13: agent.v1.Shutdown
+	(*ConfigUpdate)(nil),           // 14: agent.v1.ConfigUpdate
+	(*ConfigSnapshot)(nil),         // 15: agent.v1.ConfigSnapshot
+	(*IngestRules)(nil),            // 16: agent.v1.IngestRules
+	(*LogCollectorConfig)(nil),     // 17: agent.v1.LogCollectorConfig
+	(*WatcherConfig)(nil),          // 18: agent.v1.WatcherConfig
+	(*ResourceRef)(nil),            // 19: agent.v1.ResourceRef
+	(*MetricScrapeConfig)(nil),     // 20: agent.v1.MetricScrapeConfig
+	(*ResourceQuery)(nil),          // 21: agent.v1.ResourceQuery
+	(*ResourceQueryResult)(nil),    // 22: agent.v1.ResourceQueryResult
+	(*QueryError)(nil),             // 23: agent.v1.QueryError
+	nil,                            // 24: agent.v1.MetricScrapeConfig.ExtraLabelsEntry
+	(*v1.AgentMetadata)(nil),       // 25: common.v1.AgentMetadata
+	(*LogBatch)(nil),               // 26: agent.v1.LogBatch
+	(*StateEvent)(nil),             // 27: agent.v1.StateEvent
+	(*MetricBatch)(nil),            // 28: agent.v1.MetricBatch
+	(*MetricsEvent)(nil),           // 29: agent.v1.MetricsEvent
+	(*PrometheusMetricsEvent)(nil), // 30: agent.v1.PrometheusMetricsEvent
+	(*ResourceCatalog)(nil),        // 31: agent.v1.ResourceCatalog
+	(ResourceKind)(0),              // 32: agent.v1.ResourceKind
 }
 var file_proto_agent_v1_agent_proto_depIdxs = []int32{
-	24, // 0: agent.v1.AgentMessage.meta:type_name -> common.v1.AgentMetadata
+	25, // 0: agent.v1.AgentMessage.meta:type_name -> common.v1.AgentMetadata
 	4,  // 1: agent.v1.AgentMessage.handshake:type_name -> agent.v1.HandshakeRequest
-	25, // 2: agent.v1.AgentMessage.logs:type_name -> agent.v1.LogBatch
-	26, // 3: agent.v1.AgentMessage.state:type_name -> agent.v1.StateEvent
-	27, // 4: agent.v1.AgentMessage.metrics:type_name -> agent.v1.MetricBatch
+	26, // 2: agent.v1.AgentMessage.logs:type_name -> agent.v1.LogBatch
+	27, // 3: agent.v1.AgentMessage.state:type_name -> agent.v1.StateEvent
+	28, // 4: agent.v1.AgentMessage.metrics:type_name -> agent.v1.MetricBatch
 	6,  // 5: agent.v1.AgentMessage.heartbeat:type_name -> agent.v1.Heartbeat
-	28, // 6: agent.v1.AgentMessage.kube_metrics:type_name -> agent.v1.MetricsEvent
-	29, // 7: agent.v1.AgentMessage.prometheus_metrics:type_name -> agent.v1.PrometheusMetricsEvent
-	30, // 8: agent.v1.AgentMessage.catalog:type_name -> agent.v1.ResourceCatalog
-	21, // 9: agent.v1.AgentMessage.resource_query_result:type_name -> agent.v1.ResourceQueryResult
+	29, // 6: agent.v1.AgentMessage.kube_metrics:type_name -> agent.v1.MetricsEvent
+	30, // 7: agent.v1.AgentMessage.prometheus_metrics:type_name -> agent.v1.PrometheusMetricsEvent
+	31, // 8: agent.v1.AgentMessage.catalog:type_name -> agent.v1.ResourceCatalog
+	22, // 9: agent.v1.AgentMessage.resource_query_result:type_name -> agent.v1.ResourceQueryResult
 	5,  // 10: agent.v1.HandshakeRequest.caps:type_name -> agent.v1.AgentCapabilities
 	7,  // 11: agent.v1.Heartbeat.health:type_name -> agent.v1.AgentHealth
-	9,  // 12: agent.v1.GatewayMessage.handshake:type_name -> agent.v1.HandshakeResponse
-	10, // 13: agent.v1.GatewayMessage.ack:type_name -> agent.v1.Ack
-	13, // 14: agent.v1.GatewayMessage.config:type_name -> agent.v1.ConfigUpdate
-	11, // 15: agent.v1.GatewayMessage.backpressure:type_name -> agent.v1.BackpressureSignal
-	12, // 16: agent.v1.GatewayMessage.shutdown:type_name -> agent.v1.Shutdown
-	20, // 17: agent.v1.GatewayMessage.resource_query:type_name -> agent.v1.ResourceQuery
-	14, // 18: agent.v1.HandshakeResponse.config:type_name -> agent.v1.ConfigSnapshot
-	14, // 19: agent.v1.ConfigUpdate.config:type_name -> agent.v1.ConfigSnapshot
-	16, // 20: agent.v1.ConfigSnapshot.log_collectors:type_name -> agent.v1.LogCollectorConfig
-	17, // 21: agent.v1.ConfigSnapshot.watchers:type_name -> agent.v1.WatcherConfig
-	19, // 22: agent.v1.ConfigSnapshot.metric_scrapers:type_name -> agent.v1.MetricScrapeConfig
-	15, // 23: agent.v1.ConfigSnapshot.ingest_rules:type_name -> agent.v1.IngestRules
-	31, // 24: agent.v1.WatcherConfig.kinds:type_name -> agent.v1.ResourceKind
-	18, // 25: agent.v1.WatcherConfig.resources:type_name -> agent.v1.ResourceRef
-	23, // 26: agent.v1.MetricScrapeConfig.extra_labels:type_name -> agent.v1.MetricScrapeConfig.ExtraLabelsEntry
-	18, // 27: agent.v1.ResourceQuery.ref:type_name -> agent.v1.ResourceRef
-	0,  // 28: agent.v1.ResourceQuery.verb:type_name -> agent.v1.QueryVerb
-	1,  // 29: agent.v1.ResourceQuery.view:type_name -> agent.v1.QueryView
-	22, // 30: agent.v1.ResourceQueryResult.error:type_name -> agent.v1.QueryError
-	2,  // 31: agent.v1.QueryError.code:type_name -> agent.v1.QueryErrorCode
-	3,  // 32: agent.v1.AgentService.Connect:input_type -> agent.v1.AgentMessage
-	8,  // 33: agent.v1.AgentService.Connect:output_type -> agent.v1.GatewayMessage
-	33, // [33:34] is the sub-list for method output_type
-	32, // [32:33] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	8,  // 12: agent.v1.AgentHealth.scrape_targets:type_name -> agent.v1.ScrapeTargetHealth
+	10, // 13: agent.v1.GatewayMessage.handshake:type_name -> agent.v1.HandshakeResponse
+	11, // 14: agent.v1.GatewayMessage.ack:type_name -> agent.v1.Ack
+	14, // 15: agent.v1.GatewayMessage.config:type_name -> agent.v1.ConfigUpdate
+	12, // 16: agent.v1.GatewayMessage.backpressure:type_name -> agent.v1.BackpressureSignal
+	13, // 17: agent.v1.GatewayMessage.shutdown:type_name -> agent.v1.Shutdown
+	21, // 18: agent.v1.GatewayMessage.resource_query:type_name -> agent.v1.ResourceQuery
+	15, // 19: agent.v1.HandshakeResponse.config:type_name -> agent.v1.ConfigSnapshot
+	15, // 20: agent.v1.ConfigUpdate.config:type_name -> agent.v1.ConfigSnapshot
+	17, // 21: agent.v1.ConfigSnapshot.log_collectors:type_name -> agent.v1.LogCollectorConfig
+	18, // 22: agent.v1.ConfigSnapshot.watchers:type_name -> agent.v1.WatcherConfig
+	20, // 23: agent.v1.ConfigSnapshot.metric_scrapers:type_name -> agent.v1.MetricScrapeConfig
+	16, // 24: agent.v1.ConfigSnapshot.ingest_rules:type_name -> agent.v1.IngestRules
+	32, // 25: agent.v1.WatcherConfig.kinds:type_name -> agent.v1.ResourceKind
+	19, // 26: agent.v1.WatcherConfig.resources:type_name -> agent.v1.ResourceRef
+	24, // 27: agent.v1.MetricScrapeConfig.extra_labels:type_name -> agent.v1.MetricScrapeConfig.ExtraLabelsEntry
+	19, // 28: agent.v1.ResourceQuery.ref:type_name -> agent.v1.ResourceRef
+	0,  // 29: agent.v1.ResourceQuery.verb:type_name -> agent.v1.QueryVerb
+	1,  // 30: agent.v1.ResourceQuery.view:type_name -> agent.v1.QueryView
+	23, // 31: agent.v1.ResourceQueryResult.error:type_name -> agent.v1.QueryError
+	2,  // 32: agent.v1.QueryError.code:type_name -> agent.v1.QueryErrorCode
+	3,  // 33: agent.v1.AgentService.Connect:input_type -> agent.v1.AgentMessage
+	9,  // 34: agent.v1.AgentService.Connect:output_type -> agent.v1.GatewayMessage
+	34, // [34:35] is the sub-list for method output_type
+	33, // [33:34] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_agent_proto_init() }
@@ -2193,7 +2321,7 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*AgentMessage_Catalog)(nil),
 		(*AgentMessage_ResourceQueryResult)(nil),
 	}
-	file_proto_agent_v1_agent_proto_msgTypes[5].OneofWrappers = []any{
+	file_proto_agent_v1_agent_proto_msgTypes[6].OneofWrappers = []any{
 		(*GatewayMessage_Handshake)(nil),
 		(*GatewayMessage_Ack)(nil),
 		(*GatewayMessage_Config)(nil),
@@ -2207,7 +2335,7 @@ func file_proto_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_v1_agent_proto_rawDesc), len(file_proto_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   21,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
