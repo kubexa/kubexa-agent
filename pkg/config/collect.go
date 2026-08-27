@@ -15,6 +15,17 @@ import (
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
 
+// DefaultScrapeInterval and DefaultScrapeTimeout are the values a scrape
+// target gets when its configuration omits them. They live here, not only
+// in the collector, because validation has to compare the EFFECTIVE values:
+// a config that sets only `interval: 5s` is refused for a timeout it never
+// wrote, and it can only be refused by a check that knows what the timeout
+// will become.
+const (
+	DefaultScrapeInterval = 30 * time.Second
+	DefaultScrapeTimeout  = 10 * time.Second
+)
+
 // Normalize fills default collection rules and assigns rule IDs where missing.
 func (c *Config) Normalize() {
 	if c == nil {
@@ -204,8 +215,27 @@ func (e *MetricEndpointConfig) validate(index int) []string {
 	if e.Timeout < 0 {
 		violations = append(violations, prefix+".timeout must not be negative")
 	}
-	if e.Timeout > 0 && e.Interval > 0 && e.Timeout >= e.Interval {
-		violations = append(violations, prefix+".timeout must be below interval")
+	// Compare EFFECTIVE values, not just what was written: ApplyDefaults fills
+	// a missing Interval with DefaultScrapeInterval and a missing Timeout with
+	// DefaultScrapeTimeout independently, so `interval: 5s` with no timeout
+	// passes a written-values-only check and then runs with a 10s timeout
+	// against a 5s interval -- exactly the invariant Timeout's doc comment
+	// warns about.
+	effectiveInterval := e.Interval
+	if effectiveInterval <= 0 {
+		effectiveInterval = DefaultScrapeInterval
+	}
+	effectiveTimeout := e.Timeout
+	if effectiveTimeout <= 0 {
+		effectiveTimeout = DefaultScrapeTimeout
+	}
+	if effectiveTimeout >= effectiveInterval {
+		note := ""
+		if e.Timeout <= 0 || e.Interval <= 0 {
+			note = fmt.Sprintf(" (effective timeout %s, effective interval %s; an unset field defaults to %s/%s)",
+				effectiveTimeout, effectiveInterval, DefaultScrapeTimeout, DefaultScrapeInterval)
+		}
+		violations = append(violations, prefix+".timeout must be below interval"+note)
 	}
 	violations = append(violations, validatePatterns(prefix+".metric_allowlist", e.MetricAllowlist)...)
 	violations = append(violations, validatePatterns(prefix+".metric_denylist", e.MetricDenylist)...)

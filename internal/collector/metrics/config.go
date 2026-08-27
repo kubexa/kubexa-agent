@@ -7,10 +7,15 @@ import (
 )
 
 const (
-	defaultPodInterval    = 30 * time.Second
-	defaultNodeInterval   = 30 * time.Second
-	defaultScrapeInterval = 30 * time.Second
-	defaultScrapeTimeout  = 10 * time.Second
+	defaultPodInterval  = 30 * time.Second
+	defaultNodeInterval = 30 * time.Second
+	// defaultScrapeInterval and defaultScrapeTimeout mirror pkg/config's
+	// exported defaults rather than restating the literals: validation there
+	// has to know the EFFECTIVE timeout/interval a config will run with, so
+	// the two packages share one source of truth instead of two literals
+	// that can drift apart.
+	defaultScrapeInterval = pkgconfig.DefaultScrapeInterval
+	defaultScrapeTimeout  = pkgconfig.DefaultScrapeTimeout
 	defaultWriteTimeout   = 100 * time.Millisecond
 )
 

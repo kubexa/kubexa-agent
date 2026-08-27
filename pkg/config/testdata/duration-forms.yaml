@@ -17,3 +17,4 @@ collect:
       - name: my-app
         url: http://my-app:8080/metrics
         interval: 500ms
+        timeout: 100ms
