@@ -42,7 +42,13 @@ type KindHealth struct {
 	TargetsFailing int
 	// LastSuccess is zero when this kind has never had a successful scrape,
 	// which is a different statement from "its last scrape failed".
-	LastSuccess       time.Time
+	LastSuccess time.Time
+	// SamplesLastScrape is the SUM over this kind's targets of what each one
+	// published on its own last scrape. Last-writer-wins would make forty
+	// cAdvisor nodes report whichever node finished last, so one node whose
+	// allowlist matches nothing would render the whole kind as zero while the
+	// other thirty-nine shipped thousands -- a measured nonzero displayed as
+	// a zero, which is the collapse this registry exists to prevent.
 	SamplesLastScrape int64
 	// DroppedCardinality is CUMULATIVE since process start, matching every
 	// other counter AgentHealth carries.
@@ -56,9 +62,12 @@ type kindState struct {
 	// actually down, and a single target's success would have to wipe the
 	// whole map -- erasing every other target's still-live failure along with
 	// it. Keyed by target, a success only ever removes its own entry.
-	failing            map[string]TargetState
-	lastSuccess        time.Time
-	samplesLastScrape  int64
+	failing     map[string]TargetState
+	lastSuccess time.Time
+	// samplesLastScrape is keyed by TARGET name for the same reason failing
+	// is: a kind-wide scalar is last-writer-wins across every target of the
+	// kind. Evicted by ClearTarget, symmetrically with failing.
+	samplesLastScrape  map[string]int64
 	droppedCardinality int64
 	notInstalled       bool
 }
@@ -77,7 +86,10 @@ func newScrapeHealth() *ScrapeHealth {
 func (h *ScrapeHealth) kind(name string) *kindState {
 	k, ok := h.kinds[name]
 	if !ok {
-		k = &kindState{failing: make(map[string]TargetState)}
+		k = &kindState{
+			failing:           make(map[string]TargetState),
+			samplesLastScrape: make(map[string]int64),
+		}
 		h.kinds[name] = k
 	}
 	return k
@@ -112,7 +124,7 @@ func (h *ScrapeHealth) RecordSuccess(kind, target string, samples int) {
 	k := h.kind(kind)
 	k.notInstalled = false
 	k.lastSuccess = h.now()
-	k.samplesLastScrape = int64(samples)
+	k.samplesLastScrape[target] = int64(samples)
 	delete(k.failing, target)
 }
 
@@ -125,6 +137,49 @@ func (h *ScrapeHealth) RecordFailure(kind, target string, err error) {
 	defer h.mu.Unlock()
 	k := h.kind(kind)
 	k.failing[target] = classifyScrapeError(err)
+}
+
+// discoveryTarget is the map key a kind's DISCOVERY failure is recorded
+// under. It is not a scrape target and never reaches the wire: the registry
+// publishes only len(failing), never its keys. The NUL byte keeps it out of
+// collision range of any real target name, which is a node name or a
+// configured endpoint name.
+const discoveryTarget = "\x00discovery"
+
+// RecordDiscoveryFailure records that the agent could not work out which
+// targets of this kind exist -- a failed node LIST, a failed presence probe.
+//
+// It is deliberately not RecordFailure: the classification there describes
+// how a SCRAPE failed, and a kind whose discovery is broken has not scraped
+// anything. StateFailing is the honest answer -- the kubelets may be perfectly
+// reachable; it is the agent's view of them that is broken. Reporting the kind
+// as absent instead is what this whole registry exists to prevent: an agent
+// whose ClusterRole is too narrow would emit no entry at all, and the screen
+// would read a totally broken integration as "this agent does not report
+// scrape health".
+func (h *ScrapeHealth) RecordDiscoveryFailure(kind string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.kind(kind).failing[discoveryTarget] = StateFailing
+}
+
+// ClearDiscoveryFailure removes a standing discovery failure for kind. A
+// discovery that starts working again must stop being reported: nothing else
+// would ever clear this entry, because no scrape is ever attributed to it.
+func (h *ScrapeHealth) ClearDiscoveryFailure(kind string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	k, ok := h.kinds[kind]
+	if !ok {
+		return
+	}
+	delete(k.failing, discoveryTarget)
 }
 
 // RecordCardinalityDrop adds to this kind's cumulative dropped-sample total.
@@ -151,6 +206,11 @@ func (h *ScrapeHealth) MarkNotInstalled(kind string) {
 	k.notInstalled = true
 	k.total = 0
 	k.failing = make(map[string]TargetState)
+	// The figures belong to the installation that is now gone. Left standing
+	// they read on the screen as "not installed" next to a sample count and a
+	// success timestamp, which describes no state that ever existed.
+	k.samplesLastScrape = make(map[string]int64)
+	k.lastSuccess = time.Time{}
 }
 
 // MarkInstalled clears kind's absence determination and touches nothing else
@@ -199,6 +259,7 @@ func (h *ScrapeHealth) ClearTarget(kind, target string) {
 		return
 	}
 	delete(k.failing, target)
+	delete(k.samplesLastScrape, target)
 }
 
 // Snapshot returns one entry per kind, ordered by kind so two consecutive
@@ -212,12 +273,16 @@ func (h *ScrapeHealth) Snapshot() []KindHealth {
 
 	out := make([]KindHealth, 0, len(h.kinds))
 	for name, k := range h.kinds {
+		samples := int64(0)
+		for _, n := range k.samplesLastScrape {
+			samples += n
+		}
 		entry := KindHealth{
 			Kind:               name,
 			TargetsTotal:       k.total,
 			TargetsFailing:     len(k.failing),
 			LastSuccess:        k.lastSuccess,
-			SamplesLastScrape:  k.samplesLastScrape,
+			SamplesLastScrape:  samples,
 			DroppedCardinality: k.droppedCardinality,
 		}
 		switch {

@@ -56,8 +56,14 @@ func TestTargetsForNodesBuildsOneTargetPerNode(t *testing.T) {
 	if got[0].Labels["node"] != "worker-1" {
 		t.Errorf("Labels = %v, want node=worker-1", got[0].Labels)
 	}
-	if got[0].Labels["scrape_kind"] != "cadvisor" {
+	if got[0].Labels[ScrapeKindLabel] != KindCAdvisor {
 		t.Errorf("Labels = %v, want scrape_kind=cadvisor", got[0].Labels)
+	}
+	// The label travels onto every sample so the consumer can tell a cAdvisor
+	// series apart; the Kind FIELD is what health aggregation reads. Both have
+	// to be set, and only the field is authoritative.
+	if got[0].Kind != KindCAdvisor {
+		t.Errorf("Kind = %q, want %q", got[0].Kind, KindCAdvisor)
 	}
 	if got[0].BearerTokenPath != templ().BearerTokenPath {
 		t.Errorf("BearerTokenPath = %q", got[0].BearerTokenPath)
@@ -252,8 +258,9 @@ func TestStopDynamicTargetClearsTheFailureFromHealth(t *testing.T) {
 
 	target := ScrapeTarget{
 		Name:   "cadvisor/node-3",
+		Kind:   KindCAdvisor,
 		URL:    "https://10.0.0.3:10250/metrics/cadvisor",
-		Labels: map[string]string{"scrape_kind": "cadvisor"},
+		Labels: map[string]string{ScrapeKindLabel: KindCAdvisor},
 	}
 
 	c.health.SetTargetCount("cadvisor", 3)
@@ -282,5 +289,56 @@ func TestStopDynamicTargetClearsTheFailureFromHealth(t *testing.T) {
 	}
 	if _, running := c.dynamicCancel[targetIdentity(target)]; running {
 		t.Error("dynamicCancel entry for node-3 was not removed")
+	}
+}
+
+// TestHealthKindIgnoresAnOperatorWrittenScrapeKindLabel pins the identity fix.
+//
+// A custom endpoint's Labels are a verbatim copy of the operator's
+// extra_labels and nothing reserved the scrape_kind key, so
+// `extra_labels: {scrape_kind: cadvisor}` -- a plain chart value -- routed that
+// app's successes and failures into the cAdvisor row while Start had counted it
+// into custom. An unknown value was worse: a kind with targets_total 0 and
+// targets_failing 1, rendered as "1 / 0".
+func TestHealthKindIgnoresAnOperatorWrittenScrapeKindLabel(t *testing.T) {
+	hijack := ScrapeTarget{
+		Name:   "app",
+		Kind:   KindCustom,
+		URL:    "http://app.svc:8080/metrics",
+		Labels: map[string]string{ScrapeKindLabel: KindCAdvisor},
+	}
+	if got := healthKind(hijack); got != KindCustom {
+		t.Errorf("healthKind = %q, want %q: a label an operator writes must not decide identity",
+			got, KindCustom)
+	}
+
+	invented := ScrapeTarget{
+		Name:   "app",
+		Kind:   KindCustom,
+		URL:    "http://app.svc:8080/metrics",
+		Labels: map[string]string{ScrapeKindLabel: "myapp"},
+	}
+	// Start counts this endpoint into "custom". If the label decided, its
+	// failure would land on a "myapp" kind nobody counted into.
+	h := newScrapeHealth()
+	h.SetTargetCount(KindCustom, 1)
+	h.RecordFailure(healthKind(invented), targetLabel(invented), errors.New("HTTP 500"))
+
+	snap := byKind(h.Snapshot())
+	if len(snap) != 1 {
+		t.Fatalf("kinds = %v, want only %q", snap, KindCustom)
+	}
+	got := snap[KindCustom]
+	if got.TargetsFailing > got.TargetsTotal {
+		t.Fatalf("targets = %d/%d -- more failing than exist", got.TargetsFailing, got.TargetsTotal)
+	}
+}
+
+// A target with no Kind at all is a hand-written custom endpoint. Nothing in
+// production builds one, but the fallback is what keeps a missed assignment
+// from inventing an empty-named kind on the wire.
+func TestHealthKindFallsBackToCustom(t *testing.T) {
+	if got := healthKind(ScrapeTarget{Name: "a", URL: "http://a/m"}); got != KindCustom {
+		t.Errorf("healthKind = %q, want %q", got, KindCustom)
 	}
 }

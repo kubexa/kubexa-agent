@@ -92,6 +92,7 @@ func targetsForNodes(tpl TargetTemplate, nodes []k8s.NodeInfo) []ScrapeTarget {
 
 		out = append(out, ScrapeTarget{
 			Name:            fmt.Sprintf("%s/%s", tpl.NamePrefix, node.Name),
+			Kind:            tpl.Kind,
 			URL:             scheme + "://" + net.JoinHostPort(node.InternalIP, port) + tpl.Path,
 			Interval:        interval,
 			Timeout:         timeout,
@@ -105,14 +106,18 @@ func targetsForNodes(tpl TargetTemplate, nodes []k8s.NodeInfo) []ScrapeTarget {
 	return out
 }
 
-// healthKind reports which health row a target belongs to. Generated targets
-// carry their kind as a label; everything else is a hand-written custom
-// endpoint.
+// healthKind reports which health row a target belongs to.
+//
+// It reads the target's own Kind field, NOT its label map. Labels for a custom
+// endpoint are a verbatim copy of the operator's extra_labels and nothing
+// reserves any key in them, so reading identity out of there let a plain chart
+// value re-file one target's failures under another kind's row -- and produce
+// a kind with more failing targets than it has targets at all.
 func healthKind(target ScrapeTarget) string {
-	if kind := target.Labels["scrape_kind"]; kind != "" {
-		return kind
+	if target.Kind != "" {
+		return target.Kind
 	}
-	return "custom"
+	return KindCustom
 }
 
 // targetIdentity is what makes two generated targets the same target. The URL
