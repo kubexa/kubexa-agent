@@ -125,6 +125,9 @@ func (m *MetricsCollectConfig) normalize() {
 	if m.CAdvisor.Enabled {
 		m.CAdvisor.ApplyDefaults()
 	}
+	if m.KubeStateMetrics.Enabled {
+		m.KubeStateMetrics.ApplyDefaults()
+	}
 }
 
 func (r *MetricsNamespaceRule) normalize(index int) {
@@ -153,14 +156,15 @@ func (m *MetricsCollectConfig) validate() []string {
 	if m == nil || !m.Enabled {
 		return nil
 	}
-	// A cAdvisor-only configuration is a legitimate metrics source on its own
-	// (ConfigFromRoot's IsEnabled treats it the same way), so it must exempt
-	// this guard the same as a rule or a custom endpoint would -- otherwise an
-	// operator who enables only collect.metrics.cadvisor gets "must define
-	// rules and/or custom_endpoints" and cAdvisor's own violations, if any,
-	// never run.
-	if len(m.Rules) == 0 && len(m.CustomEndpoints) == 0 && !m.CAdvisor.Enabled {
-		return []string{"collect.metrics must define rules, custom_endpoints, and/or cadvisor when metrics collection is enabled"}
+	// A cAdvisor-only or kube-state-metrics-only configuration is a legitimate
+	// metrics source on its own (ConfigFromRoot's IsEnabled treats them the
+	// same way), so each must exempt this guard the same as a rule or a
+	// custom endpoint would -- otherwise an operator who enables only
+	// collect.metrics.cadvisor or collect.metrics.kube_state_metrics gets
+	// "must define rules and/or custom_endpoints" and that source's own
+	// violations, if any, never run.
+	if len(m.Rules) == 0 && len(m.CustomEndpoints) == 0 && !m.CAdvisor.Enabled && !m.KubeStateMetrics.Enabled {
+		return []string{"collect.metrics must define rules, custom_endpoints, cadvisor, and/or kube_state_metrics when metrics collection is enabled"}
 	}
 	var violations []string
 	seen := make(map[string]struct{}, len(m.Rules))
@@ -187,6 +191,7 @@ func (m *MetricsCollectConfig) validate() []string {
 		seenEndpoints[ep.Name] = struct{}{}
 	}
 	violations = append(violations, m.CAdvisor.validate()...)
+	violations = append(violations, m.KubeStateMetrics.validate()...)
 	return violations
 }
 
@@ -247,6 +252,68 @@ func (c *CAdvisorConfig) validate() []string {
 	}
 	violations = append(violations, validatePatterns(prefix+".metric_allowlist", c.MetricAllowlist)...)
 	violations = append(violations, validatePatterns(prefix+".metric_denylist", c.MetricDenylist)...)
+	return violations
+}
+
+// validate checks the kube-state-metrics block.
+//
+// Like CAdvisorConfig.validate and MetricEndpointConfig.validate above, this
+// compares EFFECTIVE timeout/interval values rather than the written ones: a
+// written `interval: 5s` with no timeout still runs against the 20s default,
+// and a three-term `Timeout > 0 && Interval > 0 && Timeout >= Interval` check
+// would silently pass exactly that broken case because it never fires when
+// either field is left at its zero value.
+func (k *KubeStateMetricsConfig) validate() []string {
+	if k == nil || !k.Enabled {
+		return nil
+	}
+	const prefix = "collect.metrics.kube_state_metrics"
+	var violations []string
+
+	if k.URL != "" {
+		parsed, err := url.Parse(k.URL)
+		switch {
+		case err != nil:
+			violations = append(violations, fmt.Sprintf("%s.url is not a valid URL: %v", prefix, err))
+		case parsed.Scheme != "http" && parsed.Scheme != "https":
+			violations = append(violations, prefix+".url must use http or https")
+		case parsed.Host == "":
+			violations = append(violations, prefix+".url must name a host")
+		}
+	}
+	if k.Port < 0 || k.Port > 65535 {
+		violations = append(violations, prefix+".port must be a TCP port number")
+	}
+	if k.Path != "" && !strings.HasPrefix(k.Path, "/") {
+		violations = append(violations, prefix+".path must start with /")
+	}
+	if k.Interval < 0 {
+		violations = append(violations, prefix+".interval must not be negative")
+	}
+	if k.Timeout < 0 {
+		violations = append(violations, prefix+".timeout must not be negative")
+	}
+	effectiveInterval := k.Interval
+	if effectiveInterval <= 0 {
+		effectiveInterval = DefaultScrapeInterval
+	}
+	effectiveTimeout := k.Timeout
+	if effectiveTimeout <= 0 {
+		effectiveTimeout = DefaultScrapeTimeout
+	}
+	if effectiveTimeout >= effectiveInterval {
+		note := ""
+		if k.Timeout <= 0 || k.Interval <= 0 {
+			note = fmt.Sprintf(" (effective timeout %s, effective interval %s; an unset field defaults to %s/%s)",
+				effectiveTimeout, effectiveInterval, DefaultScrapeTimeout, DefaultScrapeInterval)
+		}
+		violations = append(violations, prefix+".timeout must be below interval"+note)
+	}
+	if k.ProbeInterval < 0 {
+		violations = append(violations, prefix+".probe_interval must not be negative")
+	}
+	violations = append(violations, validatePatterns(prefix+".metric_allowlist", k.MetricAllowlist)...)
+	violations = append(violations, validatePatterns(prefix+".metric_denylist", k.MetricDenylist)...)
 	return violations
 }
 

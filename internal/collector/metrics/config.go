@@ -68,7 +68,25 @@ type Config struct {
 	// kept separate from CustomTargets because they are not stable across a
 	// process's life: their set changes as nodes join and leave.
 	DynamicTargets DynamicTargetsConfig
-	WriteTimeout   time.Duration
+	// KubeState is a single scrape target whose presence is probed rather than
+	// assumed. It is not a CustomTarget because a CustomTarget that cannot be
+	// reached reports as broken, and an absent kube-state-metrics is not
+	// broken -- it was never installed.
+	KubeState    KubeStateTarget
+	WriteTimeout time.Duration
+}
+
+// KubeStateTarget is the resolved kube-state-metrics scrape.
+type KubeStateTarget struct {
+	Enabled bool
+	// ProbeService is false when an explicit URL was configured: there is no
+	// Service to look for, so absence cannot be distinguished from
+	// unreachability and the honest report is the connection error.
+	ProbeService     bool
+	ServiceNamespace string
+	ServiceName      string
+	ProbeInterval    time.Duration
+	Target           ScrapeTarget
 }
 
 // DefaultConfig returns documented defaults for the metrics scraper.
@@ -142,6 +160,26 @@ func ConfigFromRoot(root *pkgconfig.Config) Config {
 			MetricDenylist:  append([]string(nil), ca.MetricDenylist...),
 		})
 	}
+	if mc.KubeStateMetrics.Enabled {
+		ks := mc.KubeStateMetrics
+		ks.ApplyDefaults()
+		cfg.KubeState = KubeStateTarget{
+			Enabled:          true,
+			ProbeService:     ks.URL == "",
+			ServiceNamespace: ks.ServiceNamespace,
+			ServiceName:      ks.ServiceName,
+			ProbeInterval:    ks.ProbeInterval,
+			Target: ScrapeTarget{
+				Name:            "kube-state-metrics",
+				URL:             ks.ResolvedURL(),
+				Interval:        ks.Interval,
+				Timeout:         ks.Timeout,
+				Labels:          map[string]string{"scrape_kind": "kube_state_metrics"},
+				MetricAllowlist: append([]string(nil), ks.MetricAllowlist...),
+				MetricDenylist:  append([]string(nil), ks.MetricDenylist...),
+			},
+		}
+	}
 	cfg.ApplyDefaults()
 	return cfg
 }
@@ -195,6 +233,14 @@ func (c *Config) ApplyDefaults() {
 			c.CustomTargets[i].Timeout = defaultScrapeTimeout
 		}
 	}
+	if c.KubeState.Enabled {
+		if c.KubeState.Target.Interval <= 0 {
+			c.KubeState.Target.Interval = defaultScrapeInterval
+		}
+		if c.KubeState.Target.Timeout <= 0 {
+			c.KubeState.Target.Timeout = defaultScrapeTimeout
+		}
+	}
 	if c.WriteTimeout <= 0 {
 		c.WriteTimeout = defaultWriteTimeout
 	}
@@ -207,7 +253,8 @@ func (c *Config) IsEnabled() bool {
 	}
 	return len(c.KubernetesMetrics.Rules) > 0 ||
 		len(c.CustomTargets) > 0 ||
-		len(c.DynamicTargets.Templates) > 0
+		len(c.DynamicTargets.Templates) > 0 ||
+		c.KubeState.Enabled
 }
 
 // HasKubeMetricsRules reports whether any Kubernetes Metrics API rules are configured.

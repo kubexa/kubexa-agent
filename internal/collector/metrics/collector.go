@@ -67,6 +67,11 @@ type Collector struct {
 
 	k8s    *k8sMetricsScraper
 	custom *customScraper
+	// kube is the raw client the kube-state-metrics presence probe uses. It is
+	// stored separately from k8s (the Metrics API scraper) because the probe
+	// is required whenever KubeState.ProbeService is set, independent of
+	// whether any Kubernetes Metrics API rule is configured at all.
+	kube k8s.Client
 
 	customFilters   map[string]*MetricFilter
 	customFiltersMu sync.RWMutex
@@ -107,6 +112,9 @@ func New(opts Options) (*Collector, error) {
 	if !cfg.IsEnabled() {
 		return nil, errors.New("metrics collection is disabled")
 	}
+	if cfg.KubeState.Enabled && cfg.KubeState.ProbeService && opts.Kube == nil {
+		return nil, errors.New("kubernetes client is required to probe for kube-state-metrics")
+	}
 
 	log := opts.Logger
 	if log == nil {
@@ -145,6 +153,7 @@ func New(opts Options) (*Collector, error) {
 		health:        newScrapeHealth(),
 		agentMeta:     proto.Clone(meta).(*commonv1.AgentMetadata),
 		customFilters: customFilters,
+		kube:          opts.Kube,
 		rng:           rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
@@ -152,7 +161,7 @@ func New(opts Options) (*Collector, error) {
 		c.k8s = newK8sMetricsScraper(opts.Kube, scraperMetrics)
 		c.k8s.setLogger(log)
 	}
-	if len(cfg.CustomTargets) > 0 {
+	if len(cfg.CustomTargets) > 0 || cfg.KubeState.Enabled || len(cfg.DynamicTargets.Templates) > 0 {
 		c.custom = newCustomScraper(scraperMetrics)
 		c.custom.setLogger(log)
 	}
@@ -162,10 +171,6 @@ func New(opts Options) (*Collector, error) {
 		}
 		c.dynamic = newDynamicProvider(opts.Kube, cfg.DynamicTargets, log)
 		c.dynamicCancel = make(map[string]context.CancelFunc)
-		if c.custom == nil {
-			c.custom = newCustomScraper(scraperMetrics)
-			c.custom.setLogger(log)
-		}
 	}
 	return c, nil
 }
@@ -225,6 +230,14 @@ func (c *Collector) Start(ctx context.Context) error {
 		go func() {
 			defer c.wg.Done()
 			c.runDynamicTargets(c.runCtx)
+		}()
+	}
+
+	if c.cfg.KubeState.Enabled {
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.runKubeStateTarget(c.runCtx)
 		}()
 	}
 

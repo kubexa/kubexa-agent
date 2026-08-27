@@ -476,15 +476,30 @@ func renderedPairs(t *testing.T) map[string]string {
 	return pairs
 }
 
+// blockFieldsByFoldedKey indexes a struct's yaml-bound fields by a
+// case- and underscore-insensitive form of their tag, so a chart block
+// segment (camelCase, e.g. "kubeStateMetrics") can find the agent field its
+// yaml tag names in snake_case ("kube_state_metrics"). Every intermediate
+// block name in the chart happened to be a single word until
+// kube_state_metrics, where the two spellings first actually differ.
+func blockFieldsByFoldedKey(t reflect.Type) map[string]reflect.Type {
+	folded := make(map[string]reflect.Type, t.NumField())
+	for key, field := range fieldsByYAMLKey(t) {
+		folded[strings.ToLower(strings.ReplaceAll(key, "_", ""))] = field
+	}
+	return folded
+}
+
 // agentField resolves the struct field behind a rendered pair. Every segment
-// of the values path but the last names a block, spelled the same on both
-// sides; the last is the chart's spelling, and the agent key the template
-// rendered is what indexes the struct.
+// of the values path but the last names a block, folded the same way a leaf
+// key is (case- and underscore-insensitive) so camelCase on the chart side
+// matches snake_case on the agent side; the last is the chart's spelling, and
+// the agent key the template rendered is what indexes the struct.
 func agentField(path, key string) (reflect.Type, bool) {
 	segments := strings.Split(path, ".")
 	cur := reflect.TypeOf(config.Config{})
 	for _, segment := range segments[:len(segments)-1] {
-		next, ok := fieldsByYAMLKey(cur)[segment]
+		next, ok := blockFieldsByFoldedKey(cur)[strings.ToLower(segment)]
 		if !ok {
 			return nil, false
 		}

@@ -156,6 +156,10 @@ type MetricsCollectConfig struct {
 	// not written here: the agent is a single-replica Deployment and a static
 	// endpoint list cannot follow nodes joining and leaving.
 	CAdvisor CAdvisorConfig `yaml:"cadvisor,omitempty"`
+	// KubeStateMetrics scrapes a kube-state-metrics deployment for object
+	// state: replica counts, pod phase, restarts, PVC state, HPA and job
+	// status. None of it is in the Metrics API.
+	KubeStateMetrics KubeStateMetricsConfig `yaml:"kube_state_metrics,omitempty"`
 }
 
 // CAdvisorConfig configures per-node kubelet scraping.
@@ -241,6 +245,99 @@ func (c *CAdvisorConfig) ApplyDefaults() {
 	if len(c.MetricAllowlist) == 0 {
 		c.MetricAllowlist = DefaultCAdvisorAllowlist()
 	}
+}
+
+// KubeStateMetricsConfig configures the kube-state-metrics scrape.
+type KubeStateMetricsConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// URL scrapes an explicit address. Leave empty to use ServiceNamespace,
+	// ServiceName and Port, which is also what the presence probe checks --
+	// an explicit URL disables the probe, because the agent then has no
+	// Service to look for.
+	URL              string `yaml:"url,omitempty"`
+	ServiceNamespace string `yaml:"service_namespace,omitempty"`
+	ServiceName      string `yaml:"service_name,omitempty"`
+	Port             int32  `yaml:"port,omitempty"`
+	Path             string `yaml:"path,omitempty"`
+
+	Interval time.Duration `yaml:"interval,omitempty"`
+	Timeout  time.Duration `yaml:"timeout,omitempty"`
+	// ProbeInterval is how often absence is re-checked. A cluster that
+	// installs kube-state-metrics after the agent must start being scraped
+	// without an agent restart.
+	ProbeInterval time.Duration `yaml:"probe_interval,omitempty"`
+
+	MetricAllowlist []string `yaml:"metric_allowlist,omitempty"`
+	MetricDenylist  []string `yaml:"metric_denylist,omitempty"`
+}
+
+// DefaultKubeStateAllowlist is the closed set this product reads.
+// kube-state-metrics exposes several hundred families; admitting all of them
+// costs more series than cAdvisor does.
+func DefaultKubeStateAllowlist() []string {
+	return []string{
+		"^kube_pod_status_phase$",
+		"^kube_pod_container_status_restarts_total$",
+		"^kube_pod_container_status_waiting_reason$",
+		"^kube_pod_container_resource_requests$",
+		"^kube_pod_container_resource_limits$",
+		"^kube_deployment_status_replicas$",
+		"^kube_deployment_status_replicas_available$",
+		"^kube_deployment_spec_replicas$",
+		"^kube_statefulset_status_replicas_ready$",
+		"^kube_daemonset_status_number_ready$",
+		"^kube_daemonset_status_desired_number_scheduled$",
+		"^kube_job_status_failed$",
+		"^kube_job_status_succeeded$",
+		"^kube_persistentvolumeclaim_status_phase$",
+		"^kube_horizontalpodautoscaler_status_current_replicas$",
+		"^kube_horizontalpodautoscaler_spec_max_replicas$",
+		"^kube_node_status_condition$",
+		"^kube_node_status_allocatable$",
+		"^kube_node_status_capacity$",
+	}
+}
+
+// ApplyDefaults fills the zero values a kube-state-metrics block leaves unset.
+func (k *KubeStateMetricsConfig) ApplyDefaults() {
+	if k == nil {
+		return
+	}
+	if k.ServiceNamespace == "" {
+		k.ServiceNamespace = "kube-system"
+	}
+	if k.ServiceName == "" {
+		k.ServiceName = "kube-state-metrics"
+	}
+	if k.Port <= 0 {
+		k.Port = 8080
+	}
+	if k.Path == "" {
+		k.Path = "/metrics"
+	}
+	if k.Interval <= 0 {
+		k.Interval = 60 * time.Second
+	}
+	if k.Timeout <= 0 {
+		k.Timeout = 20 * time.Second
+	}
+	if k.ProbeInterval <= 0 {
+		k.ProbeInterval = 5 * time.Minute
+	}
+	if len(k.MetricAllowlist) == 0 {
+		k.MetricAllowlist = DefaultKubeStateAllowlist()
+	}
+}
+
+// ResolvedURL is the address to scrape.
+func (k *KubeStateMetricsConfig) ResolvedURL() string {
+	if k == nil {
+		return ""
+	}
+	if k.URL != "" {
+		return k.URL
+	}
+	return fmt.Sprintf("http://%s.%s.svc:%d%s", k.ServiceName, k.ServiceNamespace, k.Port, k.Path)
 }
 
 // MetricsNamespaceRule defines Kubernetes Metrics API collection scoped by namespace and filters.
