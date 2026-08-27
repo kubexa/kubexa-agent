@@ -2,7 +2,10 @@ package config
 
 import (
 	"fmt"
+	"net/url"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +15,48 @@ import (
 	"github.com/kubexa/kubexa-agent/pkg/config/k8sresource"
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
+
+// DefaultScrapeInterval and DefaultScrapeTimeout are the values a scrape
+// target gets when its configuration omits them. They live here, not only
+// in the collector, because validation has to compare the EFFECTIVE values:
+// a config that sets only `interval: 5s` is refused for a timeout it never
+// wrote, and it can only be refused by a check that knows what the timeout
+// will become.
+const (
+	DefaultScrapeInterval = 30 * time.Second
+	DefaultScrapeTimeout  = 10 * time.Second
+)
+
+// DefaultKubeStateInterval and DefaultKubeStateTimeout are kube-state-metrics'
+// OWN defaults, and they are not the custom-endpoint ones above.
+//
+// KubeStateMetricsConfig.ApplyDefaults fills 60s/20s; validate used to fall
+// back to 30s/10s, so the two disagreed about what an unset field becomes.
+// Load happened to be safe because Normalize runs ApplyDefaults first, but
+// ValidateForTest bypasses Normalize -- and that is the entry point every
+// validation test uses. A test asserting "kube-state `interval: 15s` with no
+// timeout is refused" would have gone green while pinning the opposite of
+// what Load does. One constant per value, used in both places, is what stops
+// the two from drifting again.
+const (
+	DefaultKubeStateInterval = 60 * time.Second
+	DefaultKubeStateTimeout  = 20 * time.Second
+)
+
+// DefaultMaxSamplesPerScrape is what an OMITTED max_samples_per_scrape
+// becomes. cAdvisor is roughly 40 series per container under the default
+// allowlist, so 20,000 admits about 500 containers on one node's scrape --
+// far above any real node and far below a runaway.
+//
+// An explicit 0 is a different configuration and means "no cap"; see
+// MetricsCollectConfig.MaxSamplesPerScrape for why the field is a pointer.
+const DefaultMaxSamplesPerScrape = 20_000
+
+// ReservedScrapeKindLabel is the label the agent stamps on every sample to
+// name the source that produced it. It is agent-owned: custom_endpoints[]
+// .extra_labels is copied verbatim onto a target's samples, so an operator
+// writing this key would label their own app's series as cAdvisor's.
+const ReservedScrapeKindLabel = "scrape_kind"
 
 // Normalize fills default collection rules and assigns rule IDs where missing.
 func (c *Config) Normalize() {
@@ -108,6 +153,19 @@ func (m *MetricsCollectConfig) normalize() {
 	for i := range m.Rules {
 		m.Rules[i].normalize(i)
 	}
+	if m.CAdvisor.Enabled {
+		m.CAdvisor.ApplyDefaults()
+	}
+	if m.KubeStateMetrics.Enabled {
+		m.KubeStateMetrics.ApplyDefaults()
+	}
+	if m.Enabled && m.MaxSamplesPerScrape == nil {
+		// UNSET, not zero. An explicit 0 is the documented way to disable the
+		// cap and must survive normalize untouched; only an omitted key gets
+		// the default.
+		def := DefaultMaxSamplesPerScrape
+		m.MaxSamplesPerScrape = &def
+	}
 }
 
 func (r *MetricsNamespaceRule) normalize(index int) {
@@ -122,12 +180,29 @@ func (r *MetricsNamespaceRule) normalize(index int) {
 	}
 }
 
+// ValidateForTest exposes the collect validation pass to the package's
+// external tests. Load runs the same pass; this exists so a validation case
+// does not need a temp file and a full Load.
+func ValidateForTest(c *Config) []string {
+	if c == nil {
+		return nil
+	}
+	return c.Collect.Metrics.validate()
+}
+
 func (m *MetricsCollectConfig) validate() []string {
 	if m == nil || !m.Enabled {
 		return nil
 	}
-	if len(m.Rules) == 0 && len(m.CustomEndpoints) == 0 {
-		return []string{"collect.metrics must define rules and/or custom_endpoints when metrics collection is enabled"}
+	// A cAdvisor-only or kube-state-metrics-only configuration is a legitimate
+	// metrics source on its own (ConfigFromRoot's IsEnabled treats them the
+	// same way), so each must exempt this guard the same as a rule or a
+	// custom endpoint would -- otherwise an operator who enables only
+	// collect.metrics.cadvisor or collect.metrics.kube_state_metrics gets
+	// "must define rules and/or custom_endpoints" and that source's own
+	// violations, if any, never run.
+	if len(m.Rules) == 0 && len(m.CustomEndpoints) == 0 && !m.CAdvisor.Enabled && !m.KubeStateMetrics.Enabled {
+		return []string{"collect.metrics must define rules, custom_endpoints, cadvisor, and/or kube_state_metrics when metrics collection is enabled"}
 	}
 	var violations []string
 	seen := make(map[string]struct{}, len(m.Rules))
@@ -140,6 +215,255 @@ func (m *MetricsCollectConfig) validate() []string {
 			violations = append(violations, fmt.Sprintf("collect.metrics.rules[%d].id %q is duplicated", i, rule.ID))
 		}
 		seen[rule.ID] = struct{}{}
+	}
+	seenEndpoints := make(map[string]struct{}, len(m.CustomEndpoints))
+	for i, ep := range m.CustomEndpoints {
+		violations = append(violations, ep.validate(i)...)
+		if ep.Name == "" {
+			continue
+		}
+		if _, dup := seenEndpoints[ep.Name]; dup {
+			violations = append(violations,
+				fmt.Sprintf("collect.metrics.custom_endpoints[%d].name %q is duplicated", i, ep.Name))
+		}
+		seenEndpoints[ep.Name] = struct{}{}
+	}
+	violations = append(violations, m.CAdvisor.validate()...)
+	violations = append(violations, m.KubeStateMetrics.validate()...)
+	if m.MaxSamplesPerScrape != nil && *m.MaxSamplesPerScrape < 0 {
+		violations = append(violations,
+			"collect.metrics.max_samples_per_scrape must not be negative "+
+				"(omit the key for the default of "+strconv.Itoa(DefaultMaxSamplesPerScrape)+
+				", or set it to 0 to disable the cap)")
+	}
+	return violations
+}
+
+// validate checks the cAdvisor block. Load's path runs this after normalize,
+// so every defaulted field is already set there and a zero is an operator's
+// value -- but ValidateForTest (used by this package's own tests) calls
+// validate directly, without normalize first. So, like MetricEndpointConfig
+// above, this compares EFFECTIVE values rather than trusting Interval/Timeout
+// to already be defaulted: a written `interval: 5s` with no timeout must be
+// judged against the 10s the timeout will actually run with, not against its
+// own zero value.
+func (c *CAdvisorConfig) validate() []string {
+	if c == nil || !c.Enabled {
+		return nil
+	}
+	const prefix = "collect.metrics.cadvisor"
+	var violations []string
+
+	if c.Interval < 0 {
+		violations = append(violations, prefix+".interval must not be negative")
+	}
+	if c.Timeout < 0 {
+		violations = append(violations, prefix+".timeout must not be negative")
+	}
+	effectiveInterval := c.Interval
+	if effectiveInterval <= 0 {
+		effectiveInterval = DefaultScrapeInterval
+	}
+	effectiveTimeout := c.Timeout
+	if effectiveTimeout <= 0 {
+		effectiveTimeout = DefaultScrapeTimeout
+	}
+	if effectiveTimeout >= effectiveInterval {
+		// Unconditional, for the reason KubeStateMetricsConfig.validate spells
+		// out: Load runs Normalize first, so post-normalize both fields are
+		// already filled and a guarded note never reaches the operator who
+		// wrote only one of the two.
+		violations = append(violations, fmt.Sprintf(
+			"%s.timeout must be below interval (effective timeout %s, effective interval %s; "+
+				"an unset timeout defaults to %s and an unset interval to %s)",
+			prefix, effectiveTimeout, effectiveInterval,
+			DefaultScrapeTimeout, DefaultScrapeInterval))
+	}
+	if c.RefreshInterval < 0 {
+		violations = append(violations, prefix+".refresh_interval must not be negative")
+	}
+	if c.Scheme != "" && c.Scheme != "http" && c.Scheme != "https" {
+		violations = append(violations, prefix+".scheme must be http or https")
+	}
+	if c.Path != "" && !strings.HasPrefix(c.Path, "/") {
+		violations = append(violations, prefix+".path must start with /")
+	}
+	if c.Port != "" {
+		if port, err := strconv.Atoi(c.Port); err != nil || port < 1 || port > 65535 {
+			violations = append(violations, prefix+".port must be a TCP port number")
+		}
+	}
+	if c.TLS.InsecureSkipVerify && c.TLS.CAFile != "" {
+		violations = append(violations,
+			prefix+".tls sets both insecure_skip_verify and ca_file; the CA bundle would never be consulted")
+	}
+	violations = append(violations, validatePatterns(prefix+".metric_allowlist", c.MetricAllowlist)...)
+	violations = append(violations, validatePatterns(prefix+".metric_denylist", c.MetricDenylist)...)
+	return violations
+}
+
+// validate checks the kube-state-metrics block.
+//
+// Like CAdvisorConfig.validate and MetricEndpointConfig.validate above, this
+// compares EFFECTIVE timeout/interval values rather than the written ones: a
+// written `interval: 5s` with no timeout still runs against the 20s default,
+// and a three-term `Timeout > 0 && Interval > 0 && Timeout >= Interval` check
+// would silently pass exactly that broken case because it never fires when
+// either field is left at its zero value.
+func (k *KubeStateMetricsConfig) validate() []string {
+	if k == nil || !k.Enabled {
+		return nil
+	}
+	const prefix = "collect.metrics.kube_state_metrics"
+	var violations []string
+
+	if k.URL != "" {
+		parsed, err := url.Parse(k.URL)
+		switch {
+		case err != nil:
+			violations = append(violations, fmt.Sprintf("%s.url is not a valid URL: %v", prefix, err))
+		case parsed.Scheme != "http" && parsed.Scheme != "https":
+			violations = append(violations, prefix+".url must use http or https")
+		case parsed.Host == "":
+			violations = append(violations, prefix+".url must name a host")
+		}
+	}
+	if k.Port < 0 || k.Port > 65535 {
+		violations = append(violations, prefix+".port must be a TCP port number")
+	}
+	if k.Path != "" && !strings.HasPrefix(k.Path, "/") {
+		violations = append(violations, prefix+".path must start with /")
+	}
+	if k.Interval < 0 {
+		violations = append(violations, prefix+".interval must not be negative")
+	}
+	if k.Timeout < 0 {
+		violations = append(violations, prefix+".timeout must not be negative")
+	}
+	// kube-state-metrics' OWN defaults, not the custom-endpoint ones: its
+	// ApplyDefaults fills 60s/20s, and a validate that fell back to 30s/10s
+	// judged a config against a timeout it will never run with.
+	effectiveInterval := k.Interval
+	if effectiveInterval <= 0 {
+		effectiveInterval = DefaultKubeStateInterval
+	}
+	effectiveTimeout := k.Timeout
+	if effectiveTimeout <= 0 {
+		effectiveTimeout = DefaultKubeStateTimeout
+	}
+	if effectiveTimeout >= effectiveInterval {
+		// The note is UNCONDITIONAL. Load runs Normalize first, so by the time
+		// validate sees this config both fields are already filled in and the
+		// old `if k.Timeout <= 0` guard never fired -- the operator who wrote
+		// only `interval: 15s` was told a timeout they never wrote was wrong,
+		// with no hint where 20s came from.
+		violations = append(violations, fmt.Sprintf(
+			"%s.timeout must be below interval (effective timeout %s, effective interval %s; "+
+				"an unset timeout defaults to %s and an unset interval to %s)",
+			prefix, effectiveTimeout, effectiveInterval,
+			DefaultKubeStateTimeout, DefaultKubeStateInterval))
+	}
+	if k.ProbeInterval < 0 {
+		violations = append(violations, prefix+".probe_interval must not be negative")
+	}
+	violations = append(violations, validatePatterns(prefix+".metric_allowlist", k.MetricAllowlist)...)
+	violations = append(violations, validatePatterns(prefix+".metric_denylist", k.MetricDenylist)...)
+	return violations
+}
+
+// validate checks one custom scrape endpoint.
+//
+// The name is required and unique because it is the target's identity in every
+// place the target is reported: the scraper's own Prometheus labels, the
+// per-target filter map (collector.go's targetKey) and the scrape health the
+// heartbeat carries. Two targets sharing a name silently share one filter.
+func (e *MetricEndpointConfig) validate(index int) []string {
+	if e == nil {
+		return nil
+	}
+	prefix := fmt.Sprintf("collect.metrics.custom_endpoints[%d]", index)
+	var violations []string
+
+	if strings.TrimSpace(e.Name) == "" {
+		violations = append(violations, prefix+".name must be set")
+	}
+	switch {
+	case strings.TrimSpace(e.URL) == "":
+		violations = append(violations, prefix+".url must be set")
+	default:
+		parsed, err := url.Parse(e.URL)
+		switch {
+		case err != nil:
+			violations = append(violations, fmt.Sprintf("%s.url is not a valid URL: %v", prefix, err))
+		case parsed.Scheme != "http" && parsed.Scheme != "https":
+			violations = append(violations, prefix+".url must use http or https")
+		case parsed.Host == "":
+			violations = append(violations, prefix+".url must name a host")
+		}
+	}
+	if e.Interval < 0 {
+		violations = append(violations, prefix+".interval must not be negative")
+	}
+	if e.Timeout < 0 {
+		violations = append(violations, prefix+".timeout must not be negative")
+	}
+	// Compare EFFECTIVE values, not just what was written: ApplyDefaults fills
+	// a missing Interval with DefaultScrapeInterval and a missing Timeout with
+	// DefaultScrapeTimeout independently, so `interval: 5s` with no timeout
+	// passes a written-values-only check and then runs with a 10s timeout
+	// against a 5s interval -- exactly the invariant Timeout's doc comment
+	// warns about.
+	effectiveInterval := e.Interval
+	if effectiveInterval <= 0 {
+		effectiveInterval = DefaultScrapeInterval
+	}
+	effectiveTimeout := e.Timeout
+	if effectiveTimeout <= 0 {
+		effectiveTimeout = DefaultScrapeTimeout
+	}
+	if effectiveTimeout >= effectiveInterval {
+		// Unconditional, for the reason KubeStateMetricsConfig.validate spells
+		// out: Load runs Normalize first, so post-normalize both fields are
+		// already filled and a guarded note never reaches the operator who
+		// wrote only one of the two.
+		violations = append(violations, fmt.Sprintf(
+			"%s.timeout must be below interval (effective timeout %s, effective interval %s; "+
+				"an unset timeout defaults to %s and an unset interval to %s)",
+			prefix, effectiveTimeout, effectiveInterval,
+			DefaultScrapeTimeout, DefaultScrapeInterval))
+	}
+	// scrape_kind is agent-owned. It travels onto every sample so the platform
+	// can tell a cAdvisor series from a kube-state-metrics one, and the agent
+	// sets it from the target's own kind. An operator who writes it into
+	// extra_labels is mislabelling their own samples as another source's --
+	// and before the Kind field existed it also re-filed this endpoint's
+	// scrape health under whatever row they named. Refusing it at startup is
+	// what stops a stale shadow label that looks meaningful and is not.
+	if _, reserved := e.ExtraLabels[ReservedScrapeKindLabel]; reserved {
+		violations = append(violations, fmt.Sprintf(
+			"%s.extra_labels.%s is reserved: the agent sets it from the target's own scrape kind, "+
+				"and a value written here mislabels this endpoint's samples as another source's",
+			prefix, ReservedScrapeKindLabel))
+	}
+	violations = append(violations, validatePatterns(prefix+".metric_allowlist", e.MetricAllowlist)...)
+	violations = append(violations, validatePatterns(prefix+".metric_denylist", e.MetricDenylist)...)
+	if e.TLS.InsecureSkipVerify && e.TLS.CAFile != "" {
+		violations = append(violations,
+			prefix+".tls sets both insecure_skip_verify and ca_file; the CA bundle would never be consulted")
+	}
+	return violations
+}
+
+// validatePatterns compiles allow/deny patterns here so a bad expression is a
+// startup refusal with the offending index named, rather than a collector
+// construction error hours later with only the target name in it.
+func validatePatterns(prefix string, patterns []string) []string {
+	var violations []string
+	for i, p := range patterns {
+		if _, err := regexp.Compile(p); err != nil {
+			violations = append(violations,
+				fmt.Sprintf("%s[%d] is not a valid regular expression: %v", prefix, i, err))
+		}
 	}
 	return violations
 }
@@ -452,11 +776,11 @@ func (c *Config) ToProtoSnapshot() (*agentv1.ConfigSnapshot, error) {
 		})
 	}
 	return &agentv1.ConfigSnapshot{
-		LogCollectors:       logCollectors,
-		Watchers:            watchers,
-		MetricScrapers:      scrapers,
-		BatchSize:           int32(c.Buffer.BatchSize),
-		FlushIntervalMs:     int32(c.Buffer.FlushInterval / time.Millisecond),
+		LogCollectors:   logCollectors,
+		Watchers:        watchers,
+		MetricScrapers:  scrapers,
+		BatchSize:       int32(c.Buffer.BatchSize),
+		FlushIntervalMs: int32(c.Buffer.FlushInterval / time.Millisecond),
 	}, nil
 }
 

@@ -62,12 +62,23 @@ type Collector struct {
 	writer    Writer
 	log       *logger.Logger
 	metrics   *scraperMetrics
+	health    *ScrapeHealth
 	agentMeta *commonv1.AgentMetadata
 
 	k8s    *k8sMetricsScraper
 	custom *customScraper
+	// kube is the raw client the kube-state-metrics presence probe uses. It is
+	// stored separately from k8s (the Metrics API scraper) because the probe
+	// is required whenever KubeState.ProbeService is set, independent of
+	// whether any Kubernetes Metrics API rule is configured at all.
+	kube k8s.Client
 
-	customFilters map[string]*MetricFilter
+	customFilters   map[string]*MetricFilter
+	customFiltersMu sync.RWMutex
+
+	dynamic       *dynamicProvider
+	dynamicCancel map[string]context.CancelFunc
+	dynamicMu     sync.Mutex
 
 	runCtx context.Context
 	cancel context.CancelFunc
@@ -101,6 +112,9 @@ func New(opts Options) (*Collector, error) {
 	if !cfg.IsEnabled() {
 		return nil, errors.New("metrics collection is disabled")
 	}
+	if cfg.KubeState.Enabled && cfg.KubeState.ProbeService && opts.Kube == nil {
+		return nil, errors.New("kubernetes client is required to probe for kube-state-metrics")
+	}
 
 	log := opts.Logger
 	if log == nil {
@@ -127,14 +141,19 @@ func New(opts Options) (*Collector, error) {
 	if err != nil {
 		return nil, err
 	}
+	if customFilters == nil {
+		customFilters = make(map[string]*MetricFilter)
+	}
 
 	c := &Collector{
 		cfg:           cfg,
 		writer:        &queueWriter{q: opts.Queue, timeout: writeTimeout},
 		log:           log,
 		metrics:       scraperMetrics,
+		health:        newScrapeHealth(),
 		agentMeta:     proto.Clone(meta).(*commonv1.AgentMetadata),
 		customFilters: customFilters,
+		kube:          opts.Kube,
 		rng:           rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
@@ -142,9 +161,16 @@ func New(opts Options) (*Collector, error) {
 		c.k8s = newK8sMetricsScraper(opts.Kube, scraperMetrics)
 		c.k8s.setLogger(log)
 	}
-	if len(cfg.CustomTargets) > 0 {
+	if len(cfg.CustomTargets) > 0 || cfg.KubeState.Enabled || len(cfg.DynamicTargets.Templates) > 0 {
 		c.custom = newCustomScraper(scraperMetrics)
 		c.custom.setLogger(log)
+	}
+	if len(cfg.DynamicTargets.Templates) > 0 {
+		if opts.Kube == nil {
+			return nil, errors.New("kubernetes client is required when dynamic scrape targets are configured")
+		}
+		c.dynamic = newDynamicProvider(opts.Kube, cfg.DynamicTargets, log)
+		c.dynamicCancel = make(map[string]context.CancelFunc)
 	}
 	return c, nil
 }
@@ -152,6 +178,16 @@ func New(opts Options) (*Collector, error) {
 // Name returns the collector identifier.
 func (c *Collector) Name() string {
 	return componentName
+}
+
+// Health returns the collector's scrape health. The heartbeat reports it; it
+// is not derived from the Prometheus counters, which live on a listener
+// nothing outside the cluster reads.
+func (c *Collector) Health() *ScrapeHealth { return c.health }
+
+// ScrapeTargetHealth satisfies the heartbeat's ScrapeHealthSource.
+func (c *Collector) ScrapeTargetHealth() []*agentv1.ScrapeTargetHealth {
+	return HealthProto(c.health)
 }
 
 // Start launches scraper goroutines with independent tickers.
@@ -181,12 +217,53 @@ func (c *Collector) Start(ctx context.Context) error {
 		}
 	}
 
+	// Seed a health row for every CONFIGURED kind before any scraper or
+	// discovery goroutine runs.
+	//
+	// Without this, a kind only ever appears once something succeeds:
+	// SetTargetCount for the generated kinds sits behind a successful node
+	// LIST, and kube-state-metrics' behind a successful presence probe. An
+	// agent whose ClusterRole is stricter than this chart's -- 403 on `list
+	// nodes`, 403 on `get services` -- would then emit scrape_targets with no
+	// entry for either kind, and AgentHealth's own contract says an empty or
+	// absent list means "this agent does not report scrape health at all".
+	// A totally broken integration would render as an old agent, and it would
+	// blind precisely the operator whose RBAC is wrong.
+	//
+	// A seeded kind reads targets_total 0 with last_success_unix_ms 0, which
+	// the wire already documents as "never succeeded" -- not as a zero.
+	if len(c.cfg.CustomTargets) > 0 {
+		c.health.SetTargetCount(KindCustom, len(c.cfg.CustomTargets))
+	}
+	for _, tpl := range c.cfg.DynamicTargets.Templates {
+		c.health.SetTargetCount(tpl.Kind, 0)
+	}
+	if c.cfg.KubeState.Enabled {
+		c.health.SetTargetCount(healthKind(c.cfg.KubeState.Target), 0)
+	}
+
 	for _, target := range c.cfg.CustomTargets {
 		target := target
 		c.wg.Add(1)
 		go func() {
 			defer c.wg.Done()
 			c.runCustomTarget(c.runCtx, target)
+		}()
+	}
+
+	if c.dynamic != nil {
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.runDynamicTargets(c.runCtx)
+		}()
+	}
+
+	if c.cfg.KubeState.Enabled {
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.runKubeStateTarget(c.runCtx)
 		}()
 	}
 
@@ -303,7 +380,9 @@ func (c *Collector) runCustomTarget(ctx context.Context, target ScrapeTarget) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	c.customFiltersMu.RLock()
 	filter := c.customFilters[targetKey(target)]
+	c.customFiltersMu.RUnlock()
 	targetName := targetLabel(target)
 	backoff := time.Duration(0)
 
@@ -323,14 +402,26 @@ func (c *Collector) runCustomTarget(ctx context.Context, target ScrapeTarget) {
 		result, err := c.custom.ScrapeTarget(ctx, target, filter)
 		if err != nil {
 			backoff = nextBackoff(backoff)
+			c.health.RecordFailure(healthKind(target), targetName, err)
 			c.log.Warn("custom metrics scrape failed",
 				logger.F("target", targetName),
-				logger.F("url", target.URL),
+				logger.F("url", safeURL(target.URL)),
 				logger.F("error", err.Error()),
 				logger.F("backoff", backoff.String()),
 			)
 		} else {
 			backoff = 0
+			families, droppedSamples := applySampleBudget(result.Families, c.cfg.MaxSamplesPerScrape)
+			if droppedSamples > 0 {
+				c.health.RecordCardinalityDrop(healthKind(target), droppedSamples)
+				c.log.Warn("scrape exceeded the sample budget; whole families dropped",
+					logger.F("target", targetLabel(target)),
+					logger.F("budget", c.cfg.MaxSamplesPerScrape),
+					logger.F("dropped_samples", droppedSamples),
+				)
+			}
+			result.Families = families
+			c.health.RecordSuccess(healthKind(target), targetName, countSamples(result.Families))
 			if err := c.publishPrometheusMetrics(ctx, target, result); err != nil {
 				c.log.Warn("publish custom metrics failed",
 					logger.F("target", targetName),
@@ -344,6 +435,149 @@ func (c *Collector) runCustomTarget(ctx context.Context, target ScrapeTarget) {
 			return
 		case <-ticker.C:
 		}
+	}
+}
+
+// runDynamicTargets refreshes generated targets on an interval, starting a
+// scraper goroutine for each new target and cancelling the goroutine of each
+// target that is gone.
+//
+// The first refresh runs immediately rather than after one interval: a restart
+// would otherwise leave every generated target unscraped for the whole refresh
+// window, which reads on the graphs as an outage of the thing being measured.
+func (c *Collector) runDynamicTargets(ctx context.Context) {
+	ticker := time.NewTicker(c.dynamic.interval)
+	defer ticker.Stop()
+
+	for {
+		added, removed, err := c.dynamic.refresh(ctx)
+		if err != nil {
+			// Say so on the wire, not only in a log nobody outside the cluster
+			// reads. A failed discovery leaves the kind's target count at
+			// whatever the last successful listing wrote -- 0 on the first
+			// attempt -- and silence there is indistinguishable from a healthy
+			// kind with nothing to scrape.
+			for _, tpl := range c.dynamic.templates {
+				c.health.RecordDiscoveryFailure(tpl.Kind)
+			}
+			c.log.Warn("dynamic scrape target refresh failed",
+				logger.F("error", err.Error()))
+		} else {
+			// Nothing else ever clears it: no scrape is attributed to the
+			// discovery entry, so a recovered listing would otherwise report
+			// the kind as failing for the rest of the process's life.
+			for _, tpl := range c.dynamic.templates {
+				c.health.ClearDiscoveryFailure(tpl.Kind)
+			}
+			for _, target := range removed {
+				c.stopDynamicTarget(target)
+			}
+			for _, target := range added {
+				c.startDynamicTarget(ctx, target)
+			}
+			if len(added) > 0 || len(removed) > 0 {
+				c.log.Info("dynamic scrape targets changed",
+					logger.F("added", len(added)),
+					logger.F("removed", len(removed)),
+					logger.F("total", len(c.dynamic.current)),
+				)
+			}
+
+			counts := map[string]int{}
+			for _, t := range c.dynamic.current {
+				counts[healthKind(t)]++
+			}
+			for _, tpl := range c.dynamic.templates {
+				c.health.SetTargetCount(tpl.Kind, counts[tpl.Kind])
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			c.stopAllDynamicTargets()
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *Collector) startDynamicTarget(ctx context.Context, target ScrapeTarget) {
+	filter, err := NewMetricFilter(target.MetricAllowlist, target.MetricDenylist)
+	if err != nil {
+		// Validation refuses a bad pattern at startup, so reaching here means
+		// a template built one. Refusing this one target is right; refusing
+		// every target would take the whole node fleet down with it.
+		c.log.Warn("dynamic scrape target filter rejected",
+			logger.F("target", targetLabel(target)),
+			logger.F("error", err.Error()))
+		return
+	}
+
+	targetCtx, cancel := context.WithCancel(ctx)
+
+	c.dynamicMu.Lock()
+	if prev, running := c.dynamicCancel[targetIdentity(target)]; running {
+		// Should not happen -- diffTargets only reports genuinely new targets
+		// -- but a leaked goroutine here scrapes forever.
+		prev()
+	}
+	c.dynamicCancel[targetIdentity(target)] = cancel
+	c.customFiltersMu.Lock()
+	c.customFilters[targetKey(target)] = filter
+	c.customFiltersMu.Unlock()
+	c.dynamicMu.Unlock()
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.runCustomTarget(targetCtx, target)
+	}()
+}
+
+func (c *Collector) stopDynamicTarget(target ScrapeTarget) {
+	c.dynamicMu.Lock()
+	cancel, running := c.dynamicCancel[targetIdentity(target)]
+	delete(c.dynamicCancel, targetIdentity(target))
+	c.customFiltersMu.Lock()
+	delete(c.customFilters, targetKey(target))
+	c.customFiltersMu.Unlock()
+	c.dynamicMu.Unlock()
+
+	// Outside both locks above: a removed target never scrapes again, so
+	// nothing else will ever call RecordSuccess to clear a failure it left
+	// behind. Without this, a target that failed right before removal reports
+	// as a standing outage for the rest of the process's life.
+	c.health.ClearTarget(healthKind(target), targetLabel(target))
+
+	if running {
+		cancel()
+	}
+}
+
+func (c *Collector) stopAllDynamicTargets() {
+	c.dynamicMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(c.dynamicCancel))
+	for id, cancel := range c.dynamicCancel {
+		cancels = append(cancels, cancel)
+		delete(c.dynamicCancel, id)
+	}
+	c.dynamicMu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+
+	// A stopped fleet is not a healthy one. SetTargetCount has already written
+	// targets_total, so a kindState frozen here with its failing set intact
+	// would report a standing outage for nodes nobody is scraping -- and one
+	// with an empty failing set would report `ok` for the same. Dropping
+	// p.current is what stops a later refresh from diffing against a target
+	// set that no longer runs.
+	if c.dynamic != nil {
+		for _, target := range c.dynamic.current {
+			c.health.ClearTarget(healthKind(target), targetLabel(target))
+		}
+		c.dynamic.current = nil
 	}
 }
 
