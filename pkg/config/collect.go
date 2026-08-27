@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -122,6 +124,16 @@ func (r *MetricsNamespaceRule) normalize(index int) {
 	}
 }
 
+// ValidateForTest exposes the collect validation pass to the package's
+// external tests. Load runs the same pass; this exists so a validation case
+// does not need a temp file and a full Load.
+func ValidateForTest(c *Config) []string {
+	if c == nil {
+		return nil
+	}
+	return c.Collect.Metrics.validate()
+}
+
 func (m *MetricsCollectConfig) validate() []string {
 	if m == nil || !m.Enabled {
 		return nil
@@ -140,6 +152,80 @@ func (m *MetricsCollectConfig) validate() []string {
 			violations = append(violations, fmt.Sprintf("collect.metrics.rules[%d].id %q is duplicated", i, rule.ID))
 		}
 		seen[rule.ID] = struct{}{}
+	}
+	seenEndpoints := make(map[string]struct{}, len(m.CustomEndpoints))
+	for i, ep := range m.CustomEndpoints {
+		violations = append(violations, ep.validate(i)...)
+		if ep.Name == "" {
+			continue
+		}
+		if _, dup := seenEndpoints[ep.Name]; dup {
+			violations = append(violations,
+				fmt.Sprintf("collect.metrics.custom_endpoints[%d].name %q is duplicated", i, ep.Name))
+		}
+		seenEndpoints[ep.Name] = struct{}{}
+	}
+	return violations
+}
+
+// validate checks one custom scrape endpoint.
+//
+// The name is required and unique because it is the target's identity in every
+// place the target is reported: the scraper's own Prometheus labels, the
+// per-target filter map (collector.go's targetKey) and the scrape health the
+// heartbeat carries. Two targets sharing a name silently share one filter.
+func (e *MetricEndpointConfig) validate(index int) []string {
+	if e == nil {
+		return nil
+	}
+	prefix := fmt.Sprintf("collect.metrics.custom_endpoints[%d]", index)
+	var violations []string
+
+	if strings.TrimSpace(e.Name) == "" {
+		violations = append(violations, prefix+".name must be set")
+	}
+	switch {
+	case strings.TrimSpace(e.URL) == "":
+		violations = append(violations, prefix+".url must be set")
+	default:
+		parsed, err := url.Parse(e.URL)
+		switch {
+		case err != nil:
+			violations = append(violations, fmt.Sprintf("%s.url is not a valid URL: %v", prefix, err))
+		case parsed.Scheme != "http" && parsed.Scheme != "https":
+			violations = append(violations, prefix+".url must use http or https")
+		case parsed.Host == "":
+			violations = append(violations, prefix+".url must name a host")
+		}
+	}
+	if e.Interval < 0 {
+		violations = append(violations, prefix+".interval must not be negative")
+	}
+	if e.Timeout < 0 {
+		violations = append(violations, prefix+".timeout must not be negative")
+	}
+	if e.Timeout > 0 && e.Interval > 0 && e.Timeout >= e.Interval {
+		violations = append(violations, prefix+".timeout must be below interval")
+	}
+	violations = append(violations, validatePatterns(prefix+".metric_allowlist", e.MetricAllowlist)...)
+	violations = append(violations, validatePatterns(prefix+".metric_denylist", e.MetricDenylist)...)
+	if e.TLS.InsecureSkipVerify && e.TLS.CAFile != "" {
+		violations = append(violations,
+			prefix+".tls sets both insecure_skip_verify and ca_file; the CA bundle would never be consulted")
+	}
+	return violations
+}
+
+// validatePatterns compiles allow/deny patterns here so a bad expression is a
+// startup refusal with the offending index named, rather than a collector
+// construction error hours later with only the target name in it.
+func validatePatterns(prefix string, patterns []string) []string {
+	var violations []string
+	for i, p := range patterns {
+		if _, err := regexp.Compile(p); err != nil {
+			violations = append(violations,
+				fmt.Sprintf("%s[%d] is not a valid regular expression: %v", prefix, i, err))
+		}
 	}
 	return violations
 }

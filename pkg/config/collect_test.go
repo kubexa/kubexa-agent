@@ -216,3 +216,60 @@ func TestMetricsKubeMetricsLegacyNormalize(t *testing.T) {
 		t.Errorf("legacy rule = %+v", cfg.Collect.Metrics.Rules[0])
 	}
 }
+
+func TestMetricsCustomEndpointValidation(t *testing.T) {
+	cases := []struct {
+		name     string
+		endpoint config.MetricEndpointConfig
+		want     string
+	}{
+		{
+			name:     "missing url",
+			endpoint: config.MetricEndpointConfig{Name: "a"},
+			want:     "url must be set",
+		},
+		{
+			name:     "non-http scheme",
+			endpoint: config.MetricEndpointConfig{Name: "a", URL: "tcp://host:9100/metrics"},
+			want:     "url must use http or https",
+		},
+		{
+			name: "timeout not below interval",
+			endpoint: config.MetricEndpointConfig{
+				Name: "a", URL: "http://h:9100/metrics",
+				Interval: 30 * time.Second, Timeout: 30 * time.Second,
+			},
+			want: "timeout must be below interval",
+		},
+		{
+			name: "bad allowlist pattern",
+			endpoint: config.MetricEndpointConfig{
+				Name: "a", URL: "http://h:9100/metrics",
+				MetricAllowlist: []string{"("},
+			},
+			want: "metric_allowlist[0] is not a valid regular expression",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Collect.Metrics.Enabled = true
+			cfg.Collect.Metrics.CustomEndpoints = []config.MetricEndpointConfig{tc.endpoint}
+
+			violations := config.ValidateForTest(cfg)
+			if !containsSubstring(violations, tc.want) {
+				t.Fatalf("violations = %v, want one containing %q", violations, tc.want)
+			}
+		})
+	}
+}
+
+func containsSubstring(violations []string, want string) bool {
+	for _, v := range violations {
+		if strings.Contains(v, want) {
+			return true
+		}
+	}
+	return false
+}
