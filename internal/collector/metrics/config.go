@@ -46,9 +46,27 @@ type KubernetesMetricsConfig struct {
 	Rules        []KubeMetricsRule
 }
 
+// Scrape kinds. A kind is the row an operator reads on the ingestion screen
+// and the aggregation unit ScrapeHealth keys on, so it is agent-owned: it is
+// never read out of a label map an operator can write into.
+const (
+	KindCustom      = "custom"
+	KindCAdvisor    = "cadvisor"
+	KindKubeState   = "kube_state_metrics"
+	ScrapeKindLabel = "scrape_kind"
+)
+
 // ScrapeTarget defines a custom Prometheus exposition endpoint.
 type ScrapeTarget struct {
-	Name            string
+	Name string
+	// Kind is the health row this target aggregates into. It is a real field
+	// rather than a lookup in Labels because Labels is a verbatim copy of the
+	// operator's extra_labels: an endpoint carrying
+	// `extra_labels: {scrape_kind: cadvisor}` would otherwise file its own
+	// failures under the cAdvisor row, and one carrying an unknown value
+	// would produce a kind with targets_total 0 and targets_failing 1 -- "1
+	// of 0 failing" on the screen. Empty means KindCustom.
+	Kind            string
 	URL             string
 	Interval        time.Duration
 	Timeout         time.Duration
@@ -128,6 +146,7 @@ func ConfigFromRoot(root *pkgconfig.Config) Config {
 	for _, ep := range mc.CustomEndpoints {
 		cfg.CustomTargets = append(cfg.CustomTargets, ScrapeTarget{
 			Name:            ep.Name,
+			Kind:            KindCustom,
 			URL:             ep.URL,
 			Interval:        ep.Interval,
 			Timeout:         ep.Timeout,
@@ -146,7 +165,7 @@ func ConfigFromRoot(root *pkgconfig.Config) Config {
 		ca.ApplyDefaults()
 		cfg.DynamicTargets.RefreshInterval = ca.RefreshInterval
 		cfg.DynamicTargets.Templates = append(cfg.DynamicTargets.Templates, TargetTemplate{
-			Kind:       "cadvisor",
+			Kind:       KindCAdvisor,
 			NamePrefix: "cadvisor",
 			Scheme:     ca.Scheme,
 			Port:       ca.Port,
@@ -156,7 +175,7 @@ func ConfigFromRoot(root *pkgconfig.Config) Config {
 			// scrape_kind travels onto every sample so the consumer's writer
 			// and the explorer can tell a cAdvisor series from a
 			// kube-state-metrics one without pattern-matching the name.
-			Labels:          map[string]string{"scrape_kind": "cadvisor"},
+			Labels:          map[string]string{ScrapeKindLabel: KindCAdvisor},
 			BearerTokenPath: ca.BearerTokenPath,
 			TLSConfig: TLSConfig{
 				InsecureSkipVerify: ca.TLS.InsecureSkipVerify,
@@ -177,10 +196,11 @@ func ConfigFromRoot(root *pkgconfig.Config) Config {
 			ProbeInterval:    ks.ProbeInterval,
 			Target: ScrapeTarget{
 				Name:            "kube-state-metrics",
+				Kind:            KindKubeState,
 				URL:             ks.ResolvedURL(),
 				Interval:        ks.Interval,
 				Timeout:         ks.Timeout,
-				Labels:          map[string]string{"scrape_kind": "kube_state_metrics"},
+				Labels:          map[string]string{ScrapeKindLabel: KindKubeState},
 				MetricAllowlist: append([]string(nil), ks.MetricAllowlist...),
 				MetricDenylist:  append([]string(nil), ks.MetricDenylist...),
 			},
