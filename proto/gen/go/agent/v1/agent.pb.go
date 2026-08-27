@@ -735,9 +735,25 @@ type ScrapeTargetHealth struct {
 	// "failing" means it answered badly. A scrape that succeeded and returned
 	// zero samples is "ok" -- that is a measured zero, and rendering it as an
 	// absence is the failure this whole field exists to prevent.
-	State          string `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
-	TargetsTotal   int32  `protobuf:"varint,3,opt,name=targets_total,json=targetsTotal,proto3" json:"targets_total,omitempty"`
-	TargetsFailing int32  `protobuf:"varint,4,opt,name=targets_failing,json=targetsFailing,proto3" json:"targets_failing,omitempty"`
+	State string `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	// targets_total is how many targets of this kind the agent currently knows
+	// about: the generated node list for cadvisor, the configured endpoint count
+	// for custom, 1 for an installed kube-state-metrics. 0 with a state of
+	// "failing" means discovery has not yet succeeded even once -- not that the
+	// kind is idle.
+	TargetsTotal int32 `protobuf:"varint,3,opt,name=targets_total,json=targetsTotal,proto3" json:"targets_total,omitempty"`
+	// targets_failing counts TARGETS whose own last scrape failed, and only
+	// those. It never exceeds targets_total.
+	//
+	// A discovery failure -- the agent could not list nodes, or could not probe
+	// for the Service -- is a condition of the whole kind and is reported
+	// through `state`, never here: it has no target to be attributed to.
+	// Counting it produced "1 of 0 failing" on an RBAC-refused start, and
+	// "1 of 40 failing" after a healthy listing, which named a node that was
+	// scraping perfectly well. So a kind can read state "failing" with
+	// targets_failing 0, and that combination is meaningful rather than
+	// contradictory: the targets are fine, the agent's view of them is not.
+	TargetsFailing int32 `protobuf:"varint,4,opt,name=targets_failing,json=targetsFailing,proto3" json:"targets_failing,omitempty"`
 	// last_success_unix_ms is 0 when this kind has NEVER succeeded, which is a
 	// different statement from "its last scrape failed".
 	LastSuccessUnixMs int64 `protobuf:"varint,5,opt,name=last_success_unix_ms,json=lastSuccessUnixMs,proto3" json:"last_success_unix_ms,omitempty"`

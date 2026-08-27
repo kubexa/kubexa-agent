@@ -1,14 +1,12 @@
 package metrics
 
 import (
-	"bytes"
 	"errors"
+	"fmt"
 	"net"
 	"reflect"
 	"testing"
 	"time"
-
-	"google.golang.org/protobuf/proto"
 
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
@@ -411,32 +409,144 @@ func TestRecordDiscoveryFailureReportsFailingNotAbsence(t *testing.T) {
 	if got.State != StateFailing {
 		t.Fatalf("State = %q, want %q", got.State, StateFailing)
 	}
-	if got.TargetsFailing != 1 {
-		t.Errorf("TargetsFailing = %d, want 1", got.TargetsFailing)
+	// And it is NOT a failing target. targets_failing counts targets; a
+	// discovery failure is a condition of the whole kind and has no target to
+	// be attributed to.
+	if got.TargetsFailing != 0 {
+		t.Errorf("TargetsFailing = %d, want 0: a discovery failure is not a failing target",
+			got.TargetsFailing)
 	}
 
 	// Nothing else would ever clear it -- no scrape is attributed to the
-	// discovery entry -- so a recovered listing must clear it explicitly.
+	// discovery flag -- so a recovered listing must clear it explicitly.
 	h.ClearDiscoveryFailure(KindCAdvisor)
 	if got := byKind(h.Snapshot())[KindCAdvisor]; got.State != StateOK {
 		t.Fatalf("State = %q, want %q after discovery recovered", got.State, StateOK)
 	}
 }
 
-// The synthetic discovery key is a map key and nothing else. HealthProto is
-// the only thing that reaches the wire, and it publishes counts, not names.
-func TestTheDiscoveryTargetNameNeverReachesTheWire(t *testing.T) {
-	h := newScrapeHealth()
-	h.SetTargetCount(KindCAdvisor, 0)
-	h.RecordDiscoveryFailure(KindCAdvisor)
+// TestADiscoveryFailureIsNeverCountedAsAFailingTarget pins both false renders
+// the pseudo-target produced, on the wire, where the consuming repo reads them.
+func TestADiscoveryFailureIsNeverCountedAsAFailingTarget(t *testing.T) {
+	t.Run("RBAC refused at start reports no failing target", func(t *testing.T) {
+		// Start seeded the kind at 0 and the very first node LIST was refused.
+		h := newScrapeHealth()
+		h.SetTargetCount(KindCAdvisor, 0)
+		h.RecordDiscoveryFailure(KindCAdvisor)
 
-	for _, entry := range HealthProto(h) {
-		raw, err := proto.Marshal(entry)
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
+		got := protoByKind(HealthProto(h))[KindCAdvisor]
+		if got.GetState() != string(StateFailing) {
+			t.Fatalf("state = %q, want %q", got.GetState(), StateFailing)
 		}
-		if bytes.Contains(raw, []byte(discoveryTarget)) {
-			t.Fatalf("the synthetic discovery key reached the wire in %v", entry)
+		// "1 of 0 failing" is the inversion the Kind field was introduced to
+		// eliminate. Reintroducing it through the discovery entry would say
+		// more targets are failing than exist.
+		if got.GetTargetsFailing() > got.GetTargetsTotal() {
+			t.Fatalf("targets = %d/%d -- more failing than exist",
+				got.GetTargetsFailing(), got.GetTargetsTotal())
 		}
+		if got.GetTargetsFailing() != 0 {
+			t.Fatalf("targets_failing = %d, want 0: no target is known to exist, let alone to fail",
+				got.GetTargetsFailing())
+		}
+	})
+
+	t.Run("a discovery failure after a healthy listing accuses no node", func(t *testing.T) {
+		// Forty nodes discovered and every one of them scraping fine, then the
+		// next refresh's LIST fails. Reporting "1 of 40 failing" is a specific
+		// claim about one node, and it is false.
+		h := newScrapeHealth()
+		h.SetTargetCount(KindCAdvisor, 40)
+		for i := 0; i < 40; i++ {
+			h.RecordSuccess(KindCAdvisor, fmt.Sprintf("cadvisor/node-%d", i), 100)
+		}
+		h.RecordDiscoveryFailure(KindCAdvisor)
+
+		got := protoByKind(HealthProto(h))[KindCAdvisor]
+		if got.GetState() != string(StateFailing) {
+			t.Fatalf("state = %q, want %q: the agent cannot refresh its target list",
+				got.GetState(), StateFailing)
+		}
+		if got.GetTargetsFailing() != 0 {
+			t.Fatalf("targets_failing = %d, want 0: all forty nodes are scraping fine",
+				got.GetTargetsFailing())
+		}
+		if got.GetTargetsTotal() != 40 {
+			t.Errorf("targets_total = %d, want the 40 last successfully discovered",
+				got.GetTargetsTotal())
+		}
+	})
+
+	t.Run("a real target failure still counts alongside it", func(t *testing.T) {
+		h := newScrapeHealth()
+		h.SetTargetCount(KindCAdvisor, 40)
+		h.RecordFailure(KindCAdvisor, "cadvisor/node-3", errors.New("HTTP 500"))
+		h.RecordDiscoveryFailure(KindCAdvisor)
+
+		got := protoByKind(HealthProto(h))[KindCAdvisor]
+		if got.GetTargetsFailing() != 1 {
+			t.Fatalf("targets_failing = %d, want exactly the 1 real failing node",
+				got.GetTargetsFailing())
+		}
+
+		// And clearing the discovery failure must leave that node's own
+		// failure standing: the two are independent facts, and the recovered
+		// listing says nothing about whether node-3 answered.
+		h.ClearDiscoveryFailure(KindCAdvisor)
+		got = protoByKind(HealthProto(h))[KindCAdvisor]
+		if got.GetTargetsFailing() != 1 {
+			t.Fatalf("targets_failing = %d after clearing discovery, want the real failure kept",
+				got.GetTargetsFailing())
+		}
+		if got.GetState() != string(StateFailing) {
+			t.Errorf("state = %q, want %q: node-3 is still down", got.GetState(), StateFailing)
+		}
+	})
+}
+
+// TestADiscoveryFailureOutranksNotInstalled pins the precedence.
+//
+// not_installed is only ever recorded from a definite IsNotFound. A later
+// probe error means the agent no longer knows whether the Service is there, so
+// continuing to assert absence claims knowledge that was just lost -- and it
+// sends the operator to install something that may already be running, rather
+// than to the probe that is actually broken.
+func TestADiscoveryFailureOutranksNotInstalled(t *testing.T) {
+	h := newScrapeHealth()
+	h.SetTargetCount(KindKubeState, 0)
+
+	// The probe answered: the Service is genuinely absent.
+	h.MarkNotInstalled(KindKubeState)
+	if got := byKind(h.Snapshot())[KindKubeState]; got.State != StateNotInstalled {
+		t.Fatalf("State = %q, want %q on a definite NotFound", got.State, StateNotInstalled)
 	}
+
+	// The next probe could not ask at all. The agent has lost the knowledge
+	// that justified the previous verdict.
+	h.RecordDiscoveryFailure(KindKubeState)
+	got := byKind(h.Snapshot())[KindKubeState]
+	if got.State != StateFailing {
+		t.Fatalf("State = %q, want %q: the agent no longer knows whether it is installed",
+			got.State, StateFailing)
+	}
+	// And the two must never be published together -- a not_installed state
+	// beside a nonzero failing count contradicts itself.
+	if got.TargetsFailing != 0 {
+		t.Errorf("TargetsFailing = %d, want 0", got.TargetsFailing)
+	}
+
+	// A probe that asks successfully and finds it absent again restores the
+	// definite verdict.
+	h.MarkNotInstalled(KindKubeState)
+	if got := byKind(h.Snapshot())[KindKubeState]; got.State != StateNotInstalled {
+		t.Fatalf("State = %q, want %q once the probe answers again", got.State, StateNotInstalled)
+	}
+}
+
+func protoByKind(list []*agentv1.ScrapeTargetHealth) map[string]*agentv1.ScrapeTargetHealth {
+	out := make(map[string]*agentv1.ScrapeTargetHealth, len(list))
+	for _, k := range list {
+		out[k.GetKind()] = k
+	}
+	return out
 }
