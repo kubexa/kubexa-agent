@@ -54,7 +54,18 @@ data:
         enabled: {{ .Values.collect.metrics.enabled }}
         pod_interval: {{ .Values.collect.metrics.podInterval | quote }}
         node_interval: {{ .Values.collect.metrics.nodeInterval | quote }}
+        {{- /*
+          An explicit 0 disables the cap; an OMITTED key takes the agent's
+          20,000 default. `| int` renders nil as 0, which would turn
+          `maxSamplesPerScrape: null` -- and helm deletes a null map value
+          while coalescing, so that is also what a values file that never
+          mentions the key produces if the default is removed -- into "no
+          cap at all". Rendering the key only when a value is actually set
+          keeps the agent's own default reachable.
+        */ -}}
+        {{- if not (kindIs "invalid" .Values.collect.metrics.maxSamplesPerScrape) }}
         max_samples_per_scrape: {{ .Values.collect.metrics.maxSamplesPerScrape | int }}
+        {{- end }}
         {{- if .Values.collect.metrics.kubeMetrics }}
         kube_metrics: true
         {{- end }}
