@@ -151,6 +151,28 @@ func (h *ScrapeHealth) MarkNotInstalled(kind string) {
 	k.failing = make(map[string]TargetState)
 }
 
+// MarkInstalled clears kind's absence determination and touches nothing else
+// -- not failing, not lastSuccess, not samplesLastScrape, not the
+// cardinality counter, not total. RecordSuccess already clears
+// notInstalled for every kind that scrapes on its own schedule, but
+// kube-state-metrics does not: while notInstalled is set its scrape loop
+// never runs at all, so nothing would ever call RecordSuccess to clear the
+// flag once the Service reappears. The evidence that clears it is the
+// presence probe finding the Service again, not a scrape's outcome -- a
+// freshly-installed, still-failing target must read as failing, not as
+// not-installed.
+//
+// An unknown kind is handled the same way MarkNotInstalled handles one: it
+// is harmless, not a panic.
+func (h *ScrapeHealth) MarkInstalled(kind string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.kind(kind).notInstalled = false
+}
+
 // ClearTarget removes target's failure entry for kind, if any, and touches
 // nothing else -- not lastSuccess, not samplesLastScrape, not the
 // cardinality counter, not the target count, not notInstalled.
