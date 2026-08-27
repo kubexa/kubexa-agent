@@ -197,12 +197,24 @@ collect:
         resources:
           - pods
           - nodes
+    # customEndpoints keys pass through toYaml untouched, so they are the
+    # AGENT's snake_case config keys -- not the chart's camelCase. A key the
+    # agent does not know is dropped, and a target that lost its allowlist
+    # ships every family the endpoint exposes.
     customEndpoints: []
     # Example:
     # customEndpoints:
     #   - name: my-app
     #     url: http://my-app.metrics.svc:8080/metrics
     #     interval: 30s
+    #     timeout: 10s
+    #     bearer_token_path: /var/run/secrets/kubernetes.io/serviceaccount/token
+    #     tls:
+    #       ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    #     metric_allowlist:
+    #       - "^myapp_request_.*"
+    #     metric_denylist:
+    #       - "^myapp_debug_.*"
     #     extra_labels:
     #       service: my-app
 

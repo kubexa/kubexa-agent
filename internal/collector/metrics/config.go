@@ -94,10 +94,18 @@ func ConfigFromRoot(root *pkgconfig.Config) Config {
 	}
 	for _, ep := range mc.CustomEndpoints {
 		cfg.CustomTargets = append(cfg.CustomTargets, ScrapeTarget{
-			Name:     ep.Name,
-			URL:      ep.URL,
-			Interval: ep.Interval,
-			Labels:   copyStringMap(ep.ExtraLabels),
+			Name:            ep.Name,
+			URL:             ep.URL,
+			Interval:        ep.Interval,
+			Timeout:         ep.Timeout,
+			Labels:          copyStringMap(ep.ExtraLabels),
+			BearerTokenPath: ep.BearerTokenPath,
+			TLSConfig: TLSConfig{
+				InsecureSkipVerify: ep.TLS.InsecureSkipVerify,
+				CAFile:             ep.TLS.CAFile,
+			},
+			MetricAllowlist: append([]string(nil), ep.MetricAllowlist...),
+			MetricDenylist:  append([]string(nil), ep.MetricDenylist...),
 		})
 	}
 	cfg.ApplyDefaults()
