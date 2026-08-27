@@ -123,6 +123,54 @@ rules:
     verbs: ["get", "list"]
   {{- end }}
 
+  {{- /*
+    Both blocks below are ALSO gated on the parent collect.metrics.enabled.
+    Without it a cluster with metrics collection off still granted nodes
+    get/list, nodes/metrics get and services get -- standing authority for a
+    collector that never starts. The child flag alone is not the feature being
+    on.
+
+    The values schema admits an explicit `cadvisor: null`, and Helm hard-errors
+    on a chained field access through a nil map rather than treating it as
+    false -- `.Values.collect.metrics.cadvisor.enabled` panics the whole render
+    on exactly the install that leaves this block out. The parenthesized
+    sub-expression sidesteps that: evaluating `(.Values.collect.metrics.cadvisor)`
+    alone returns a plain nil, and `{{- if }}` treats nil as false.
+  */ -}}
+  {{- if and .Values.collect.metrics.enabled (.Values.collect.metrics.cadvisor).enabled }}
+  # Scraping each node's kubelet directly. `nodes/metrics` is what authorizes
+  # GET /metrics/cadvisor: targetsForNodes always builds a direct
+  # scheme://<node InternalIP>:<port><path> URL, and the kubelet's own
+  # authorizer maps that path to nodes/metrics. `nodes` itself is the LIST the
+  # agent needs to discover which nodes exist -- the state/query block grants
+  # it too, but this feature must not depend on either being on.
+  #
+  # This is the whole grant the feature needs. Nothing here routes a scrape
+  # through the API server proxy, so no proxy subresource is granted; see
+  # TestClusterRoleGrantsKubeletMetricsForCAdvisor for why that matters.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["nodes/metrics"]
+    verbs: ["get"]
+  {{- end }}
+
+  {{- /*
+    Same nil-safety as cadvisor above: the values schema admits an explicit
+    `kubeStateMetrics: null`, so the guard reads its enabled flag through a
+    parenthesized dereference rather than panicking the whole render on the
+    install that leaves this block out.
+  */ -}}
+  {{- if and .Values.collect.metrics.enabled (.Values.collect.metrics.kubeStateMetrics).enabled }}
+  # The presence probe: one GET against the kube-state-metrics Service. Without
+  # it the agent cannot tell "not installed" from "unreachable", and the screen
+  # would report an absent component as a broken one.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+  {{- end }}
+
   {{- with .Values.rbac.extraRules }}
   {{- toYaml . | nindent 2 }}
   {{- end }}

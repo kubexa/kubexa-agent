@@ -49,6 +49,14 @@ type QueryResponder interface {
 	Execute(ctx context.Context, q *agentv1.ResourceQuery) *agentv1.ResourceQueryResult
 }
 
+// ScrapeHealthSource supplies the scrape health a heartbeat reports. It is an
+// interface, not the metrics collector itself, so a build without metrics
+// collection enabled has nothing to satisfy and reports no scrape_targets at
+// all -- which is the honest answer for an agent that is not scraping.
+type ScrapeHealthSource interface {
+	ScrapeTargetHealth() []*agentv1.ScrapeTargetHealth
+}
+
 // Manager manages the outbound gRPC stream to the Kubexa Gateway.
 type Manager interface {
 	// Run starts the connection loop. Blocks until ctx is cancelled.
@@ -109,6 +117,12 @@ type streamManager struct {
 	// refused (handleResourceQuery is a no-op) when this agent does not run
 	// live resource queries.
 	responder QueryResponder
+
+	// scrapeHealth supplies per-kind scrape health for the heartbeat. Set
+	// once at construction and read-only afterward. Nil is valid — an agent
+	// with metrics collection disabled reports no scrape_targets at all,
+	// which is the honest answer, not an empty "everything is healthy".
+	scrapeHealth ScrapeHealthSource
 
 	sendCh   chan *agentv1.AgentMessage
 	throttle throttleGate
@@ -186,7 +200,9 @@ func (g *throttleGate) throttled() bool {
 // New constructs a stream Manager wired to cfg, queue, logger, and shared
 // agent metrics. reconciler receives every gateway watch config update; pass
 // nil if this agent does not run demand-driven state collection. responder
-// answers live resource queries; pass nil to refuse them.
+// answers live resource queries; pass nil to refuse them. scrapeHealth
+// supplies the heartbeat's per-kind scrape health; pass nil if this agent
+// does not run metrics collection.
 func New(
 	cfg *config.Config,
 	q queue.Queue,
@@ -197,6 +213,7 @@ func New(
 	responder QueryResponder,
 	rules *ingestrules.Store,
 	counters *ingestrules.Counters,
+	scrapeHealth ScrapeHealthSource,
 ) (Manager, error) {
 	if cfg == nil {
 		return nil, errors.New("config is nil")
@@ -219,6 +236,7 @@ func New(
 		connMetrics:   connMetrics,
 		reconciler:    reconciler,
 		responder:     responder,
+		scrapeHealth:  scrapeHealth,
 		rng:           rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
 		sleep:         defaultSleeper,
 		sendCh:        make(chan *agentv1.AgentMessage, defaultSendChannelSize),
@@ -797,7 +815,7 @@ func (m *streamManager) healthSnapshot() *agentv1.AgentHealth {
 		dropped = m.queue.DroppedTotal()
 	}
 	truncated, tooOld, future, rateLimited := m.counters.Snapshot()
-	return &agentv1.AgentHealth{
+	health := &agentv1.AgentHealth{
 		QueueDepth:         depth,
 		DroppedMessages:    dropped,
 		Status:             m.healthStatus(depth),
@@ -806,6 +824,12 @@ func (m *streamManager) healthSnapshot() *agentv1.AgentHealth {
 		DroppedFuture:      future,
 		DroppedRateLimited: rateLimited,
 	}
+	// An agent with no scrape health source reports no scrape_targets at all,
+	// not an empty (and therefore falsely all-healthy) list.
+	if m.scrapeHealth != nil {
+		health.ScrapeTargets = m.scrapeHealth.ScrapeTargetHealth()
+	}
+	return health
 }
 
 // healthStatus is a coarse self-report, not a measurement of anything the

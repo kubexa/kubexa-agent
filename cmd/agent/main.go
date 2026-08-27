@@ -57,7 +57,14 @@ func main() {
 func run() int {
 	configPath := flag.String("config", defaultConfigPath, "path to agent config YAML")
 	devFlag := flag.Bool("dev", false, "enable local development mode")
+	validateConfigFlag := flag.Bool("validate-config", false,
+		"load and validate the config file through the real parser, print the result, and exit "+
+			"(0 if valid) without starting the agent")
 	flag.Parse()
+
+	if *validateConfigFlag {
+		return validateConfigAndExit(*configPath)
+	}
 
 	cfg, cfgWarnings, err := config.LoadWithWarnings(*configPath)
 	if err != nil {
@@ -228,10 +235,22 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	// gateway config" stays a property of the collector's own type, not
 	// something the caller has to track separately.
 	var reconciler stream.WatchReconciler
+	// The metrics collector, if enabled, also satisfies
+	// stream.ScrapeHealthSource. Found the same way as reconciler above: an
+	// agent built without metrics collection has no collector to satisfy it,
+	// so scrapeHealth stays nil and the heartbeat reports no scrape_targets
+	// at all rather than a fabricated empty "everything is healthy".
+	var scrapeHealth stream.ScrapeHealthSource
 	for _, coll := range collectors {
-		if r, ok := coll.(stream.WatchReconciler); ok {
-			reconciler = r
-			break
+		if reconciler == nil {
+			if r, ok := coll.(stream.WatchReconciler); ok {
+				reconciler = r
+			}
+		}
+		if scrapeHealth == nil {
+			if s, ok := coll.(stream.ScrapeHealthSource); ok {
+				scrapeHealth = s
+			}
 		}
 	}
 
@@ -245,6 +264,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		queryExecutor,
 		rulesStore,
 		ruleCounters,
+		scrapeHealth,
 	)
 	if err != nil {
 		_ = q.Close()
@@ -533,6 +553,28 @@ func printConfigWarnings(warnings []string) {
 	for _, w := range warnings {
 		fmt.Fprintf(os.Stderr, "config: unrecognized key ignored: %s\n", w)
 	}
+}
+
+// validateConfigAndExit runs the config file through the same parse-and-
+// validate path Load uses -- not a re-implementation of it -- and reports the
+// result without starting the agent. It exists so a rendered chart can be
+// proven against the real loader instead of only against a YAML parser:
+// rendering is not booting, and a config that is merely well-formed YAML can
+// still be a duration the agent's decoder refuses or an interval/timeout pair
+// its own validate() rejects.
+//
+// Never prints the config itself: agent.tenant_token and a custom endpoint's
+// bearer_token_path name a secret's location, and LoadWithWarnings's error and
+// warning strings are already scrubbed to field names, not values.
+func validateConfigAndExit(configPath string) int {
+	_, warnings, err := config.LoadWithWarnings(configPath)
+	printConfigWarnings(warnings)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "validate config: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(os.Stdout, "config is valid")
+	return 0
 }
 
 func printBanner(w interface{ Write([]byte) (int, error) }) {

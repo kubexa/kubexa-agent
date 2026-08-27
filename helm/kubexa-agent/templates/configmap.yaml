@@ -54,6 +54,18 @@ data:
         enabled: {{ .Values.collect.metrics.enabled }}
         pod_interval: {{ .Values.collect.metrics.podInterval | quote }}
         node_interval: {{ .Values.collect.metrics.nodeInterval | quote }}
+        {{- /*
+          An explicit 0 disables the cap; an OMITTED key takes the agent's
+          20,000 default. `| int` renders nil as 0, which would turn
+          `maxSamplesPerScrape: null` -- and helm deletes a null map value
+          while coalescing, so that is also what a values file that never
+          mentions the key produces if the default is removed -- into "no
+          cap at all". Rendering the key only when a value is actually set
+          keeps the agent's own default reachable.
+        */ -}}
+        {{- if not (kindIs "invalid" .Values.collect.metrics.maxSamplesPerScrape) }}
+        max_samples_per_scrape: {{ .Values.collect.metrics.maxSamplesPerScrape | int }}
+        {{- end }}
         {{- if .Values.collect.metrics.kubeMetrics }}
         kube_metrics: true
         {{- end }}
@@ -64,6 +76,94 @@ data:
         {{- with .Values.collect.metrics.customEndpoints }}
         custom_endpoints:
           {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- /*
+          The values schema admits an explicit `cadvisor: null`, and a chained
+          field access through a nil map (`.Values...cadvisor.enabled`) is a
+          hard Helm render error, not a false. Guarding on the parenthesized
+          block itself -- `(.Values.collect.metrics.cadvisor)` -- evaluates to
+          plain nil without dereferencing anything, so `{{- if }}` treats it as
+          false and the whole block is safely skipped.
+        */ -}}
+        {{- if (.Values.collect.metrics.cadvisor) }}
+        cadvisor:
+          enabled: {{ .Values.collect.metrics.cadvisor.enabled }}
+          interval: {{ .Values.collect.metrics.cadvisor.interval | quote }}
+          timeout: {{ .Values.collect.metrics.cadvisor.timeout | quote }}
+          refresh_interval: {{ .Values.collect.metrics.cadvisor.refreshInterval | quote }}
+          {{- /*
+            scheme, port, path, bearer_token_path and the tls block exist on
+            CAdvisorConfig and were unreachable from this chart. That matters
+            most for tls: ApplyDefaults pins ca_file to the ServiceAccount CA,
+            which signs the API SERVER, not kubelet serving certificates. On
+            any cluster without serverTLSBootstrap and an approved CSR flow the
+            kubelets serve self-signed certs and every cAdvisor scrape fails
+            `x509: certificate signed by unknown authority`, permanently --
+            with insecure_skip_verify, the struct's own documented escape
+            hatch, not exposed anywhere.
+
+            Each renders only when set, so an unset key still reaches the
+            agent's own ApplyDefaults rather than being overwritten with an
+            empty string. That is load-bearing for ca_file in particular:
+            rendering a default here would collide with insecure_skip_verify,
+            which validation refuses when both are set.
+          */ -}}
+          {{- with .Values.collect.metrics.cadvisor.scheme }}
+          scheme: {{ . | quote }}
+          {{- end }}
+          {{- with .Values.collect.metrics.cadvisor.port }}
+          port: {{ . | quote }}
+          {{- end }}
+          {{- with .Values.collect.metrics.cadvisor.path }}
+          path: {{ . | quote }}
+          {{- end }}
+          {{- with .Values.collect.metrics.cadvisor.bearerTokenPath }}
+          bearer_token_path: {{ . | quote }}
+          {{- end }}
+          {{- if (.Values.collect.metrics.cadvisor.tls) }}
+          tls:
+            insecure_skip_verify: {{ (.Values.collect.metrics.cadvisor.tls).insecureSkipVerify | default false }}
+            {{- with (.Values.collect.metrics.cadvisor.tls).caFile }}
+            ca_file: {{ . | quote }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.collect.metrics.cadvisor.metricAllowlist }}
+          metric_allowlist:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.collect.metrics.cadvisor.metricDenylist }}
+          metric_denylist:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- /*
+          Same nil-safety as cadvisor above: the values schema admits an
+          explicit `kubeStateMetrics: null`, and a chained field access
+          through a nil map is a hard Helm render error, not a false.
+        */ -}}
+        {{- if (.Values.collect.metrics.kubeStateMetrics) }}
+        kube_state_metrics:
+          enabled: {{ .Values.collect.metrics.kubeStateMetrics.enabled }}
+          service_namespace: {{ .Values.collect.metrics.kubeStateMetrics.serviceNamespace | quote }}
+          service_name: {{ .Values.collect.metrics.kubeStateMetrics.serviceName | quote }}
+          port: {{ .Values.collect.metrics.kubeStateMetrics.port | int }}
+          interval: {{ .Values.collect.metrics.kubeStateMetrics.interval | quote }}
+          timeout: {{ .Values.collect.metrics.kubeStateMetrics.timeout | quote }}
+          probe_interval: {{ .Values.collect.metrics.kubeStateMetrics.probeInterval | quote }}
+          {{- with .Values.collect.metrics.kubeStateMetrics.path }}
+          path: {{ . | quote }}
+          {{- end }}
+          {{- with .Values.collect.metrics.kubeStateMetrics.url }}
+          url: {{ . | quote }}
+          {{- end }}
+          {{- with .Values.collect.metrics.kubeStateMetrics.metricAllowlist }}
+          metric_allowlist:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.collect.metrics.kubeStateMetrics.metricDenylist }}
+          metric_denylist:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
         {{- end }}
 
     query:
