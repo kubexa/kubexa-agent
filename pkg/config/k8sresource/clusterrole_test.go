@@ -153,10 +153,19 @@ func TestClusterRoleGrantsKubeletMetricsForCAdvisor(t *testing.T) {
 	}
 	chart := string(raw)
 
-	for _, want := range []string{"nodes/metrics", "nodes/proxy"} {
-		if !strings.Contains(chart, want) {
-			t.Errorf("ClusterRole does not name %q; the kubelet answers 403 for every cAdvisor scrape", want)
-		}
+	if !strings.Contains(chart, "nodes/metrics") {
+		t.Error("ClusterRole does not name \"nodes/metrics\"; the kubelet answers 403 for every cAdvisor scrape")
+	}
+	// nodes/proxy must NOT be granted. targetsForNodes always builds a direct
+	// scheme://<node InternalIP>:<port><path> URL and the kubelet's authorizer
+	// maps /metrics/cadvisor to nodes/metrics, never to nodes/proxy -- nothing
+	// in the agent builds an apiserver-proxy URL at all. Meanwhile `get` on
+	// nodes/proxy authorizes GET /api/v1/nodes/<n>/proxy/<anything> on every
+	// node: /pods, /runningpods/, /configz, /logs/... Arbitrary kubelet reads
+	// across the fleet, for a feature that wants one metrics path.
+	if strings.Contains(chart, "nodes/proxy") {
+		t.Error("ClusterRole grants \"nodes/proxy\", which authorizes arbitrary kubelet reads on " +
+			"every node and which no code path in this repo uses")
 	}
 	// One path segment short of the full ".enabled" dereference: the values
 	// schema admits an explicit `cadvisor: null`, and Helm hard-errors on a
@@ -167,6 +176,27 @@ func TestClusterRoleGrantsKubeletMetricsForCAdvisor(t *testing.T) {
 	// is genuinely absent.
 	if !strings.Contains(chart, ".Values.collect.metrics.cadvisor") {
 		t.Error("the kubelet metrics rule is not gated on collect.metrics.cadvisor")
+	}
+	// The CHILD flag alone is not the feature being on. Gating only on
+	// collect.metrics.cadvisor.enabled left a cluster with metrics collection
+	// off still granting nodes get/list and nodes/metrics get -- standing
+	// authority for a collector that never starts.
+	assertGatedOnParentMetricsFlag(t, chart, `resources: ["nodes/metrics"]`)
+}
+
+// assertGatedOnParentMetricsFlag checks that the {{- if }} immediately above a
+// rule also consults collect.metrics.enabled, not just its own child block.
+func assertGatedOnParentMetricsFlag(t *testing.T, chart, rule string) {
+	t.Helper()
+	idx := strings.Index(chart, rule)
+	if idx < 0 {
+		t.Fatalf("no %s rule in the ClusterRole", rule)
+	}
+	head := chart[:idx]
+	gate := head[strings.LastIndex(head, "{{- if"):]
+	if !strings.Contains(gate, "collect.metrics.enabled") {
+		t.Errorf("the %s rule renders with metrics collection disabled; gate is %q",
+			rule, strings.TrimSpace(gate))
 	}
 }
 
@@ -201,4 +231,7 @@ func TestClusterRoleGrantsServicesGetForKubeStateMetricsProbe(t *testing.T) {
 		t.Errorf("the services GET rule is not gated on collect.metrics.kubeStateMetrics; gate is %q",
 			strings.TrimSpace(gate))
 	}
+	// And on the parent flag: the probe only ever runs inside a collector that
+	// collect.metrics.enabled starts.
+	assertGatedOnParentMetricsFlag(t, chart, `resources: ["services"]`)
 }

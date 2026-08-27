@@ -722,6 +722,66 @@
                   "maximum": 0,
                   "description": "A Go duration such as \"2m\". The chart quotes this value, so every number other than 0 reaches the agent as a string time.ParseDuration refuses, and the agent exits before it connects."
                 },
+                "scheme": {
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "null",
+                    "number",
+                    "string"
+                  ]
+                },
+                "port": {
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "null",
+                    "number",
+                    "string"
+                  ]
+                },
+                "path": {
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "null",
+                    "number",
+                    "string"
+                  ]
+                },
+                "bearerTokenPath": {
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "null",
+                    "number",
+                    "string"
+                  ]
+                },
+                "tls": {
+                  "type": [
+                    "null",
+                    "object"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "insecureSkipVerify": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "caFile": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ]
+                    }
+                  }
+                },
                 "metricAllowlist": {
                   "type": [
                     "array",
@@ -789,6 +849,15 @@
                   "type": [
                     "integer",
                     "null"
+                  ]
+                },
+                "path": {
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "null",
+                    "number",
+                    "string"
                   ]
                 },
                 "url": {
