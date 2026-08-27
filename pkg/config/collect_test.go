@@ -219,9 +219,10 @@ func TestMetricsKubeMetricsLegacyNormalize(t *testing.T) {
 
 func TestMetricsCustomEndpointValidation(t *testing.T) {
 	cases := []struct {
-		name     string
-		endpoint config.MetricEndpointConfig
-		want     string
+		name      string
+		endpoint  config.MetricEndpointConfig
+		want      string
+		wantValid bool
 	}{
 		{
 			name:     "missing url",
@@ -249,6 +250,29 @@ func TestMetricsCustomEndpointValidation(t *testing.T) {
 			},
 			want: "metric_allowlist[0] is not a valid regular expression",
 		},
+		{
+			// Interval is written, Timeout is not: ApplyDefaults fills the
+			// omitted Timeout with DefaultScrapeTimeout (10s), which is not
+			// below the 5s interval the operator actually wrote. Validation
+			// has to catch this from the EFFECTIVE values, not just the ones
+			// present in the yaml.
+			name: "defaulted timeout not below a short interval",
+			endpoint: config.MetricEndpointConfig{
+				Name: "a", URL: "http://h:9100/metrics",
+				Interval: 5 * time.Second,
+			},
+			want: "timeout must be below interval",
+		},
+		{
+			// Neither field is written: the defaults are 30s/10s, which
+			// satisfy the invariant on their own. The defaulting added by
+			// the fix above must not start refusing the default config.
+			name: "unset interval and timeout use valid defaults",
+			endpoint: config.MetricEndpointConfig{
+				Name: "a", URL: "http://h:9100/metrics",
+			},
+			wantValid: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -258,6 +282,12 @@ func TestMetricsCustomEndpointValidation(t *testing.T) {
 			cfg.Collect.Metrics.CustomEndpoints = []config.MetricEndpointConfig{tc.endpoint}
 
 			violations := config.ValidateForTest(cfg)
+			if tc.wantValid {
+				if len(violations) != 0 {
+					t.Fatalf("violations = %v, want none", violations)
+				}
+				return
+			}
 			if !containsSubstring(violations, tc.want) {
 				t.Fatalf("violations = %v, want one containing %q", violations, tc.want)
 			}
