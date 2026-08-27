@@ -105,6 +105,16 @@ func targetsForNodes(tpl TargetTemplate, nodes []k8s.NodeInfo) []ScrapeTarget {
 	return out
 }
 
+// healthKind reports which health row a target belongs to. Generated targets
+// carry their kind as a label; everything else is a hand-written custom
+// endpoint.
+func healthKind(target ScrapeTarget) string {
+	if kind := target.Labels["scrape_kind"]; kind != "" {
+		return kind
+	}
+	return "custom"
+}
+
 // targetIdentity is what makes two generated targets the same target. The URL
 // is part of it: a node that keeps its name and changes its address is a new
 // target, and leaving the old scraper running would attribute its failures to

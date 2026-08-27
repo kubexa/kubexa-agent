@@ -62,6 +62,7 @@ type Collector struct {
 	writer    Writer
 	log       *logger.Logger
 	metrics   *scraperMetrics
+	health    *ScrapeHealth
 	agentMeta *commonv1.AgentMetadata
 
 	k8s    *k8sMetricsScraper
@@ -141,6 +142,7 @@ func New(opts Options) (*Collector, error) {
 		writer:        &queueWriter{q: opts.Queue, timeout: writeTimeout},
 		log:           log,
 		metrics:       scraperMetrics,
+		health:        newScrapeHealth(),
 		agentMeta:     proto.Clone(meta).(*commonv1.AgentMetadata),
 		customFilters: customFilters,
 		rng:           rand.New(rand.NewSource(time.Now().UnixNano())),
@@ -173,6 +175,11 @@ func (c *Collector) Name() string {
 	return componentName
 }
 
+// Health returns the collector's scrape health. The heartbeat reports it; it
+// is not derived from the Prometheus counters, which live on a listener
+// nothing outside the cluster reads.
+func (c *Collector) Health() *ScrapeHealth { return c.health }
+
 // Start launches scraper goroutines with independent tickers.
 func (c *Collector) Start(ctx context.Context) error {
 	if c.cancel != nil {
@@ -198,6 +205,10 @@ func (c *Collector) Start(ctx context.Context) error {
 				}()
 			}
 		}
+	}
+
+	if len(c.cfg.CustomTargets) > 0 {
+		c.health.SetTargetCount("custom", len(c.cfg.CustomTargets))
 	}
 
 	for _, target := range c.cfg.CustomTargets {
@@ -352,6 +363,7 @@ func (c *Collector) runCustomTarget(ctx context.Context, target ScrapeTarget) {
 		result, err := c.custom.ScrapeTarget(ctx, target, filter)
 		if err != nil {
 			backoff = nextBackoff(backoff)
+			c.health.RecordFailure(healthKind(target), targetName, err)
 			c.log.Warn("custom metrics scrape failed",
 				logger.F("target", targetName),
 				logger.F("url", target.URL),
@@ -360,6 +372,7 @@ func (c *Collector) runCustomTarget(ctx context.Context, target ScrapeTarget) {
 			)
 		} else {
 			backoff = 0
+			c.health.RecordSuccess(healthKind(target), targetName, countSamples(result.Families))
 			if err := c.publishPrometheusMetrics(ctx, target, result); err != nil {
 				c.log.Warn("publish custom metrics failed",
 					logger.F("target", targetName),
@@ -405,6 +418,14 @@ func (c *Collector) runDynamicTargets(ctx context.Context) {
 					logger.F("removed", len(removed)),
 					logger.F("total", len(c.dynamic.current)),
 				)
+			}
+
+			counts := map[string]int{}
+			for _, t := range c.dynamic.current {
+				counts[healthKind(t)]++
+			}
+			for _, tpl := range c.dynamic.templates {
+				c.health.SetTargetCount(tpl.Kind, counts[tpl.Kind])
 			}
 		}
 
