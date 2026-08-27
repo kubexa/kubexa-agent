@@ -234,6 +234,25 @@ collect:
       # metricAllowlist: []
       # metricDenylist: []
 
+    # Object state -- replica counts, pod phase, restarts, PVC state, HPA and
+    # job status. None of it is in the Metrics API.
+    #
+    # The agent looks for the Service before it scrapes. If it is not there,
+    # the platform is told "kube-state-metrics is not installed" rather than
+    # being shown an empty graph. Point serviceNamespace/serviceName at your
+    # installation if it is not the kube-system default.
+    kubeStateMetrics:
+      enabled: false
+      serviceNamespace: kube-system
+      serviceName: kube-state-metrics
+      port: 8080
+      interval: "60s"
+      timeout: "20s"
+      probeInterval: "5m"
+      # url: ""            # explicit address; disables the presence probe
+      # metricAllowlist: []
+      # metricDenylist: []
+
 # Live, on-demand resource reads requested by the Kubexa platform — distinct
 # from collect.state, which governs continuous streaming. Where collect.state
 # pushes a running feed of changes, query answers a single point-in-time

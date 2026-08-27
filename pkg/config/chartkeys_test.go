@@ -132,9 +132,11 @@ func TestChartDefaultRuleKeysAreAgentKeys(t *testing.T) {
 // no keys to get wrong -- plain lists of strings. They are named here so the
 // coverage check below can tell "no keys to check" from "nobody checked".
 var scalarPassthroughs = map[string]bool{
-	"collect.logs.excludeNamespaces":           true,
-	"collect.metrics.cadvisor.metricAllowlist": true,
-	"collect.metrics.cadvisor.metricDenylist":  true,
+	"collect.logs.excludeNamespaces":                   true,
+	"collect.metrics.cadvisor.metricAllowlist":         true,
+	"collect.metrics.cadvisor.metricDenylist":          true,
+	"collect.metrics.kubeStateMetrics.metricAllowlist": true,
+	"collect.metrics.kubeStateMetrics.metricDenylist":  true,
 }
 
 var toYamlValue = regexp.MustCompile(`\.Values\.([A-Za-z0-9_.]+)`)

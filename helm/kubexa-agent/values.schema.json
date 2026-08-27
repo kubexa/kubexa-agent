@@ -746,6 +746,117 @@
                   }
                 }
               }
+            },
+            "kubeStateMetrics": {
+              "type": [
+                "null",
+                "object"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "serviceNamespace": {
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "null",
+                    "number",
+                    "string"
+                  ]
+                },
+                "serviceName": {
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "null",
+                    "number",
+                    "string"
+                  ]
+                },
+                "port": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "url": {
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "null",
+                    "number",
+                    "string"
+                  ]
+                },
+                "interval": {
+                  "type": [
+                    "integer",
+                    "null",
+                    "string"
+                  ],
+                  "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+                  "minimum": 0,
+                  "maximum": 0,
+                  "description": "A Go duration such as \"60s\". The chart quotes this value, so every number other than 0 reaches the agent as a string time.ParseDuration refuses, and the agent exits before it connects."
+                },
+                "timeout": {
+                  "type": [
+                    "integer",
+                    "null",
+                    "string"
+                  ],
+                  "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+                  "minimum": 0,
+                  "maximum": 0,
+                  "description": "A Go duration such as \"20s\". The chart quotes this value, so every number other than 0 reaches the agent as a string time.ParseDuration refuses, and the agent exits before it connects."
+                },
+                "probeInterval": {
+                  "type": [
+                    "integer",
+                    "null",
+                    "string"
+                  ],
+                  "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+                  "minimum": 0,
+                  "maximum": 0,
+                  "description": "A Go duration such as \"5m\". The chart quotes this value, so every number other than 0 reaches the agent as a string time.ParseDuration refuses, and the agent exits before it connects."
+                },
+                "metricAllowlist": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  }
+                },
+                "metricDenylist": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  }
+                }
+              }
             }
           }
         }
