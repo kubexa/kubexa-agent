@@ -480,6 +480,12 @@ func (c *Collector) stopDynamicTarget(target ScrapeTarget) {
 	c.customFiltersMu.Unlock()
 	c.dynamicMu.Unlock()
 
+	// Outside both locks above: a removed target never scrapes again, so
+	// nothing else will ever call RecordSuccess to clear a failure it left
+	// behind. Without this, a target that failed right before removal reports
+	// as a standing outage for the rest of the process's life.
+	c.health.ClearTarget(healthKind(target), targetLabel(target))
+
 	if running {
 		cancel()
 	}

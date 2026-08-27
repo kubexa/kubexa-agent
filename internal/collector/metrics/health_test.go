@@ -3,6 +3,7 @@ package metrics
 import (
 	"errors"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -75,6 +76,58 @@ func TestTwoFailingTargetsOfSameKindBothCount(t *testing.T) {
 	}
 	if got.State != StateFailing {
 		t.Errorf("State = %q, want %q: node-2 is still failing", got.State, StateFailing)
+	}
+}
+
+// TestClearTargetRemovesOnlyThatEntry pins the fix for the eviction gap: a
+// torn-down target's failing entry has no other code path that ever removes
+// it, since nothing will scrape it again to call RecordSuccess.
+func TestClearTargetRemovesOnlyThatEntry(t *testing.T) {
+	h := newScrapeHealth()
+	h.SetTargetCount("cadvisor", 2)
+	h.RecordFailure("cadvisor", "cadvisor/node-1", errors.New("HTTP 500"))
+	h.RecordFailure("cadvisor", "cadvisor/node-2", errors.New("HTTP 500"))
+
+	got := byKind(h.Snapshot())["cadvisor"]
+	if got.TargetsFailing != 2 {
+		t.Fatalf("TargetsFailing = %d, want 2", got.TargetsFailing)
+	}
+
+	h.ClearTarget("cadvisor", "cadvisor/node-1")
+	got = byKind(h.Snapshot())["cadvisor"]
+	if got.TargetsFailing != 1 {
+		t.Fatalf("TargetsFailing = %d, want 1 after clearing node-1", got.TargetsFailing)
+	}
+	if got.State != StateFailing {
+		t.Errorf("State = %q, want %q: node-2 is still failing", got.State, StateFailing)
+	}
+
+	h.ClearTarget("cadvisor", "cadvisor/node-2")
+	got = byKind(h.Snapshot())["cadvisor"]
+	if got.TargetsFailing != 0 {
+		t.Fatalf("TargetsFailing = %d, want 0 after clearing node-2", got.TargetsFailing)
+	}
+	if got.State != StateOK {
+		t.Errorf("State = %q, want %q", got.State, StateOK)
+	}
+}
+
+// TestClearTargetOnUnknownKindOrTargetIsANoOp asserts ClearTarget never
+// panics and never fabricates a kindState for a kind or target it has never
+// heard of.
+func TestClearTargetOnUnknownKindOrTargetIsANoOp(t *testing.T) {
+	h := newScrapeHealth()
+	h.SetTargetCount("cadvisor", 1)
+	h.RecordFailure("cadvisor", "cadvisor/node-1", errors.New("HTTP 500"))
+
+	before := h.Snapshot()
+
+	h.ClearTarget("kube_state_metrics", "kube_state_metrics/pod-1") // unknown kind
+	h.ClearTarget("cadvisor", "cadvisor/node-99")                   // unknown target
+
+	after := h.Snapshot()
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("Snapshot changed after no-op ClearTarget calls: before=%+v after=%+v", before, after)
 	}
 }
 
