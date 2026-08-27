@@ -240,6 +240,31 @@ collect:
       # metricAllowlist: []
       # metricDenylist: []
 
+      # The kubelet's address and credentials. Every key below is optional and
+      # takes the agent's own default when omitted; set one only to override.
+      #
+      #   scheme/port/path  where the kubelet serves cAdvisor. port defaults to
+      #                     the port each node reports, then 10250.
+      #   bearerTokenPath   the projected ServiceAccount token. The kubelet
+      #                     answers 401 without one.
+      #
+      # tls is the one worth reading before you install. caFile defaults to the
+      # ServiceAccount CA bundle -- which signs the API SERVER, not kubelet
+      # SERVING certificates. On a cluster without serverTLSBootstrap and an
+      # approved CSR flow the kubelets serve self-signed certs, and every
+      # cAdvisor scrape then fails `x509: certificate signed by unknown
+      # authority` permanently. Point caFile at the CA that actually signed
+      # them, or set insecureSkipVerify to accept them unverified. Setting both
+      # is refused at startup: the bundle would never be consulted.
+
+      # scheme: "https"
+      # port: "10250"
+      # path: "/metrics/cadvisor"
+      # bearerTokenPath: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+      # tls:
+      #   insecureSkipVerify: false
+      #   caFile: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
     # Object state -- replica counts, pod phase, restarts, PVC state, HPA and
     # job status. None of it is in the Metrics API.
     #
@@ -255,6 +280,7 @@ collect:
       interval: "60s"
       timeout: "20s"
       probeInterval: "5m"
+      # path: "/metrics"   # the exposition path on that Service
       # url: ""            # explicit address; disables the presence probe
       # metricAllowlist: []
       # metricDenylist: []
