@@ -151,6 +151,32 @@ func (h *ScrapeHealth) MarkNotInstalled(kind string) {
 	k.failing = make(map[string]TargetState)
 }
 
+// ClearTarget removes target's failure entry for kind, if any, and touches
+// nothing else -- not lastSuccess, not samplesLastScrape, not the
+// cardinality counter, not the target count, not notInstalled.
+//
+// A torn-down target never scrapes again, so nothing else would ever call
+// RecordSuccess/RecordFailure for it to self-heal its own failing entry. A
+// caller that stops scraping a target must call this or the entry outlives
+// the target: TargetsFailing keeps counting a node that no longer exists,
+// forever, and repeated churn accumulates one stale entry per node that
+// happened to be failing at the moment it was removed.
+//
+// A kind ClearTarget has never heard of, or a target not in that kind's
+// failing set, is a no-op -- it must not create a kindState for either.
+func (h *ScrapeHealth) ClearTarget(kind, target string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	k, ok := h.kinds[kind]
+	if !ok {
+		return
+	}
+	delete(k.failing, target)
+}
+
 // Snapshot returns one entry per kind, ordered by kind so two consecutive
 // heartbeats from the same agent do not differ only in map iteration order.
 func (h *ScrapeHealth) Snapshot() []KindHealth {

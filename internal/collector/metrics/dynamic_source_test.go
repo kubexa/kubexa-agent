@@ -230,3 +230,57 @@ func TestRefreshKeepsCurrentTargetsWhenTheListingFails(t *testing.T) {
 		t.Fatalf("current = %d targets, want the previous 1 kept", len(p.current))
 	}
 }
+
+// TestStopDynamicTargetClearsTheFailureFromHealth pins the wiring, not just
+// the ClearTarget method: a dynamic target that failed its last scrape and is
+// then torn down (a node drained and deleted) must stop being counted as
+// failing. Before this wiring, stopDynamicTarget touched dynamicCancel and
+// customFilters but never health, so the target's failing entry outlived the
+// target and TargetsFailing over-reported forever.
+//
+// The package has no exported, dependency-free way to build a running
+// Collector (New requires a queue and, for dynamic targets, a kube client),
+// so this white-box test builds the minimal Collector struct literal
+// stopDynamicTarget actually touches, rather than adding a new production
+// constructor seam just to make it reachable.
+func TestStopDynamicTargetClearsTheFailureFromHealth(t *testing.T) {
+	c := &Collector{
+		health:        newScrapeHealth(),
+		dynamicCancel: make(map[string]context.CancelFunc),
+		customFilters: make(map[string]*MetricFilter),
+	}
+
+	target := ScrapeTarget{
+		Name:   "cadvisor/node-3",
+		URL:    "https://10.0.0.3:10250/metrics/cadvisor",
+		Labels: map[string]string{"scrape_kind": "cadvisor"},
+	}
+
+	c.health.SetTargetCount("cadvisor", 3)
+	c.health.RecordFailure(healthKind(target), targetLabel(target), errors.New("HTTP 500"))
+
+	got := byKind(c.health.Snapshot())["cadvisor"]
+	if got.TargetsFailing != 1 {
+		t.Fatalf("TargetsFailing = %d, want 1 before node-3 is removed", got.TargetsFailing)
+	}
+
+	_, cancel := context.WithCancel(context.Background())
+	c.dynamicCancel[targetIdentity(target)] = cancel
+	c.customFilters[targetKey(target)] = &MetricFilter{}
+
+	// The same tick's refresh() drops the denominator to 2; that half of the
+	// fix (SetTargetCount) already worked before this change.
+	c.stopDynamicTarget(target)
+	c.health.SetTargetCount("cadvisor", 2)
+
+	got = byKind(c.health.Snapshot())["cadvisor"]
+	if got.TargetsFailing != 0 {
+		t.Fatalf("TargetsFailing = %d, want 0: node-3 no longer exists", got.TargetsFailing)
+	}
+	if got.State != StateOK {
+		t.Errorf("State = %q, want %q: the two remaining nodes are healthy", got.State, StateOK)
+	}
+	if _, running := c.dynamicCancel[targetIdentity(target)]; running {
+		t.Error("dynamicCancel entry for node-3 was not removed")
+	}
+}
