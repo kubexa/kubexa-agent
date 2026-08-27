@@ -128,6 +128,12 @@ func (m *MetricsCollectConfig) normalize() {
 	if m.KubeStateMetrics.Enabled {
 		m.KubeStateMetrics.ApplyDefaults()
 	}
+	if m.Enabled && m.MaxSamplesPerScrape == 0 {
+		// cAdvisor is roughly 40 series per container under the default
+		// allowlist, so 20,000 admits about 500 containers on one node's
+		// scrape -- far above any real node and far below a runaway.
+		m.MaxSamplesPerScrape = 20_000
+	}
 }
 
 func (r *MetricsNamespaceRule) normalize(index int) {
@@ -192,6 +198,9 @@ func (m *MetricsCollectConfig) validate() []string {
 	}
 	violations = append(violations, m.CAdvisor.validate()...)
 	violations = append(violations, m.KubeStateMetrics.validate()...)
+	if m.MaxSamplesPerScrape < 0 {
+		violations = append(violations, "collect.metrics.max_samples_per_scrape must not be negative")
+	}
 	return violations
 }
 

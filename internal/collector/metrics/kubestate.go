@@ -96,6 +96,16 @@ func (c *Collector) runKubeStateTarget(ctx context.Context) {
 					logger.F("url", ks.Target.URL),
 					logger.F("error", err.Error()))
 			} else {
+				families, droppedSamples := applySampleBudget(result.Families, c.cfg.MaxSamplesPerScrape)
+				if droppedSamples > 0 {
+					c.health.RecordCardinalityDrop(kind, droppedSamples)
+					c.log.Warn("scrape exceeded the sample budget; whole families dropped",
+						logger.F("target", targetName),
+						logger.F("budget", c.cfg.MaxSamplesPerScrape),
+						logger.F("dropped_samples", droppedSamples),
+					)
+				}
+				result.Families = families
 				c.health.RecordSuccess(kind, targetName, countSamples(result.Families))
 				if err := c.publishPrometheusMetrics(ctx, ks.Target, result); err != nil {
 					c.log.Warn("publish kube-state-metrics failed", logger.F("error", err.Error()))

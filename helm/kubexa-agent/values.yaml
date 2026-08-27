@@ -191,6 +191,12 @@ collect:
     podInterval: 30s
     nodeInterval: 30s
     kubeMetrics: false
+    # Samples one scrape of one target may publish. 0 disables the cap.
+    #
+    # Whole metric families are dropped, in name order, once the budget is
+    # spent -- the same families every time, so a capped target's series do not
+    # flap. This is the agent's own ceiling; the platform enforces its own.
+    maxSamplesPerScrape: 20000
     rules:
       - id: cluster-metrics
         namespace: ""
