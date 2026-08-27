@@ -185,6 +185,11 @@ func (c *Collector) Name() string {
 // nothing outside the cluster reads.
 func (c *Collector) Health() *ScrapeHealth { return c.health }
 
+// ScrapeTargetHealth satisfies the heartbeat's ScrapeHealthSource.
+func (c *Collector) ScrapeTargetHealth() []*agentv1.ScrapeTargetHealth {
+	return HealthProto(c.health)
+}
+
 // Start launches scraper goroutines with independent tickers.
 func (c *Collector) Start(ctx context.Context) error {
 	if c.cancel != nil {

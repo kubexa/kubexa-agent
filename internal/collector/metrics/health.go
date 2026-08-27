@@ -7,6 +7,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
 
 // TargetState is what an operator is told about one kind of scrape target.
@@ -235,6 +237,31 @@ func (h *ScrapeHealth) Snapshot() []KindHealth {
 		out = append(out, entry)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
+	return out
+}
+
+// HealthProto renders a scrape health snapshot for the heartbeat.
+//
+// A zero LastSuccess becomes 0, not the Unix epoch: "never succeeded" and
+// "succeeded in 1970" are different claims and only one of them is true.
+func HealthProto(h *ScrapeHealth) []*agentv1.ScrapeTargetHealth {
+	snapshot := h.Snapshot()
+	out := make([]*agentv1.ScrapeTargetHealth, 0, len(snapshot))
+	for _, k := range snapshot {
+		var lastSuccess int64
+		if !k.LastSuccess.IsZero() {
+			lastSuccess = k.LastSuccess.UnixMilli()
+		}
+		out = append(out, &agentv1.ScrapeTargetHealth{
+			Kind:               k.Kind,
+			State:              string(k.State),
+			TargetsTotal:       int32(k.TargetsTotal),
+			TargetsFailing:     int32(k.TargetsFailing),
+			LastSuccessUnixMs:  lastSuccess,
+			SamplesLastScrape:  k.SamplesLastScrape,
+			DroppedCardinality: k.DroppedCardinality,
+		})
+	}
 	return out
 }
 

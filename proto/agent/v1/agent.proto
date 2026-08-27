@@ -74,6 +74,38 @@ message AgentHealth {
   int64 dropped_too_old      = 5;
   int64 dropped_future       = 6;
   int64 dropped_rate_limited = 7;
+
+  // Scrape health, one entry per target KIND rather than per target. Forty
+  // cAdvisor rows say less than "3 of 40 failing", and a per-target list would
+  // grow the heartbeat with the cluster.
+  repeated ScrapeTargetHealth scrape_targets = 8;
+}
+
+// ScrapeTargetHealth is the state of one kind of metric scrape target.
+message ScrapeTargetHealth {
+  string kind = 1;  // "custom" | "cadvisor" | "kube_state_metrics"
+
+  // state is "ok" | "failing" | "unreachable" | "not_installed".
+  //
+  // The four are not collapsible and the platform must not collapse them
+  // either. "not_installed" means the agent looked for the component and it
+  // was absent; "unreachable" means nothing answered at its address;
+  // "failing" means it answered badly. A scrape that succeeded and returned
+  // zero samples is "ok" -- that is a measured zero, and rendering it as an
+  // absence is the failure this whole field exists to prevent.
+  string state = 2;
+
+  int32 targets_total   = 3;
+  int32 targets_failing = 4;
+
+  // last_success_unix_ms is 0 when this kind has NEVER succeeded, which is a
+  // different statement from "its last scrape failed".
+  int64 last_success_unix_ms = 5;
+  // samples_last_scrape is what was PUBLISHED, after the sample budget.
+  int64 samples_last_scrape = 6;
+  // dropped_cardinality is CUMULATIVE since process start, like every other
+  // counter in AgentHealth: a dropped heartbeat then loses nothing.
+  int64 dropped_cardinality = 7;
 }
 
 // ─── Gateway → Agent ────────────────────────────────────────────────────────
