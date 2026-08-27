@@ -70,6 +70,14 @@ type kindState struct {
 	samplesLastScrape  map[string]int64
 	droppedCardinality int64
 	notInstalled       bool
+	// discoveryFailed is a condition of the whole KIND, not of any target, so
+	// it is a flag rather than an entry in failing. As an entry it was counted
+	// by TargetsFailing, which produced two false renders: `1 of 0 failing`
+	// for an RBAC-refused start -- the "more failing than exist" inversion the
+	// Kind field was introduced to eliminate -- and `1 of 40 failing` after a
+	// good listing, a specific claim about one node while all forty scrape
+	// fine. A discovery failure has no target to be attributed to.
+	discoveryFailed bool
 }
 
 // ScrapeHealth is the collector's live view of its own scraping.
@@ -139,36 +147,33 @@ func (h *ScrapeHealth) RecordFailure(kind, target string, err error) {
 	k.failing[target] = classifyScrapeError(err)
 }
 
-// discoveryTarget is the map key a kind's DISCOVERY failure is recorded
-// under. It is not a scrape target and never reaches the wire: the registry
-// publishes only len(failing), never its keys. The NUL byte keeps it out of
-// collision range of any real target name, which is a node name or a
-// configured endpoint name.
-const discoveryTarget = "\x00discovery"
-
 // RecordDiscoveryFailure records that the agent could not work out which
 // targets of this kind exist -- a failed node LIST, a failed presence probe.
 //
-// It is deliberately not RecordFailure: the classification there describes
-// how a SCRAPE failed, and a kind whose discovery is broken has not scraped
-// anything. StateFailing is the honest answer -- the kubelets may be perfectly
-// reachable; it is the agent's view of them that is broken. Reporting the kind
-// as absent instead is what this whole registry exists to prevent: an agent
-// whose ClusterRole is too narrow would emit no entry at all, and the screen
-// would read a totally broken integration as "this agent does not report
-// scrape health".
+// It is deliberately not RecordFailure, on two counts. The classification
+// there describes how a SCRAPE failed, and a kind whose discovery is broken
+// has not scraped anything: StateFailing is the honest answer, because the
+// kubelets may be perfectly reachable and it is the agent's view of them that
+// is broken. And it is not recorded against a target at all -- see
+// kindState.discoveryFailed for why a pseudo-target inverted the very count
+// this registry exists to keep straight.
+//
+// Reporting the kind as absent instead is what this whole registry exists to
+// prevent: an agent whose ClusterRole is too narrow would emit no entry at
+// all, and the screen would read a totally broken integration as "this agent
+// does not report scrape health".
 func (h *ScrapeHealth) RecordDiscoveryFailure(kind string) {
 	if h == nil {
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.kind(kind).failing[discoveryTarget] = StateFailing
+	h.kind(kind).discoveryFailed = true
 }
 
-// ClearDiscoveryFailure removes a standing discovery failure for kind. A
+// ClearDiscoveryFailure clears a standing discovery failure for kind. A
 // discovery that starts working again must stop being reported: nothing else
-// would ever clear this entry, because no scrape is ever attributed to it.
+// would ever clear this flag, because no scrape is ever attributed to it.
 func (h *ScrapeHealth) ClearDiscoveryFailure(kind string) {
 	if h == nil {
 		return
@@ -179,7 +184,7 @@ func (h *ScrapeHealth) ClearDiscoveryFailure(kind string) {
 	if !ok {
 		return
 	}
-	delete(k.failing, discoveryTarget)
+	k.discoveryFailed = false
 }
 
 // RecordCardinalityDrop adds to this kind's cumulative dropped-sample total.
@@ -211,6 +216,9 @@ func (h *ScrapeHealth) MarkNotInstalled(kind string) {
 	// success timestamp, which describes no state that ever existed.
 	k.samplesLastScrape = make(map[string]int64)
 	k.lastSuccess = time.Time{}
+	// The probe ANSWERED -- absence is only ever recorded from a definite
+	// IsNotFound -- so any standing "could not ask" is superseded by it.
+	k.discoveryFailed = false
 }
 
 // MarkInstalled clears kind's absence determination and touches nothing else
@@ -286,6 +294,14 @@ func (h *ScrapeHealth) Snapshot() []KindHealth {
 			DroppedCardinality: k.droppedCardinality,
 		}
 		switch {
+		// A discovery failure OUTRANKS not_installed. Absence is recorded only
+		// from a definite IsNotFound; a later probe error means the agent no
+		// longer knows whether the component is there, so continuing to assert
+		// "not installed" claims knowledge that was just lost. "Failing to
+		// determine" is both the honest state and the actionable one -- it
+		// points the operator at the probe rather than at an install.
+		case k.discoveryFailed:
+			entry.State = StateFailing
 		case k.notInstalled:
 			entry.State = StateNotInstalled
 		case len(k.failing) == 0:
