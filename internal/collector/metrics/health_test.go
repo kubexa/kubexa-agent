@@ -158,6 +158,75 @@ func TestMarkNotInstalledOutranksUnreachable(t *testing.T) {
 	}
 }
 
+// MarkInstalled is the only thing that clears a standing MarkNotInstalled:
+// a kube-state-metrics target does not scrape at all while notInstalled is
+// set, so nothing else would ever call RecordSuccess to clear it once the
+// Service reappears.
+func TestMarkInstalledReturnsAKindToItsOrdinaryState(t *testing.T) {
+	h := newScrapeHealth()
+	h.MarkNotInstalled("kube_state_metrics")
+	h.MarkInstalled("kube_state_metrics")
+
+	got := byKind(h.Snapshot())["kube_state_metrics"]
+	if got.State != StateOK {
+		t.Errorf("State = %q, want %q", got.State, StateOK)
+	}
+}
+
+func TestMarkInstalledOnUnknownKindIsAHarmlessNoOp(t *testing.T) {
+	h := newScrapeHealth()
+	h.SetTargetCount("cadvisor", 1)
+	h.RecordFailure("cadvisor", "cadvisor/node-1", errors.New("HTTP 500"))
+
+	before := byKind(h.Snapshot())["cadvisor"]
+	h.MarkInstalled("kube_state_metrics") // never seen before
+
+	after := byKind(h.Snapshot())["cadvisor"]
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("MarkInstalled on an unknown kind changed an unrelated kind's health: before=%+v after=%+v",
+			before, after)
+	}
+	got := byKind(h.Snapshot())["kube_state_metrics"]
+	if got.State != StateOK {
+		t.Errorf("State = %q, want %q for a kind with no failures and no absence determination",
+			got.State, StateOK)
+	}
+}
+
+// This is the exact collapse the product must not make: a component that was
+// reinstalled but is still failing (CrashLoopBackOff, still starting) must
+// read as failing, not as absent. Absent tells the operator there is nothing
+// to fix.
+func TestMarkNotInstalledThenMarkInstalledThenFailureReportsFailingNotNotInstalled(t *testing.T) {
+	h := newScrapeHealth()
+	h.MarkNotInstalled("kube_state_metrics")
+
+	h.MarkInstalled("kube_state_metrics")
+	h.RecordFailure("kube_state_metrics", "kube-state-metrics", errors.New("HTTP 500"))
+
+	got := byKind(h.Snapshot())["kube_state_metrics"]
+	if got.State != StateFailing {
+		t.Fatalf("State = %q, want %q -- a reinstalled-but-failing component must not read as absent",
+			got.State, StateFailing)
+	}
+}
+
+// MarkInstalled clears only the absence flag. A failing target from a
+// different scrape and a recorded success must survive it untouched.
+func TestMarkInstalledTouchesNothingButTheAbsenceFlag(t *testing.T) {
+	h := newScrapeHealth()
+	h.RecordSuccess("kube_state_metrics", "kube-state-metrics", 42)
+	h.RecordFailure("kube_state_metrics", "kube-state-metrics-2", errors.New("HTTP 500"))
+	before := byKind(h.Snapshot())["kube_state_metrics"]
+
+	h.MarkInstalled("kube_state_metrics")
+
+	after := byKind(h.Snapshot())["kube_state_metrics"]
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("MarkInstalled changed health beyond the absence flag: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestCardinalityDropsAccumulate(t *testing.T) {
 	h := newScrapeHealth()
 	h.SetTargetCount("cadvisor", 1)
