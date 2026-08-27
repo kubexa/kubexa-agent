@@ -573,7 +573,7 @@ func validateConfigAndExit(configPath string) int {
 		fmt.Fprintf(os.Stderr, "validate config: %v\n", err)
 		return 1
 	}
-	fmt.Fprintln(os.Stdout, "config is valid")
+	_, _ = fmt.Fprintln(os.Stdout, "config is valid")
 	return 0
 }
 
