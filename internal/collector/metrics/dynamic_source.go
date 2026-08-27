@@ -9,6 +9,7 @@ import (
 
 	"github.com/kubexa/kubexa-agent/internal/k8s"
 	"github.com/kubexa/kubexa-agent/internal/logger"
+	pkgconfig "github.com/kubexa/kubexa-agent/pkg/config"
 )
 
 // defaultKubeletPort is used when a node's status reports no kubelet endpoint
@@ -80,11 +81,20 @@ func targetsForNodes(tpl TargetTemplate, nodes []k8s.NodeInfo) []ScrapeTarget {
 		}
 		labels["node"] = node.Name
 
+		interval := tpl.Interval
+		if interval <= 0 {
+			interval = pkgconfig.DefaultScrapeInterval
+		}
+		timeout := tpl.Timeout
+		if timeout <= 0 {
+			timeout = pkgconfig.DefaultScrapeTimeout
+		}
+
 		out = append(out, ScrapeTarget{
 			Name:            fmt.Sprintf("%s/%s", tpl.NamePrefix, node.Name),
 			URL:             scheme + "://" + net.JoinHostPort(node.InternalIP, port) + tpl.Path,
-			Interval:        tpl.Interval,
-			Timeout:         tpl.Timeout,
+			Interval:        interval,
+			Timeout:         timeout,
 			Labels:          labels,
 			BearerTokenPath: tpl.BearerTokenPath,
 			TLSConfig:       tpl.TLSConfig,
