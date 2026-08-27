@@ -35,6 +35,8 @@ func (m *mockK8sClient) Watch(context.Context, k8s.ResourceKind, string, k8s.Wat
 
 func (m *mockK8sClient) NodeMetrics(context.Context) ([]k8s.NodeMetric, error) { return nil, nil }
 
+func (m *mockK8sClient) Nodes(context.Context) ([]k8s.NodeInfo, error) { return nil, nil }
+
 func (m *mockK8sClient) PodMetrics(context.Context, string) ([]k8s.PodMetric, error) {
 	return nil, nil
 }

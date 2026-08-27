@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -41,6 +42,9 @@ type Client interface {
 
 	// NodeMetrics returns current CPU/memory metrics for all nodes.
 	NodeMetrics(ctx context.Context) ([]NodeMetric, error)
+
+	// Nodes returns the cluster's node inventory for scrape target generation.
+	Nodes(ctx context.Context) ([]NodeInfo, error)
 
 	// PodMetrics returns current CPU/memory metrics for pods in namespace.
 	PodMetrics(ctx context.Context, namespace string) ([]PodMetric, error)
@@ -224,6 +228,50 @@ func (c *client) NodeMetrics(ctx context.Context) ([]NodeMetric, error) {
 	for _, item := range list.Items {
 		out = append(out, nodeMetricFrom(item))
 	}
+	return out, nil
+}
+
+// Nodes lists the cluster's nodes, sorted by name.
+//
+// The sort is not cosmetic: the dynamic target provider diffs one inventory
+// against the previous one, and an unsorted list from the API server would
+// make every refresh look like a change.
+func (c *client) Nodes(ctx context.Context) ([]NodeInfo, error) {
+	var list *corev1.NodeList
+	err := c.withMetrics(ctx, "list", "nodes", func(ctx context.Context) error {
+		var listErr error
+		list, listErr = c.kube.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+		return listErr
+	})
+	if err != nil {
+		return nil, fmt.Errorf("k8s client: list nodes: %w", err)
+	}
+
+	out := make([]NodeInfo, 0, len(list.Items))
+	for _, item := range list.Items {
+		info := NodeInfo{
+			Name:        item.Name,
+			KubeletPort: item.Status.DaemonEndpoints.KubeletEndpoint.Port,
+			Labels:      item.Labels,
+		}
+		for _, addr := range item.Status.Addresses {
+			if addr.Type == corev1.NodeInternalIP && addr.Address != "" {
+				info.InternalIP = addr.Address
+				break
+			}
+		}
+		if info.InternalIP == "" {
+			continue
+		}
+		for _, cond := range item.Status.Conditions {
+			if cond.Type == corev1.NodeReady {
+				info.Ready = cond.Status == corev1.ConditionTrue
+				break
+			}
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
 
