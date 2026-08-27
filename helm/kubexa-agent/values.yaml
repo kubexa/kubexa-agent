@@ -218,6 +218,22 @@ collect:
     #     extra_labels:
     #       service: my-app
 
+    # Per-node kubelet scraping: container CPU, memory, network and filesystem
+    # usage. Targets are generated from the live node list, so nothing here
+    # names a node.
+    #
+    # metricAllowlist REPLACES the agent's built-in list rather than adding to
+    # it. The built-in list is closed on purpose: cAdvisor exposes roughly 40
+    # series per container, and an open list turns a 300-pod cluster into
+    # ~12,000 series on the first install.
+    cadvisor:
+      enabled: false
+      interval: "30s"
+      timeout: "10s"
+      refreshInterval: "2m"
+      # metricAllowlist: []
+      # metricDenylist: []
+
 # Live, on-demand resource reads requested by the Kubexa platform — distinct
 # from collect.state, which governs continuous streaming. Where collect.state
 # pushes a running feed of changes, query answers a single point-in-time

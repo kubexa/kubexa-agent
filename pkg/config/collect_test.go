@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 	"github.com/kubexa/kubexa-agent/pkg/config"
+	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
 
 func TestLogsCollectConfig_validateCheckpointDir(t *testing.T) {
@@ -292,6 +292,123 @@ func TestMetricsCustomEndpointValidation(t *testing.T) {
 				t.Fatalf("violations = %v, want one containing %q", violations, tc.want)
 			}
 		})
+	}
+}
+
+func TestCAdvisorValidation(t *testing.T) {
+	cases := []struct {
+		name      string
+		cadvisor  config.CAdvisorConfig
+		want      string
+		wantValid bool
+	}{
+		{
+			name:      "disabled ignores a bad allowlist pattern",
+			cadvisor:  config.CAdvisorConfig{Enabled: false, MetricAllowlist: []string{"("}},
+			wantValid: true,
+		},
+		{
+			name:     "bad allowlist pattern",
+			cadvisor: config.CAdvisorConfig{Enabled: true, MetricAllowlist: []string{"("}},
+			want:     "metric_allowlist[0] is not a valid regular expression",
+		},
+		{
+			name:     "bad scheme",
+			cadvisor: config.CAdvisorConfig{Enabled: true, Scheme: "ftp"},
+			want:     "scheme must be http or https",
+		},
+		{
+			name:     "path without leading slash",
+			cadvisor: config.CAdvisorConfig{Enabled: true, Path: "metrics/cadvisor"},
+			want:     "path must start with /",
+		},
+		{
+			name:     "port out of range",
+			cadvisor: config.CAdvisorConfig{Enabled: true, Port: "99999"},
+			want:     "port must be a TCP port number",
+		},
+		{
+			name: "insecure_skip_verify with ca_file set",
+			cadvisor: config.CAdvisorConfig{
+				Enabled: true,
+				TLS:     config.TLSEndpointConfig{InsecureSkipVerify: true, CAFile: "/ca.crt"},
+			},
+			want: "tls sets both insecure_skip_verify and ca_file",
+		},
+		{
+			// Interval is written, Timeout is not: ApplyDefaults (whether run by
+			// normalize beforehand, or never run at all, as ValidateForTest does
+			// here) fills the omitted Timeout with the 10s default, which is not
+			// below the 5s interval the operator actually wrote. A three-term
+			// `Timeout > 0 && Interval > 0 && Timeout >= Interval` check would
+			// miss this because Timeout is still its zero value when validate
+			// runs directly -- it must compare EFFECTIVE values instead.
+			name:     "defaulted timeout not below a short interval",
+			cadvisor: config.CAdvisorConfig{Enabled: true, Interval: 5 * time.Second},
+			want:     "timeout must be below interval",
+		},
+		{
+			// Neither field is written: the defaults are 30s/10s, which satisfy
+			// the invariant on their own.
+			name:      "unset interval and timeout use valid defaults",
+			cadvisor:  config.CAdvisorConfig{Enabled: true},
+			wantValid: true,
+		},
+		{
+			name:      "enabled with only the required field set is valid",
+			cadvisor:  config.CAdvisorConfig{Enabled: true},
+			wantValid: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Collect.Metrics.Enabled = true
+			// A benign rule so every case exercises only the CAdvisor arm of
+			// validate(), not the separate "must define rules/endpoints/cadvisor"
+			// guard -- that guard's cadvisor-only branch has its own test below.
+			cfg.Collect.Metrics.Rules = []config.MetricsNamespaceRule{{Resources: []string{"pods"}}}
+			cfg.Collect.Metrics.CAdvisor = tc.cadvisor
+
+			violations := config.ValidateForTest(cfg)
+			if tc.wantValid {
+				if len(violations) != 0 {
+					t.Fatalf("violations = %v, want none", violations)
+				}
+				return
+			}
+			if !containsSubstring(violations, tc.want) {
+				t.Fatalf("violations = %v, want one containing %q", violations, tc.want)
+			}
+		})
+	}
+}
+
+// A cAdvisor-only configuration -- no rules, no custom endpoints -- must not
+// be rejected by the "must define ..." guard: cAdvisor is a metrics source in
+// its own right, matching ConfigFromRoot's IsEnabled, which counts a
+// cadvisor-only DynamicTargets template as enabled.
+func TestCAdvisorOnlyConfigurationIsValid(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Collect.Metrics.Enabled = true
+	cfg.Collect.Metrics.CAdvisor = config.CAdvisorConfig{Enabled: true}
+
+	if violations := config.ValidateForTest(cfg); len(violations) != 0 {
+		t.Fatalf("violations = %v, want none for a cadvisor-only configuration", violations)
+	}
+}
+
+// Metrics enabled with nothing configured at all -- no rules, no custom
+// endpoints, cadvisor left at its zero value (disabled) -- must still be
+// rejected: there is no metrics source to run.
+func TestMetricsEnabledWithNoSourceIsInvalid(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Collect.Metrics.Enabled = true
+
+	violations := config.ValidateForTest(cfg)
+	if !containsSubstring(violations, "must define rules, custom_endpoints, and/or cadvisor") {
+		t.Fatalf("violations = %v, want the must-define-a-source violation", violations)
 	}
 }
 

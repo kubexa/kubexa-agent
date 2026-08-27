@@ -74,9 +74,9 @@ type CollectConfig struct {
 
 // LogsCollectConfig configures Kubernetes log collection.
 type LogsCollectConfig struct {
-	Enabled   bool               `yaml:"enabled"`
-	TailLines int64              `yaml:"tail_lines"`
-	Follow    bool               `yaml:"follow"`
+	Enabled   bool  `yaml:"enabled"`
+	TailLines int64 `yaml:"tail_lines"`
+	Follow    bool  `yaml:"follow"`
 	// CheckpointDir enables SQLite persistence of per-stream read positions.
 	// When empty, checkpoints are disabled and tail_lines is used on each new stream.
 	CheckpointDir string `yaml:"checkpoint_dir,omitempty"`
@@ -151,6 +151,96 @@ type MetricsCollectConfig struct {
 	// KubeMetrics is deprecated; use rules instead. When true and rules is empty,
 	// normalize creates a cluster-wide pods+nodes rule for backward compatibility.
 	KubeMetrics bool `yaml:"kube_metrics,omitempty"`
+	// CAdvisor scrapes each node's kubelet for container CPU, memory, network
+	// and filesystem usage. Its targets are generated from the live node list,
+	// not written here: the agent is a single-replica Deployment and a static
+	// endpoint list cannot follow nodes joining and leaving.
+	CAdvisor CAdvisorConfig `yaml:"cadvisor,omitempty"`
+}
+
+// CAdvisorConfig configures per-node kubelet scraping.
+type CAdvisorConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Interval and Timeout follow the same rule as a custom endpoint: the
+	// timeout must stay below the interval.
+	Interval time.Duration `yaml:"interval,omitempty"`
+	Timeout  time.Duration `yaml:"timeout,omitempty"`
+	// RefreshInterval is how often the node inventory is re-listed. It bounds
+	// how long a new node waits to be scraped.
+	RefreshInterval time.Duration `yaml:"refresh_interval,omitempty"`
+	// Port overrides the kubelet port each node reports. Leave empty unless
+	// the cluster serves the kubelet somewhere other than where it says.
+	Port   string `yaml:"port,omitempty"`
+	Scheme string `yaml:"scheme,omitempty"`
+	Path   string `yaml:"path,omitempty"`
+	// BearerTokenPath and TLS default to the projected ServiceAccount token
+	// and CA bundle. The kubelet answers 401 without a token.
+	BearerTokenPath string            `yaml:"bearer_token_path,omitempty"`
+	TLS             TLSEndpointConfig `yaml:"tls,omitempty"`
+	// MetricAllowlist defaults to DefaultCAdvisorAllowlist. Setting it
+	// REPLACES that list rather than adding to it -- an operator narrowing the
+	// set must be able to narrow it, and a merge would make that impossible.
+	MetricAllowlist []string `yaml:"metric_allowlist,omitempty"`
+	MetricDenylist  []string `yaml:"metric_denylist,omitempty"`
+}
+
+// Default paths for the projected ServiceAccount credentials every pod gets.
+const (
+	defaultServiceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	defaultServiceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+)
+
+// DefaultCAdvisorAllowlist is the closed set of cAdvisor families this product
+// uses. cAdvisor exposes far more, and an open list is what turns a 300-pod
+// cluster into roughly 12,000 series.
+//
+// The patterns are anchored on both ends so `container_memory_usage_bytes`
+// cannot be admitted by the working-set entry.
+func DefaultCAdvisorAllowlist() []string {
+	return []string{
+		"^container_cpu_usage_seconds_total$",
+		"^container_cpu_cfs_throttled_seconds_total$",
+		"^container_memory_working_set_bytes$",
+		"^container_memory_rss$",
+		"^container_network_receive_bytes_total$",
+		"^container_network_transmit_bytes_total$",
+		"^container_fs_reads_bytes_total$",
+		"^container_fs_writes_bytes_total$",
+		"^container_fs_usage_bytes$",
+		"^machine_cpu_cores$",
+		"^machine_memory_bytes$",
+	}
+}
+
+// ApplyDefaults fills the zero values a cAdvisor block leaves unset.
+func (c *CAdvisorConfig) ApplyDefaults() {
+	if c == nil {
+		return
+	}
+	if c.Interval <= 0 {
+		c.Interval = 30 * time.Second
+	}
+	if c.Timeout <= 0 {
+		c.Timeout = 10 * time.Second
+	}
+	if c.RefreshInterval <= 0 {
+		c.RefreshInterval = 2 * time.Minute
+	}
+	if c.Scheme == "" {
+		c.Scheme = "https"
+	}
+	if c.Path == "" {
+		c.Path = "/metrics/cadvisor"
+	}
+	if c.BearerTokenPath == "" {
+		c.BearerTokenPath = defaultServiceAccountTokenPath
+	}
+	if c.TLS.CAFile == "" && !c.TLS.InsecureSkipVerify {
+		c.TLS.CAFile = defaultServiceAccountCAPath
+	}
+	if len(c.MetricAllowlist) == 0 {
+		c.MetricAllowlist = DefaultCAdvisorAllowlist()
+	}
 }
 
 // MetricsNamespaceRule defines Kubernetes Metrics API collection scoped by namespace and filters.
