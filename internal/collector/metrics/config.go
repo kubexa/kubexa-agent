@@ -64,7 +64,11 @@ type Config struct {
 	Enabled           bool
 	KubernetesMetrics KubernetesMetricsConfig
 	CustomTargets     []ScrapeTarget
-	WriteTimeout      time.Duration
+	// DynamicTargets are scrape targets generated from cluster state. They are
+	// kept separate from CustomTargets because they are not stable across a
+	// process's life: their set changes as nodes join and leave.
+	DynamicTargets DynamicTargetsConfig
+	WriteTimeout   time.Duration
 }
 
 // DefaultConfig returns documented defaults for the metrics scraper.

@@ -67,7 +67,12 @@ type Collector struct {
 	k8s    *k8sMetricsScraper
 	custom *customScraper
 
-	customFilters map[string]*MetricFilter
+	customFilters   map[string]*MetricFilter
+	customFiltersMu sync.RWMutex
+
+	dynamic       *dynamicProvider
+	dynamicCancel map[string]context.CancelFunc
+	dynamicMu     sync.Mutex
 
 	runCtx context.Context
 	cancel context.CancelFunc
@@ -127,6 +132,9 @@ func New(opts Options) (*Collector, error) {
 	if err != nil {
 		return nil, err
 	}
+	if customFilters == nil {
+		customFilters = make(map[string]*MetricFilter)
+	}
 
 	c := &Collector{
 		cfg:           cfg,
@@ -145,6 +153,17 @@ func New(opts Options) (*Collector, error) {
 	if len(cfg.CustomTargets) > 0 {
 		c.custom = newCustomScraper(scraperMetrics)
 		c.custom.setLogger(log)
+	}
+	if len(cfg.DynamicTargets.Templates) > 0 {
+		if opts.Kube == nil {
+			return nil, errors.New("kubernetes client is required when dynamic scrape targets are configured")
+		}
+		c.dynamic = newDynamicProvider(opts.Kube, cfg.DynamicTargets, log)
+		c.dynamicCancel = make(map[string]context.CancelFunc)
+		if c.custom == nil {
+			c.custom = newCustomScraper(scraperMetrics)
+			c.custom.setLogger(log)
+		}
 	}
 	return c, nil
 }
@@ -187,6 +206,14 @@ func (c *Collector) Start(ctx context.Context) error {
 		go func() {
 			defer c.wg.Done()
 			c.runCustomTarget(c.runCtx, target)
+		}()
+	}
+
+	if c.dynamic != nil {
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.runDynamicTargets(c.runCtx)
 		}()
 	}
 
@@ -303,7 +330,9 @@ func (c *Collector) runCustomTarget(ctx context.Context, target ScrapeTarget) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	c.customFiltersMu.RLock()
 	filter := c.customFilters[targetKey(target)]
+	c.customFiltersMu.RUnlock()
 	targetName := targetLabel(target)
 	backoff := time.Duration(0)
 
@@ -344,6 +373,108 @@ func (c *Collector) runCustomTarget(ctx context.Context, target ScrapeTarget) {
 			return
 		case <-ticker.C:
 		}
+	}
+}
+
+// runDynamicTargets refreshes generated targets on an interval, starting a
+// scraper goroutine for each new target and cancelling the goroutine of each
+// target that is gone.
+//
+// The first refresh runs immediately rather than after one interval: a restart
+// would otherwise leave every generated target unscraped for the whole refresh
+// window, which reads on the graphs as an outage of the thing being measured.
+func (c *Collector) runDynamicTargets(ctx context.Context) {
+	ticker := time.NewTicker(c.dynamic.interval)
+	defer ticker.Stop()
+
+	for {
+		added, removed, err := c.dynamic.refresh(ctx)
+		if err != nil {
+			c.log.Warn("dynamic scrape target refresh failed",
+				logger.F("error", err.Error()))
+		} else {
+			for _, target := range removed {
+				c.stopDynamicTarget(target)
+			}
+			for _, target := range added {
+				c.startDynamicTarget(ctx, target)
+			}
+			if len(added) > 0 || len(removed) > 0 {
+				c.log.Info("dynamic scrape targets changed",
+					logger.F("added", len(added)),
+					logger.F("removed", len(removed)),
+					logger.F("total", len(c.dynamic.current)),
+				)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			c.stopAllDynamicTargets()
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *Collector) startDynamicTarget(ctx context.Context, target ScrapeTarget) {
+	filter, err := NewMetricFilter(target.MetricAllowlist, target.MetricDenylist)
+	if err != nil {
+		// Validation refuses a bad pattern at startup, so reaching here means
+		// a template built one. Refusing this one target is right; refusing
+		// every target would take the whole node fleet down with it.
+		c.log.Warn("dynamic scrape target filter rejected",
+			logger.F("target", targetLabel(target)),
+			logger.F("error", err.Error()))
+		return
+	}
+
+	targetCtx, cancel := context.WithCancel(ctx)
+
+	c.dynamicMu.Lock()
+	if prev, running := c.dynamicCancel[targetIdentity(target)]; running {
+		// Should not happen -- diffTargets only reports genuinely new targets
+		// -- but a leaked goroutine here scrapes forever.
+		prev()
+	}
+	c.dynamicCancel[targetIdentity(target)] = cancel
+	c.customFiltersMu.Lock()
+	c.customFilters[targetKey(target)] = filter
+	c.customFiltersMu.Unlock()
+	c.dynamicMu.Unlock()
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.runCustomTarget(targetCtx, target)
+	}()
+}
+
+func (c *Collector) stopDynamicTarget(target ScrapeTarget) {
+	c.dynamicMu.Lock()
+	cancel, running := c.dynamicCancel[targetIdentity(target)]
+	delete(c.dynamicCancel, targetIdentity(target))
+	c.customFiltersMu.Lock()
+	delete(c.customFilters, targetKey(target))
+	c.customFiltersMu.Unlock()
+	c.dynamicMu.Unlock()
+
+	if running {
+		cancel()
+	}
+}
+
+func (c *Collector) stopAllDynamicTargets() {
+	c.dynamicMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(c.dynamicCancel))
+	for id, cancel := range c.dynamicCancel {
+		cancels = append(cancels, cancel)
+		delete(c.dynamicCancel, id)
+	}
+	c.dynamicMu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
 	}
 }
 
