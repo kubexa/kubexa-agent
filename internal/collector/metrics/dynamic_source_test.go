@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kubexa/kubexa-agent/internal/k8s"
+	pkgconfig "github.com/kubexa/kubexa-agent/pkg/config"
 )
 
 func templ() TargetTemplate {
@@ -41,8 +42,11 @@ func TestTargetsForNodesBuildsOneTargetPerNode(t *testing.T) {
 	if got[0].URL != "https://10.0.0.1:10250/metrics/cadvisor" {
 		t.Errorf("URL = %q", got[0].URL)
 	}
-	// KubeletPort 0 means the node did not report one; the template's port is
-	// the documented fallback, not a guess made at the call site.
+	// templ() sets tpl.Port explicitly, so it wins for every node regardless
+	// of what the node itself reports (10250 for worker-1, none at all for
+	// worker-2). This test proves the explicit-port override, not the
+	// node-owns-the-port fallback -- that is covered separately by
+	// TestTargetsForNodesUsesTheNodesOwnKubeletPortWhenTheTemplateLeavesPortEmpty.
 	if got[1].URL != "https://10.0.0.2:10250/metrics/cadvisor" {
 		t.Errorf("URL = %q", got[1].URL)
 	}
@@ -79,6 +83,49 @@ func TestTargetsForNodesDoesNotShareTheTemplateLabelMap(t *testing.T) {
 	}
 	if _, leaked := tpl.Labels["node"]; leaked {
 		t.Fatal("template label map was mutated")
+	}
+}
+
+func TestTargetsForNodesFloorsAZeroIntervalAndTimeout(t *testing.T) {
+	tpl := templ()
+	tpl.Interval = 0
+	tpl.Timeout = 0
+	nodes := []k8s.NodeInfo{
+		{Name: "worker-1", InternalIP: "10.0.0.1", KubeletPort: 10250},
+	}
+
+	got := targetsForNodes(tpl, nodes)
+
+	// A zero Interval reaches time.NewTicker in runCustomTarget and panics the
+	// whole process, taking every other scraper down with it. The floor has
+	// to be applied here, at generation time, not left to the caller.
+	if got[0].Interval != pkgconfig.DefaultScrapeInterval {
+		t.Errorf("Interval = %v, want the default %v", got[0].Interval, pkgconfig.DefaultScrapeInterval)
+	}
+	if got[0].Timeout != pkgconfig.DefaultScrapeTimeout {
+		t.Errorf("Timeout = %v, want the default %v", got[0].Timeout, pkgconfig.DefaultScrapeTimeout)
+	}
+}
+
+func TestTargetsForNodesUsesTheNodesOwnKubeletPortWhenTheTemplateLeavesPortEmpty(t *testing.T) {
+	tpl := templ()
+	tpl.Port = ""
+	nodes := []k8s.NodeInfo{
+		{Name: "worker-1", InternalIP: "10.0.0.1", KubeletPort: 10255},
+		{Name: "worker-2", InternalIP: "10.0.0.2", KubeletPort: 0},
+	}
+
+	got := targetsForNodes(tpl, nodes)
+
+	// The node reports its own kubelet port; with no template override that
+	// port is what the URL is built on.
+	if got[0].URL != "https://10.0.0.1:10255/metrics/cadvisor" {
+		t.Errorf("URL = %q, want the node's own kubelet port 10255", got[0].URL)
+	}
+	// The node reports no kubelet port at all; the fallback is
+	// defaultKubeletPort, not a zero or empty port in the URL.
+	if got[1].URL != "https://10.0.0.2:"+defaultKubeletPort+"/metrics/cadvisor" {
+		t.Errorf("URL = %q, want the default kubelet port %s", got[1].URL, defaultKubeletPort)
 	}
 }
 
