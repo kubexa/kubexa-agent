@@ -54,6 +54,7 @@ data:
         enabled: {{ .Values.collect.metrics.enabled }}
         pod_interval: {{ .Values.collect.metrics.podInterval | quote }}
         node_interval: {{ .Values.collect.metrics.nodeInterval | quote }}
+        max_samples_per_scrape: {{ .Values.collect.metrics.maxSamplesPerScrape | int }}
         {{- if .Values.collect.metrics.kubeMetrics }}
         kube_metrics: true
         {{- end }}

@@ -160,6 +160,15 @@ type MetricsCollectConfig struct {
 	// state: replica counts, pod phase, restarts, PVC state, HPA and job
 	// status. None of it is in the Metrics API.
 	KubeStateMetrics KubeStateMetricsConfig `yaml:"kube_state_metrics,omitempty"`
+	// MaxSamplesPerScrape caps the samples one scrape of one target may
+	// publish. 0 disables the cap.
+	//
+	// This is the agent's own ceiling and it is advisory: the enforcing cap
+	// lives in the platform, which is the only side that can bound what a
+	// misconfigured or hostile agent sends. It exists so a normal install
+	// cannot flood its own uplink, and so the drop is visible to the operator
+	// who caused it.
+	MaxSamplesPerScrape int `yaml:"max_samples_per_scrape,omitempty"`
 }
 
 // CAdvisorConfig configures per-node kubelet scraping.
