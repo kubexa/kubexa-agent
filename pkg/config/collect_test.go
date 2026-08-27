@@ -399,15 +399,30 @@ func TestCAdvisorOnlyConfigurationIsValid(t *testing.T) {
 	}
 }
 
+// A kube-state-metrics-only configuration -- no rules, no custom endpoints,
+// no cAdvisor -- must not be rejected by the "must define ..." guard either,
+// for the same reason cAdvisor-only is exempt: it is a metrics source in its
+// own right, and the early return would otherwise stop it from ever reaching
+// KubeStateMetricsConfig.validate.
+func TestKubeStateMetricsOnlyConfigurationIsValid(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Collect.Metrics.Enabled = true
+	cfg.Collect.Metrics.KubeStateMetrics = config.KubeStateMetricsConfig{Enabled: true}
+
+	if violations := config.ValidateForTest(cfg); len(violations) != 0 {
+		t.Fatalf("violations = %v, want none for a kube-state-metrics-only configuration", violations)
+	}
+}
+
 // Metrics enabled with nothing configured at all -- no rules, no custom
-// endpoints, cadvisor left at its zero value (disabled) -- must still be
-// rejected: there is no metrics source to run.
+// endpoints, cadvisor and kube_state_metrics left at their zero values
+// (disabled) -- must still be rejected: there is no metrics source to run.
 func TestMetricsEnabledWithNoSourceIsInvalid(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Collect.Metrics.Enabled = true
 
 	violations := config.ValidateForTest(cfg)
-	if !containsSubstring(violations, "must define rules, custom_endpoints, and/or cadvisor") {
+	if !containsSubstring(violations, "must define rules, custom_endpoints, cadvisor, and/or kube_state_metrics") {
 		t.Fatalf("violations = %v, want the must-define-a-source violation", violations)
 	}
 }

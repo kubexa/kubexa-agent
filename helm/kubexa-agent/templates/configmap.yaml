@@ -88,6 +88,32 @@ data:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         {{- end }}
+        {{- /*
+          Same nil-safety as cadvisor above: the values schema admits an
+          explicit `kubeStateMetrics: null`, and a chained field access
+          through a nil map is a hard Helm render error, not a false.
+        */ -}}
+        {{- if (.Values.collect.metrics.kubeStateMetrics) }}
+        kube_state_metrics:
+          enabled: {{ .Values.collect.metrics.kubeStateMetrics.enabled }}
+          service_namespace: {{ .Values.collect.metrics.kubeStateMetrics.serviceNamespace | quote }}
+          service_name: {{ .Values.collect.metrics.kubeStateMetrics.serviceName | quote }}
+          port: {{ .Values.collect.metrics.kubeStateMetrics.port | int }}
+          interval: {{ .Values.collect.metrics.kubeStateMetrics.interval | quote }}
+          timeout: {{ .Values.collect.metrics.kubeStateMetrics.timeout | quote }}
+          probe_interval: {{ .Values.collect.metrics.kubeStateMetrics.probeInterval | quote }}
+          {{- with .Values.collect.metrics.kubeStateMetrics.url }}
+          url: {{ . | quote }}
+          {{- end }}
+          {{- with .Values.collect.metrics.kubeStateMetrics.metricAllowlist }}
+          metric_allowlist:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.collect.metrics.kubeStateMetrics.metricDenylist }}
+          metric_denylist:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
 
     query:
       enabled: {{ .Values.query.enabled }}

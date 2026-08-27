@@ -145,6 +145,21 @@ rules:
     verbs: ["get"]
   {{- end }}
 
+  {{- /*
+    Same nil-safety as cadvisor above: the values schema admits an explicit
+    `kubeStateMetrics: null`, so the guard reads its enabled flag through a
+    parenthesized dereference rather than panicking the whole render on the
+    install that leaves this block out.
+  */ -}}
+  {{- if (.Values.collect.metrics.kubeStateMetrics).enabled }}
+  # The presence probe: one GET against the kube-state-metrics Service. Without
+  # it the agent cannot tell "not installed" from "unreachable", and the screen
+  # would report an absent component as a broken one.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+  {{- end }}
+
   {{- with .Values.rbac.extraRules }}
   {{- toYaml . | nindent 2 }}
   {{- end }}
