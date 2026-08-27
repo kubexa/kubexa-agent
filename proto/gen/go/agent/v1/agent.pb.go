@@ -621,6 +621,15 @@ type AgentHealth struct {
 	// Scrape health, one entry per target KIND rather than per target. Forty
 	// cAdvisor rows say less than "3 of 40 failing", and a per-target list would
 	// grow the heartbeat with the cluster.
+	//
+	// An absent or empty list means this agent does NOT report scrape health --
+	// most likely an agent built before this field existed. A consumer must
+	// NOT read that as "every kind is OK" and must not synthesize zero-valued
+	// rows from it; it is the unmeasured/measured-zero distinction this whole
+	// feature exists to preserve, recurring one level up. An agent that does
+	// report scrape health always emits at least one entry per configured
+	// scrape kind, so an empty list never comes from an agent that is actually
+	// reporting.
 	ScrapeTargets []*ScrapeTargetHealth `protobuf:"bytes,8,rep,name=scrape_targets,json=scrapeTargets,proto3" json:"scrape_targets,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
