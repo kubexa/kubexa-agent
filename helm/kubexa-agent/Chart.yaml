@@ -88,8 +88,33 @@ type: application
 # No install order constraint; the gateway is unaffected. Restarting the agent
 # does not lose queued telemetry -- the disk queue survives the pod, and since
 # 0.7.1 the gateway requeues whatever was in flight.
-version: 0.7.7
-appVersion: "0.7.4"
+#
+# 0.7.8 carries image 0.7.5, the first one that scrapes anything besides the
+# Metrics API. It adds two collect.metrics endpoints and the values that
+# configure them:
+#   - collect.metrics.cadvisor scrapes each node's kubelet directly. Targets
+#     are generated from the live node list and refreshed on
+#     refreshInterval, so nothing here names a node and a new node is picked
+#     up without an upgrade. The ClusterRole now includes nodes/metrics --
+#     without it every target answers 401.
+#   - collect.metrics.kubeStateMetrics scrapes a kube-state-metrics Service,
+#     but probes for the Service FIRST. An absent installation is reported as
+#     `not_installed`, which is a different thing from a scrape that returned
+#     nothing, and the platform shows it as a different thing.
+# Both default to enabled: false. Turning cadvisor on is the one to read the
+# values.yaml comment for first: caFile defaults to the ServiceAccount CA,
+# which signs the API server and NOT kubelet serving certificates, so on a
+# cluster without serverTLSBootstrap every cAdvisor scrape fails
+# `x509: certificate signed by unknown authority` until caFile or
+# insecureSkipVerify is set.
+#
+# It also adds an advisory series budget (collect.metrics.maxSeries) and
+# reports scrape health on every heartbeat, per kind and per target. No
+# install order constraint against the gateway: an older gateway ignores the
+# new heartbeat field, and a newer gateway reads its ABSENCE as "this agent
+# does not report scrape health" rather than as "everything is fine".
+version: 0.7.8
+appVersion: "0.7.5"
 keywords:
   - kubexa
   - observability
