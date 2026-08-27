@@ -169,3 +169,36 @@ func TestClusterRoleGrantsKubeletMetricsForCAdvisor(t *testing.T) {
 		t.Error("the kubelet metrics rule is not gated on collect.metrics.cadvisor")
 	}
 }
+
+// The presence probe -- probeKubeStateService -- does one GET against the
+// kube-state-metrics Service to tell "not installed" from "unreachable". A
+// missing grant here does not just break the scrape: it turns the probe's
+// own RBAC_DENIED into an unexplained "unreachable" everywhere the operator
+// looks, with nothing in the agent's own config naming the cause.
+func TestClusterRoleGrantsServicesGetForKubeStateMetricsProbe(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "helm", "kubexa-agent", "templates", "clusterrole.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	chart := string(raw)
+
+	idx := strings.Index(chart, `resources: ["services"]`)
+	if idx < 0 {
+		t.Fatal(`ClusterRole does not grant resources: ["services"]; the presence probe gets RBAC_DENIED`)
+	}
+	// One path segment short of the full ".enabled" dereference, matching the
+	// cadvisor gate above: the values schema admits an explicit
+	// `kubeStateMetrics: null`, and Helm hard-errors on a chained field
+	// access through a nil map rather than treating it as false. The gate
+	// must dereference the block through a parenthesized sub-expression --
+	// e.g. `(.Values.collect.metrics.kubeStateMetrics).enabled` -- which this
+	// substring still matches, so it cannot pass while the gate is genuinely
+	// absent.
+	head := chart[:idx]
+	gate := head[strings.LastIndex(head, "{{- if"):]
+	if !strings.Contains(gate, ".Values.collect.metrics.kubeStateMetrics") {
+		t.Errorf("the services GET rule is not gated on collect.metrics.kubeStateMetrics; gate is %q",
+			strings.TrimSpace(gate))
+	}
+}

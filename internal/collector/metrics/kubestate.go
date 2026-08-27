@@ -79,6 +79,11 @@ func (c *Collector) runKubeStateTarget(ctx context.Context) {
 				c.health.MarkNotInstalled(kind)
 			default:
 				installed = true
+				// The probe found the Service: this is the evidence that
+				// clears a standing "not installed" determination. A target
+				// count alone would leave notInstalled set, and a scrape
+				// that then fails would report as absent instead of failing.
+				c.health.MarkInstalled(kind)
 				c.health.SetTargetCount(kind, 1)
 			}
 		}
