@@ -74,6 +74,11 @@ type Config struct {
 	// broken -- it was never installed.
 	KubeState    KubeStateTarget
 	WriteTimeout time.Duration
+	// MaxSamplesPerScrape caps the samples one scrape of one target may
+	// publish before it is recorded and published. 0 disables the cap. See
+	// pkgconfig.MetricsCollectConfig.MaxSamplesPerScrape for why this is the
+	// agent's own advisory ceiling rather than the enforcing one.
+	MaxSamplesPerScrape int
 }
 
 // KubeStateTarget is the resolved kube-state-metrics scrape.
@@ -117,7 +122,8 @@ func ConfigFromRoot(root *pkgconfig.Config) Config {
 			NodeInterval: mc.NodeInterval,
 			Rules:        kubeRulesFromRoot(mc),
 		},
-		WriteTimeout: defaultWriteTimeout,
+		WriteTimeout:        defaultWriteTimeout,
+		MaxSamplesPerScrape: mc.MaxSamplesPerScrape,
 	}
 	for _, ep := range mc.CustomEndpoints {
 		cfg.CustomTargets = append(cfg.CustomTargets, ScrapeTarget{

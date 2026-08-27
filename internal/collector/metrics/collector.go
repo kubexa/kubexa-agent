@@ -385,6 +385,16 @@ func (c *Collector) runCustomTarget(ctx context.Context, target ScrapeTarget) {
 			)
 		} else {
 			backoff = 0
+			families, droppedSamples := applySampleBudget(result.Families, c.cfg.MaxSamplesPerScrape)
+			if droppedSamples > 0 {
+				c.health.RecordCardinalityDrop(healthKind(target), droppedSamples)
+				c.log.Warn("scrape exceeded the sample budget; whole families dropped",
+					logger.F("target", targetLabel(target)),
+					logger.F("budget", c.cfg.MaxSamplesPerScrape),
+					logger.F("dropped_samples", droppedSamples),
+				)
+			}
+			result.Families = families
 			c.health.RecordSuccess(healthKind(target), targetName, countSamples(result.Families))
 			if err := c.publishPrometheusMetrics(ctx, target, result); err != nil {
 				c.log.Warn("publish custom metrics failed",
