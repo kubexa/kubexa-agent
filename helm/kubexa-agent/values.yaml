@@ -191,20 +191,99 @@ collect:
     podInterval: 30s
     nodeInterval: 30s
     kubeMetrics: false
+    # Samples one scrape of one target may publish. 0 disables the cap.
+    #
+    # Whole metric families are dropped, in name order, once the budget is
+    # spent -- the same families every time, so a capped target's series do not
+    # flap. This is the agent's own ceiling; the platform enforces its own.
+    maxSamplesPerScrape: 20000
     rules:
       - id: cluster-metrics
         namespace: ""
         resources:
           - pods
           - nodes
+    # customEndpoints keys pass through toYaml untouched, so they are the
+    # AGENT's snake_case config keys -- not the chart's camelCase. A key the
+    # agent does not know is dropped, and a target that lost its allowlist
+    # ships every family the endpoint exposes.
     customEndpoints: []
     # Example:
     # customEndpoints:
     #   - name: my-app
     #     url: http://my-app.metrics.svc:8080/metrics
     #     interval: 30s
+    #     timeout: 10s
+    #     bearer_token_path: /var/run/secrets/kubernetes.io/serviceaccount/token
+    #     tls:
+    #       ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    #     metric_allowlist:
+    #       - "^myapp_request_.*"
+    #     metric_denylist:
+    #       - "^myapp_debug_.*"
     #     extra_labels:
     #       service: my-app
+
+    # Per-node kubelet scraping: container CPU, memory, network and filesystem
+    # usage. Targets are generated from the live node list, so nothing here
+    # names a node.
+    #
+    # metricAllowlist REPLACES the agent's built-in list rather than adding to
+    # it. The built-in list is closed on purpose: cAdvisor exposes roughly 40
+    # series per container, and an open list turns a 300-pod cluster into
+    # ~12,000 series on the first install.
+    cadvisor:
+      enabled: false
+      interval: "30s"
+      timeout: "10s"
+      refreshInterval: "2m"
+      # metricAllowlist: []
+      # metricDenylist: []
+
+      # The kubelet's address and credentials. Every key below is optional and
+      # takes the agent's own default when omitted; set one only to override.
+      #
+      #   scheme/port/path  where the kubelet serves cAdvisor. port defaults to
+      #                     the port each node reports, then 10250.
+      #   bearerTokenPath   the projected ServiceAccount token. The kubelet
+      #                     answers 401 without one.
+      #
+      # tls is the one worth reading before you install. caFile defaults to the
+      # ServiceAccount CA bundle -- which signs the API SERVER, not kubelet
+      # SERVING certificates. On a cluster without serverTLSBootstrap and an
+      # approved CSR flow the kubelets serve self-signed certs, and every
+      # cAdvisor scrape then fails `x509: certificate signed by unknown
+      # authority` permanently. Point caFile at the CA that actually signed
+      # them, or set insecureSkipVerify to accept them unverified. Setting both
+      # is refused at startup: the bundle would never be consulted.
+
+      # scheme: "https"
+      # port: "10250"
+      # path: "/metrics/cadvisor"
+      # bearerTokenPath: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+      # tls:
+      #   insecureSkipVerify: false
+      #   caFile: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+    # Object state -- replica counts, pod phase, restarts, PVC state, HPA and
+    # job status. None of it is in the Metrics API.
+    #
+    # The agent looks for the Service before it scrapes. If it is not there,
+    # the platform is told "kube-state-metrics is not installed" rather than
+    # being shown an empty graph. Point serviceNamespace/serviceName at your
+    # installation if it is not the kube-system default.
+    kubeStateMetrics:
+      enabled: false
+      serviceNamespace: kube-system
+      serviceName: kube-state-metrics
+      port: 8080
+      interval: "60s"
+      timeout: "20s"
+      probeInterval: "5m"
+      # path: "/metrics"   # the exposition path on that Service
+      # url: ""            # explicit address; disables the presence probe
+      # metricAllowlist: []
+      # metricDenylist: []
 
 # Live, on-demand resource reads requested by the Kubexa platform — distinct
 # from collect.state, which governs continuous streaming. Where collect.state

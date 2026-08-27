@@ -476,15 +476,30 @@ func renderedPairs(t *testing.T) map[string]string {
 	return pairs
 }
 
+// blockFieldsByFoldedKey indexes a struct's yaml-bound fields by a
+// case- and underscore-insensitive form of their tag, so a chart block
+// segment (camelCase, e.g. "kubeStateMetrics") can find the agent field its
+// yaml tag names in snake_case ("kube_state_metrics"). Every intermediate
+// block name in the chart happened to be a single word until
+// kube_state_metrics, where the two spellings first actually differ.
+func blockFieldsByFoldedKey(t reflect.Type) map[string]reflect.Type {
+	folded := make(map[string]reflect.Type, t.NumField())
+	for key, field := range fieldsByYAMLKey(t) {
+		folded[strings.ToLower(strings.ReplaceAll(key, "_", ""))] = field
+	}
+	return folded
+}
+
 // agentField resolves the struct field behind a rendered pair. Every segment
-// of the values path but the last names a block, spelled the same on both
-// sides; the last is the chart's spelling, and the agent key the template
-// rendered is what indexes the struct.
+// of the values path but the last names a block, folded the same way a leaf
+// key is (case- and underscore-insensitive) so camelCase on the chart side
+// matches snake_case on the agent side; the last is the chart's spelling, and
+// the agent key the template rendered is what indexes the struct.
 func agentField(path, key string) (reflect.Type, bool) {
 	segments := strings.Split(path, ".")
 	cur := reflect.TypeOf(config.Config{})
 	for _, segment := range segments[:len(segments)-1] {
-		next, ok := fieldsByYAMLKey(cur)[segment]
+		next, ok := blockFieldsByFoldedKey(cur)[strings.ToLower(segment)]
 		if !ok {
 			return nil, false
 		}
@@ -917,4 +932,92 @@ func loadRenderedConfig(t *testing.T, rendered string) {
 		t.Errorf("helm accepted these values and the agent will not start on what they "+
 			"render: %v\n%s", err, body)
 	}
+}
+
+// scrapeBlockPaths are the chart blocks that render an agent struct field by
+// field, rather than passing an operator's keys through with toYaml. For these
+// the struct is the authority on what exists, and the chart is what decides
+// whether an operator can reach it.
+func scrapeBlockPaths() map[string]reflect.Type {
+	return map[string]reflect.Type{
+		"collect.metrics.cadvisor":         reflect.TypeOf(config.CAdvisorConfig{}),
+		"collect.metrics.kubeStateMetrics": reflect.TypeOf(config.KubeStateMetricsConfig{}),
+	}
+}
+
+// unreachableByDesign are struct fields these blocks deliberately do not
+// expose, each with the reason. An entry here is a decision; a field missing
+// from both this map and the chart is the bug below.
+func unreachableByDesign() map[string]string {
+	return map[string]string{}
+}
+
+// TestEveryScrapeBlockFieldIsReachableFromTheChart closes the gate that let
+// finding 7 through.
+//
+// TestSchemaConfigBlocksMatchAgentFields walks RENDERED PAIRS -> schema, so it
+// can only ever check fields the ConfigMap already renders. A struct field the
+// template never mentions is invisible to it -- which is exactly how
+// CAdvisorConfig shipped with scheme, port, path, bearer_token_path and a whole
+// tls block that no chart value could reach. The branch's own constraint is
+// that a new struct field is not done until the chart and the schema both name
+// it, and that constraint was unenforced in this direction.
+//
+// This walks the other way: STRUCT -> chart -> schema.
+func TestEveryScrapeBlockFieldIsReachableFromTheChart(t *testing.T) {
+	template := chartFile(t, "helm", "kubexa-agent", "templates", "configmap.yaml")
+	schema := loadSchema(t)
+	exempt := unreachableByDesign()
+
+	checked := 0
+	for path, structType := range scrapeBlockPaths() {
+		for key := range fieldsByYAMLKey(structType) {
+			// The chart's spelling of the key is camelCase; the agent's is
+			// snake_case. Fold both the way the rest of this file does.
+			camel := foldedChartKey(path, key)
+			if reason, ok := exempt[path+"."+key]; ok {
+				if strings.Contains(template, camel) {
+					t.Errorf("%s.%s is exempted as unreachable (%q) but the chart does render it",
+						path, key, reason)
+				}
+				continue
+			}
+
+			if !strings.Contains(template, camel) {
+				t.Errorf("%s.%s exists on %s but no chart value reaches it: the ConfigMap never "+
+					"renders %s, so an operator cannot set it at all and no schema check can see "+
+					"it either. Render it, or list it in unreachableByDesign with the reason",
+					path, key, structType, camel)
+				continue
+			}
+			if node := schemaAt(schema, path+"."+lastSegment(camel)); node == nil {
+				t.Errorf("%s.%s is rendered by the chart but not described in values.schema.json, "+
+					"so nothing checks its type", path, key)
+				continue
+			}
+			checked++
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no scrape-block fields checked; this test is pinning nothing")
+	}
+}
+
+// foldedChartKey returns the .Values path the chart would use for an agent
+// yaml key: snake_case becomes camelCase, and a nested struct keeps its own
+// name.
+func foldedChartKey(blockPath, agentKey string) string {
+	parts := strings.Split(agentKey, "_")
+	camel := parts[0]
+	for _, p := range parts[1:] {
+		if p == "" {
+			continue
+		}
+		camel += strings.ToUpper(p[:1]) + p[1:]
+	}
+	return ".Values." + blockPath + "." + camel
+}
+
+func lastSegment(path string) string {
+	return path[strings.LastIndex(path, ".")+1:]
 }

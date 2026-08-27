@@ -7,10 +7,15 @@ import (
 )
 
 const (
-	defaultPodInterval    = 30 * time.Second
-	defaultNodeInterval   = 30 * time.Second
-	defaultScrapeInterval = 30 * time.Second
-	defaultScrapeTimeout  = 10 * time.Second
+	defaultPodInterval  = 30 * time.Second
+	defaultNodeInterval = 30 * time.Second
+	// defaultScrapeInterval and defaultScrapeTimeout mirror pkg/config's
+	// exported defaults rather than restating the literals: validation there
+	// has to know the EFFECTIVE timeout/interval a config will run with, so
+	// the two packages share one source of truth instead of two literals
+	// that can drift apart.
+	defaultScrapeInterval = pkgconfig.DefaultScrapeInterval
+	defaultScrapeTimeout  = pkgconfig.DefaultScrapeTimeout
 	defaultWriteTimeout   = 100 * time.Millisecond
 )
 
@@ -41,9 +46,31 @@ type KubernetesMetricsConfig struct {
 	Rules        []KubeMetricsRule
 }
 
+// Scrape kinds. A kind is the row an operator reads on the ingestion screen
+// and the aggregation unit ScrapeHealth keys on, so it is agent-owned: it is
+// never read out of a label map an operator can write into.
+const (
+	KindCustom    = "custom"
+	KindCAdvisor  = "cadvisor"
+	KindKubeState = "kube_state_metrics"
+	// ScrapeKindLabel is the sample label carrying the kind. It is the same
+	// constant validation refuses in a custom endpoint's extra_labels, not a
+	// second copy of the literal: the two must not drift, or the agent would
+	// reserve one spelling and stamp another.
+	ScrapeKindLabel = pkgconfig.ReservedScrapeKindLabel
+)
+
 // ScrapeTarget defines a custom Prometheus exposition endpoint.
 type ScrapeTarget struct {
-	Name            string
+	Name string
+	// Kind is the health row this target aggregates into. It is a real field
+	// rather than a lookup in Labels because Labels is a verbatim copy of the
+	// operator's extra_labels: an endpoint carrying
+	// `extra_labels: {scrape_kind: cadvisor}` would otherwise file its own
+	// failures under the cAdvisor row, and one carrying an unknown value
+	// would produce a kind with targets_total 0 and targets_failing 1 -- "1
+	// of 0 failing" on the screen. Empty means KindCustom.
+	Kind            string
 	URL             string
 	Interval        time.Duration
 	Timeout         time.Duration
@@ -59,7 +86,37 @@ type Config struct {
 	Enabled           bool
 	KubernetesMetrics KubernetesMetricsConfig
 	CustomTargets     []ScrapeTarget
-	WriteTimeout      time.Duration
+	// DynamicTargets are scrape targets generated from cluster state. They are
+	// kept separate from CustomTargets because they are not stable across a
+	// process's life: their set changes as nodes join and leave.
+	DynamicTargets DynamicTargetsConfig
+	// KubeState is a single scrape target whose presence is probed rather than
+	// assumed. It is not a CustomTarget because a CustomTarget that cannot be
+	// reached reports as broken, and an absent kube-state-metrics is not
+	// broken -- it was never installed.
+	KubeState    KubeStateTarget
+	WriteTimeout time.Duration
+	// MaxSamplesPerScrape caps the samples one scrape of one target may
+	// publish before it is recorded and published. 0 disables the cap -- the
+	// escape hatch a tenant with a legitimately wide allowlist needs, and the
+	// one the yaml, the chart and applySampleBudget all document. See
+	// pkgconfig.MetricsCollectConfig.MaxSamplesPerScrape for why the yaml
+	// side of this is a pointer, and for why this is the agent's own advisory
+	// ceiling rather than the enforcing one.
+	MaxSamplesPerScrape int
+}
+
+// KubeStateTarget is the resolved kube-state-metrics scrape.
+type KubeStateTarget struct {
+	Enabled bool
+	// ProbeService is false when an explicit URL was configured: there is no
+	// Service to look for, so absence cannot be distinguished from
+	// unreachability and the honest report is the connection error.
+	ProbeService     bool
+	ServiceNamespace string
+	ServiceName      string
+	ProbeInterval    time.Duration
+	Target           ScrapeTarget
 }
 
 // DefaultConfig returns documented defaults for the metrics scraper.
@@ -90,18 +147,86 @@ func ConfigFromRoot(root *pkgconfig.Config) Config {
 			NodeInterval: mc.NodeInterval,
 			Rules:        kubeRulesFromRoot(mc),
 		},
-		WriteTimeout: defaultWriteTimeout,
+		WriteTimeout:        defaultWriteTimeout,
+		MaxSamplesPerScrape: resolveSampleBudget(mc.MaxSamplesPerScrape),
 	}
 	for _, ep := range mc.CustomEndpoints {
 		cfg.CustomTargets = append(cfg.CustomTargets, ScrapeTarget{
-			Name:     ep.Name,
-			URL:      ep.URL,
-			Interval: ep.Interval,
-			Labels:   copyStringMap(ep.ExtraLabels),
+			Name:            ep.Name,
+			Kind:            KindCustom,
+			URL:             ep.URL,
+			Interval:        ep.Interval,
+			Timeout:         ep.Timeout,
+			Labels:          copyStringMap(ep.ExtraLabels),
+			BearerTokenPath: ep.BearerTokenPath,
+			TLSConfig: TLSConfig{
+				InsecureSkipVerify: ep.TLS.InsecureSkipVerify,
+				CAFile:             ep.TLS.CAFile,
+			},
+			MetricAllowlist: append([]string(nil), ep.MetricAllowlist...),
+			MetricDenylist:  append([]string(nil), ep.MetricDenylist...),
 		})
+	}
+	if mc.CAdvisor.Enabled {
+		ca := mc.CAdvisor
+		ca.ApplyDefaults()
+		cfg.DynamicTargets.RefreshInterval = ca.RefreshInterval
+		cfg.DynamicTargets.Templates = append(cfg.DynamicTargets.Templates, TargetTemplate{
+			Kind:       KindCAdvisor,
+			NamePrefix: "cadvisor",
+			Scheme:     ca.Scheme,
+			Port:       ca.Port,
+			Path:       ca.Path,
+			Interval:   ca.Interval,
+			Timeout:    ca.Timeout,
+			// scrape_kind travels onto every sample so the consumer's writer
+			// and the explorer can tell a cAdvisor series from a
+			// kube-state-metrics one without pattern-matching the name.
+			Labels:          map[string]string{ScrapeKindLabel: KindCAdvisor},
+			BearerTokenPath: ca.BearerTokenPath,
+			TLSConfig: TLSConfig{
+				InsecureSkipVerify: ca.TLS.InsecureSkipVerify,
+				CAFile:             ca.TLS.CAFile,
+			},
+			MetricAllowlist: append([]string(nil), ca.MetricAllowlist...),
+			MetricDenylist:  append([]string(nil), ca.MetricDenylist...),
+		})
+	}
+	if mc.KubeStateMetrics.Enabled {
+		ks := mc.KubeStateMetrics
+		ks.ApplyDefaults()
+		cfg.KubeState = KubeStateTarget{
+			Enabled:          true,
+			ProbeService:     ks.URL == "",
+			ServiceNamespace: ks.ServiceNamespace,
+			ServiceName:      ks.ServiceName,
+			ProbeInterval:    ks.ProbeInterval,
+			Target: ScrapeTarget{
+				Name:            "kube-state-metrics",
+				Kind:            KindKubeState,
+				URL:             ks.ResolvedURL(),
+				Interval:        ks.Interval,
+				Timeout:         ks.Timeout,
+				Labels:          map[string]string{ScrapeKindLabel: KindKubeState},
+				MetricAllowlist: append([]string(nil), ks.MetricAllowlist...),
+				MetricDenylist:  append([]string(nil), ks.MetricDenylist...),
+			},
+		}
 	}
 	cfg.ApplyDefaults()
 	return cfg
+}
+
+// resolveSampleBudget collapses the yaml's three states into the collector's
+// two. nil is "the key was omitted" and takes the default; an explicit value
+// -- 0 included -- is the operator's, and 0 reaches applySampleBudget as "no
+// ceiling". Load's Normalize already fills nil in, so this is the belt to its
+// braces for a Config built without it.
+func resolveSampleBudget(v *int) int {
+	if v == nil {
+		return pkgconfig.DefaultMaxSamplesPerScrape
+	}
+	return *v
 }
 
 func kubeRulesFromRoot(mc pkgconfig.MetricsCollectConfig) []KubeMetricsRule {
@@ -153,6 +278,14 @@ func (c *Config) ApplyDefaults() {
 			c.CustomTargets[i].Timeout = defaultScrapeTimeout
 		}
 	}
+	if c.KubeState.Enabled {
+		if c.KubeState.Target.Interval <= 0 {
+			c.KubeState.Target.Interval = defaultScrapeInterval
+		}
+		if c.KubeState.Target.Timeout <= 0 {
+			c.KubeState.Target.Timeout = defaultScrapeTimeout
+		}
+	}
 	if c.WriteTimeout <= 0 {
 		c.WriteTimeout = defaultWriteTimeout
 	}
@@ -163,7 +296,10 @@ func (c *Config) IsEnabled() bool {
 	if c == nil || !c.Enabled {
 		return false
 	}
-	return len(c.KubernetesMetrics.Rules) > 0 || len(c.CustomTargets) > 0
+	return len(c.KubernetesMetrics.Rules) > 0 ||
+		len(c.CustomTargets) > 0 ||
+		len(c.DynamicTargets.Templates) > 0 ||
+		c.KubeState.Enabled
 }
 
 // HasKubeMetricsRules reports whether any Kubernetes Metrics API rules are configured.

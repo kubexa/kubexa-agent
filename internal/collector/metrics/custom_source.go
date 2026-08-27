@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -77,7 +78,7 @@ func (s *customScraper) ScrapeTarget(ctx context.Context, target ScrapeTarget, f
 
 		switch {
 		case status >= 500:
-			lastErr = fmt.Errorf("scrape %q: HTTP %d", target.URL, status)
+			lastErr = fmt.Errorf("scrape %q: HTTP %d", safeURL(target.URL), status)
 			s.metrics.incScrape(customSourceLabel, targetName, "error")
 			if attempt < maxScrapeRetries {
 				if waitErr := sleep(ctx, retryDelay); waitErr != nil {
@@ -91,17 +92,17 @@ func (s *customScraper) ScrapeTarget(ctx context.Context, target ScrapeTarget, f
 			if s.log != nil {
 				s.log.Warn("custom metrics scrape client error",
 					logger.F("target", targetName),
-					logger.F("url", target.URL),
+					logger.F("url", safeURL(target.URL)),
 					logger.F("status", status),
 				)
 			}
-			return customScrapeResult{}, fmt.Errorf("scrape %q: HTTP %d", target.URL, status)
+			return customScrapeResult{}, fmt.Errorf("scrape %q: HTTP %d", safeURL(target.URL), status)
 		}
 
 		families, err := ParsePrometheusText(body)
 		if err != nil {
 			s.metrics.incScrape(customSourceLabel, targetName, "error")
-			return customScrapeResult{}, fmt.Errorf("parse prometheus text from %q: %w", target.URL, err)
+			return customScrapeResult{}, fmt.Errorf("parse prometheus text from %q: %w", safeURL(target.URL), err)
 		}
 		families = FilterFamilies(families, filter)
 		for i := range families {
@@ -170,6 +171,31 @@ func countSamples(families []ParsedFamily) int {
 		n += len(fam.Metrics)
 	}
 	return n
+}
+
+// safeURL renders a target URL for a log line or an error string as
+// scheme://host/path, with userinfo and query string removed.
+//
+// collect.metrics.kube_state_metrics.url and custom_endpoints[].url are
+// operator-supplied, and `http://exporter/metrics?api_key=...` is legal
+// config. The agent collects its own namespace's logs, so a raw URL in a
+// warning is a credential in a searchable log store -- and the same string
+// reaches an error that is itself logged one frame up. The registry and the
+// heartbeat already keep the URL off the wire; this closes the log side.
+//
+// A URL that will not parse is reduced to a fixed placeholder: returning the
+// original would defeat the whole point on exactly the malformed input most
+// likely to have been pasted by hand.
+func safeURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "[unparseable url]"
+	}
+	clean := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
+	return clean.String()
 }
 
 func targetLabel(target ScrapeTarget) string {

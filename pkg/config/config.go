@@ -74,9 +74,9 @@ type CollectConfig struct {
 
 // LogsCollectConfig configures Kubernetes log collection.
 type LogsCollectConfig struct {
-	Enabled   bool               `yaml:"enabled"`
-	TailLines int64              `yaml:"tail_lines"`
-	Follow    bool               `yaml:"follow"`
+	Enabled   bool  `yaml:"enabled"`
+	TailLines int64 `yaml:"tail_lines"`
+	Follow    bool  `yaml:"follow"`
 	// CheckpointDir enables SQLite persistence of per-stream read positions.
 	// When empty, checkpoints are disabled and tail_lines is used on each new stream.
 	CheckpointDir string `yaml:"checkpoint_dir,omitempty"`
@@ -151,6 +151,216 @@ type MetricsCollectConfig struct {
 	// KubeMetrics is deprecated; use rules instead. When true and rules is empty,
 	// normalize creates a cluster-wide pods+nodes rule for backward compatibility.
 	KubeMetrics bool `yaml:"kube_metrics,omitempty"`
+	// CAdvisor scrapes each node's kubelet for container CPU, memory, network
+	// and filesystem usage. Its targets are generated from the live node list,
+	// not written here: the agent is a single-replica Deployment and a static
+	// endpoint list cannot follow nodes joining and leaving.
+	CAdvisor CAdvisorConfig `yaml:"cadvisor,omitempty"`
+	// KubeStateMetrics scrapes a kube-state-metrics deployment for object
+	// state: replica counts, pod phase, restarts, PVC state, HPA and job
+	// status. None of it is in the Metrics API.
+	KubeStateMetrics KubeStateMetricsConfig `yaml:"kube_state_metrics,omitempty"`
+	// MaxSamplesPerScrape caps the samples one scrape of one target may
+	// publish. An explicit 0 disables the cap; leaving it unset defaults to
+	// DefaultMaxSamplesPerScrape.
+	//
+	// It is a POINTER because those two are different configurations and an
+	// int cannot tell them apart. normalize used to rewrite 0 to 20,000
+	// before validation, so the escape hatch that values.yaml, both config
+	// comments and applySampleBudget's own contract all promised was
+	// unreachable: a tenant with a legitimately wide allowlist set 0, kept
+	// the 20,000 cap, and silently went on losing families with
+	// dropped_cardinality climbing.
+	//
+	// This is the agent's own ceiling and it is advisory: the enforcing cap
+	// lives in the platform, which is the only side that can bound what a
+	// misconfigured or hostile agent sends. It exists so a normal install
+	// cannot flood its own uplink, and so the drop is visible to the operator
+	// who caused it.
+	MaxSamplesPerScrape *int `yaml:"max_samples_per_scrape,omitempty"`
+}
+
+// CAdvisorConfig configures per-node kubelet scraping.
+type CAdvisorConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Interval and Timeout follow the same rule as a custom endpoint: the
+	// timeout must stay below the interval.
+	Interval time.Duration `yaml:"interval,omitempty"`
+	Timeout  time.Duration `yaml:"timeout,omitempty"`
+	// RefreshInterval is how often the node inventory is re-listed. It bounds
+	// how long a new node waits to be scraped.
+	RefreshInterval time.Duration `yaml:"refresh_interval,omitempty"`
+	// Port overrides the kubelet port each node reports. Leave empty unless
+	// the cluster serves the kubelet somewhere other than where it says.
+	Port   string `yaml:"port,omitempty"`
+	Scheme string `yaml:"scheme,omitempty"`
+	Path   string `yaml:"path,omitempty"`
+	// BearerTokenPath and TLS default to the projected ServiceAccount token
+	// and CA bundle. The kubelet answers 401 without a token.
+	BearerTokenPath string            `yaml:"bearer_token_path,omitempty"`
+	TLS             TLSEndpointConfig `yaml:"tls,omitempty"`
+	// MetricAllowlist defaults to DefaultCAdvisorAllowlist. Setting it
+	// REPLACES that list rather than adding to it -- an operator narrowing the
+	// set must be able to narrow it, and a merge would make that impossible.
+	MetricAllowlist []string `yaml:"metric_allowlist,omitempty"`
+	MetricDenylist  []string `yaml:"metric_denylist,omitempty"`
+}
+
+// Default paths for the projected ServiceAccount credentials every pod gets.
+const (
+	defaultServiceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	defaultServiceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+)
+
+// DefaultCAdvisorAllowlist is the closed set of cAdvisor families this product
+// uses. cAdvisor exposes far more, and an open list is what turns a 300-pod
+// cluster into roughly 12,000 series.
+//
+// The patterns are anchored on both ends so `container_memory_usage_bytes`
+// cannot be admitted by the working-set entry.
+func DefaultCAdvisorAllowlist() []string {
+	return []string{
+		"^container_cpu_usage_seconds_total$",
+		"^container_cpu_cfs_throttled_seconds_total$",
+		"^container_memory_working_set_bytes$",
+		"^container_memory_rss$",
+		"^container_network_receive_bytes_total$",
+		"^container_network_transmit_bytes_total$",
+		"^container_fs_reads_bytes_total$",
+		"^container_fs_writes_bytes_total$",
+		"^container_fs_usage_bytes$",
+		"^machine_cpu_cores$",
+		"^machine_memory_bytes$",
+	}
+}
+
+// ApplyDefaults fills the zero values a cAdvisor block leaves unset.
+func (c *CAdvisorConfig) ApplyDefaults() {
+	if c == nil {
+		return
+	}
+	// The CONSTANTS, not the literals validate happens to agree with today.
+	// CAdvisorConfig.validate compares effective values against
+	// DefaultScrapeInterval/DefaultScrapeTimeout; writing the same numbers out
+	// by hand here is the exact drift finding 4 found in the kube-state pair,
+	// left structurally possible.
+	if c.Interval <= 0 {
+		c.Interval = DefaultScrapeInterval
+	}
+	if c.Timeout <= 0 {
+		c.Timeout = DefaultScrapeTimeout
+	}
+	if c.RefreshInterval <= 0 {
+		c.RefreshInterval = 2 * time.Minute
+	}
+	if c.Scheme == "" {
+		c.Scheme = "https"
+	}
+	if c.Path == "" {
+		c.Path = "/metrics/cadvisor"
+	}
+	if c.BearerTokenPath == "" {
+		c.BearerTokenPath = defaultServiceAccountTokenPath
+	}
+	if c.TLS.CAFile == "" && !c.TLS.InsecureSkipVerify {
+		c.TLS.CAFile = defaultServiceAccountCAPath
+	}
+	if len(c.MetricAllowlist) == 0 {
+		c.MetricAllowlist = DefaultCAdvisorAllowlist()
+	}
+}
+
+// KubeStateMetricsConfig configures the kube-state-metrics scrape.
+type KubeStateMetricsConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// URL scrapes an explicit address. Leave empty to use ServiceNamespace,
+	// ServiceName and Port, which is also what the presence probe checks --
+	// an explicit URL disables the probe, because the agent then has no
+	// Service to look for.
+	URL              string `yaml:"url,omitempty"`
+	ServiceNamespace string `yaml:"service_namespace,omitempty"`
+	ServiceName      string `yaml:"service_name,omitempty"`
+	Port             int32  `yaml:"port,omitempty"`
+	Path             string `yaml:"path,omitempty"`
+
+	Interval time.Duration `yaml:"interval,omitempty"`
+	Timeout  time.Duration `yaml:"timeout,omitempty"`
+	// ProbeInterval is how often absence is re-checked. A cluster that
+	// installs kube-state-metrics after the agent must start being scraped
+	// without an agent restart.
+	ProbeInterval time.Duration `yaml:"probe_interval,omitempty"`
+
+	MetricAllowlist []string `yaml:"metric_allowlist,omitempty"`
+	MetricDenylist  []string `yaml:"metric_denylist,omitempty"`
+}
+
+// DefaultKubeStateAllowlist is the closed set this product reads.
+// kube-state-metrics exposes several hundred families; admitting all of them
+// costs more series than cAdvisor does.
+func DefaultKubeStateAllowlist() []string {
+	return []string{
+		"^kube_pod_status_phase$",
+		"^kube_pod_container_status_restarts_total$",
+		"^kube_pod_container_status_waiting_reason$",
+		"^kube_pod_container_resource_requests$",
+		"^kube_pod_container_resource_limits$",
+		"^kube_deployment_status_replicas$",
+		"^kube_deployment_status_replicas_available$",
+		"^kube_deployment_spec_replicas$",
+		"^kube_statefulset_status_replicas_ready$",
+		"^kube_daemonset_status_number_ready$",
+		"^kube_daemonset_status_desired_number_scheduled$",
+		"^kube_job_status_failed$",
+		"^kube_job_status_succeeded$",
+		"^kube_persistentvolumeclaim_status_phase$",
+		"^kube_horizontalpodautoscaler_status_current_replicas$",
+		"^kube_horizontalpodautoscaler_spec_max_replicas$",
+		"^kube_node_status_condition$",
+		"^kube_node_status_allocatable$",
+		"^kube_node_status_capacity$",
+	}
+}
+
+// ApplyDefaults fills the zero values a kube-state-metrics block leaves unset.
+func (k *KubeStateMetricsConfig) ApplyDefaults() {
+	if k == nil {
+		return
+	}
+	if k.ServiceNamespace == "" {
+		k.ServiceNamespace = "kube-system"
+	}
+	if k.ServiceName == "" {
+		k.ServiceName = "kube-state-metrics"
+	}
+	if k.Port <= 0 {
+		k.Port = 8080
+	}
+	if k.Path == "" {
+		k.Path = "/metrics"
+	}
+	if k.Interval <= 0 {
+		k.Interval = DefaultKubeStateInterval
+	}
+	if k.Timeout <= 0 {
+		k.Timeout = DefaultKubeStateTimeout
+	}
+	if k.ProbeInterval <= 0 {
+		k.ProbeInterval = 5 * time.Minute
+	}
+	if len(k.MetricAllowlist) == 0 {
+		k.MetricAllowlist = DefaultKubeStateAllowlist()
+	}
+}
+
+// ResolvedURL is the address to scrape.
+func (k *KubeStateMetricsConfig) ResolvedURL() string {
+	if k == nil {
+		return ""
+	}
+	if k.URL != "" {
+		return k.URL
+	}
+	return fmt.Sprintf("http://%s.%s.svc:%d%s", k.ServiceName, k.ServiceNamespace, k.Port, k.Path)
 }
 
 // MetricsNamespaceRule defines Kubernetes Metrics API collection scoped by namespace and filters.
@@ -177,12 +387,39 @@ type MetricsNamespaceRule struct {
 	NodeInterval time.Duration `yaml:"node_interval,omitempty"`
 }
 
+// TLSEndpointConfig configures TLS for one scrape target. It maps onto the
+// collector's own TLSConfig; the two are kept separate so the yaml surface can
+// change without dragging the collector's internals into pkg/config.
+type TLSEndpointConfig struct {
+	// InsecureSkipVerify disables certificate verification. The kubelet serves
+	// a certificate signed for its node name and IP, which a scrape by IP does
+	// not always match; caFile is the correct answer and this is the escape
+	// hatch for clusters that cannot produce one.
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify,omitempty"`
+	// CAFile is a PEM bundle path inside the agent's own filesystem.
+	CAFile string `yaml:"ca_file,omitempty"`
+}
+
 // MetricEndpointConfig defines a scrape target for custom metrics.
 type MetricEndpointConfig struct {
 	Name        string            `yaml:"name"`
 	URL         string            `yaml:"url"`
 	Interval    time.Duration     `yaml:"interval"`
 	ExtraLabels map[string]string `yaml:"extra_labels"`
+	// Timeout bounds one scrape. It must stay below Interval: a timeout at or
+	// above the interval lets a slow target hold its scraper goroutine past the
+	// next tick forever, and the target then reports neither success nor
+	// failure at its configured rate.
+	Timeout time.Duration `yaml:"timeout,omitempty"`
+	// BearerTokenPath is read fresh on every scrape, not cached: a projected
+	// ServiceAccount token is rotated in place and a cached copy expires.
+	BearerTokenPath string            `yaml:"bearer_token_path,omitempty"`
+	TLS             TLSEndpointConfig `yaml:"tls,omitempty"`
+	// MetricAllowlist and MetricDenylist are RE2 patterns matched against the
+	// metric FAMILY name. An empty allowlist admits every family, so leaving
+	// both empty on a cAdvisor target ships roughly 40 series per container.
+	MetricAllowlist []string `yaml:"metric_allowlist,omitempty"`
+	MetricDenylist  []string `yaml:"metric_denylist,omitempty"`
 }
 
 // BufferConfig controls in-memory and on-disk buffering before export.
