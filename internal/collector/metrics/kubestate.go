@@ -43,13 +43,14 @@ func (c *Collector) runKubeStateTarget(ctx context.Context) {
 		return
 	}
 
-	const kind = "kube_state_metrics"
+	kind := healthKind(ks.Target)
 	targetName := targetLabel(ks.Target)
 	installed := !ks.ProbeService
 	if installed {
 		// An explicit URL was configured: there is no Service to probe, so
 		// the target is assumed present and reported as one target from the
-		// start -- nothing else ever calls SetTargetCount for this kind.
+		// start. Start seeds the kind at 0; this raises it to the one target
+		// that actually exists.
 		c.health.SetTargetCount(kind, 1)
 	}
 	lastProbe := time.Time{}
@@ -71,7 +72,11 @@ func (c *Collector) runKubeStateTarget(ctx context.Context) {
 			switch {
 			case probeErr != nil:
 				// Could not ask. Leave the previous verdict standing rather
-				// than claiming absence on an API blip.
+				// than claiming absence on an API blip -- but say on the wire
+				// that the question went unanswered. A 403 on `get services`
+				// is permanent, and with only a log line this kind would emit
+				// no entry at all on the very install whose RBAC is wrong.
+				c.health.RecordDiscoveryFailure(kind)
 				c.log.Warn("kube-state-metrics presence probe failed",
 					logger.F("error", probeErr.Error()))
 			case !found:
@@ -79,6 +84,9 @@ func (c *Collector) runKubeStateTarget(ctx context.Context) {
 				c.health.MarkNotInstalled(kind)
 			default:
 				installed = true
+				// The probe answered: whatever it says next is a real verdict,
+				// so the standing "could not ask" entry must go.
+				c.health.ClearDiscoveryFailure(kind)
 				// The probe found the Service: this is the evidence that
 				// clears a standing "not installed" determination. A target
 				// count alone would leave notInstalled set, and a scrape
@@ -93,7 +101,7 @@ func (c *Collector) runKubeStateTarget(ctx context.Context) {
 			if err != nil {
 				c.health.RecordFailure(kind, targetName, err)
 				c.log.Warn("kube-state-metrics scrape failed",
-					logger.F("url", ks.Target.URL),
+					logger.F("url", safeURL(ks.Target.URL)),
 					logger.F("error", err.Error()))
 			} else {
 				families, droppedSamples := applySampleBudget(result.Families, c.cfg.MaxSamplesPerScrape)

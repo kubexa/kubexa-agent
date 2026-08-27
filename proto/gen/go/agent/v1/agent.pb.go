@@ -627,9 +627,11 @@ type AgentHealth struct {
 	// NOT read that as "every kind is OK" and must not synthesize zero-valued
 	// rows from it; it is the unmeasured/measured-zero distinction this whole
 	// feature exists to preserve, recurring one level up. An agent that does
-	// report scrape health always emits at least one entry per configured
-	// scrape kind, so an empty list never comes from an agent that is actually
-	// reporting.
+	// report scrape health emits one entry per configured scrape kind from the
+	// moment it starts -- the kinds are seeded before any discovery runs, so a
+	// kind whose node listing or presence probe is being refused by RBAC still
+	// reports, as "failing". An empty list therefore never comes from an agent
+	// that is actually reporting.
 	ScrapeTargets []*ScrapeTargetHealth `protobuf:"bytes,8,rep,name=scrape_targets,json=scrapeTargets,proto3" json:"scrape_targets,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -739,7 +741,12 @@ type ScrapeTargetHealth struct {
 	// last_success_unix_ms is 0 when this kind has NEVER succeeded, which is a
 	// different statement from "its last scrape failed".
 	LastSuccessUnixMs int64 `protobuf:"varint,5,opt,name=last_success_unix_ms,json=lastSuccessUnixMs,proto3" json:"last_success_unix_ms,omitempty"`
-	// samples_last_scrape is what was PUBLISHED, after the sample budget.
+	// samples_last_scrape is what was PUBLISHED, after the sample budget --
+	// SUMMED over this kind's targets, each contributing what it published on
+	// its own last scrape. It is not the last target to finish: forty cAdvisor
+	// nodes would then be represented by whichever one reported last, and a
+	// single node whose allowlist matches nothing would render the kind as zero
+	// while the rest shipped thousands.
 	SamplesLastScrape int64 `protobuf:"varint,6,opt,name=samples_last_scrape,json=samplesLastScrape,proto3" json:"samples_last_scrape,omitempty"`
 	// dropped_cardinality is CUMULATIVE since process start, like every other
 	// counter in AgentHealth: a dropped heartbeat then loses nothing.

@@ -1,11 +1,14 @@
 package metrics
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"reflect"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
@@ -311,5 +314,129 @@ func TestSnapshotProtoCarriesEveryState(t *testing.T) {
 	// "at the epoch".
 	if ks.GetLastSuccessUnixMs() != 0 {
 		t.Errorf("kube_state_metrics last_success_unix_ms = %d, want 0", ks.GetLastSuccessUnixMs())
+	}
+}
+
+// TestSamplesLastScrapeSumsEveryTargetOfTheKind pins the fix for a
+// last-writer-wins scalar. Forty cAdvisor nodes are one row on the screen, and
+// with a kind-wide scalar that row reported whichever node happened to finish
+// last -- so a single node whose allowlist matched nothing rendered the whole
+// kind as `samples_last_scrape: 0` while the other thirty-nine shipped
+// thousands. That is a measured nonzero displayed as a zero, which is exactly
+// the collapse this registry exists to prevent.
+func TestSamplesLastScrapeSumsEveryTargetOfTheKind(t *testing.T) {
+	h := newScrapeHealth()
+	h.SetTargetCount(KindCAdvisor, 3)
+
+	h.RecordSuccess(KindCAdvisor, "cadvisor/node-1", 1200)
+	h.RecordSuccess(KindCAdvisor, "cadvisor/node-2", 1300)
+	// The last writer measured a real zero. Under last-writer-wins the kind
+	// would report 0 and the 2500 samples the other two published would be
+	// invisible.
+	h.RecordSuccess(KindCAdvisor, "cadvisor/node-3", 0)
+
+	got := byKind(h.Snapshot())[KindCAdvisor]
+	if got.SamplesLastScrape != 2500 {
+		t.Fatalf("SamplesLastScrape = %d, want 2500 (1200+1300+0)", got.SamplesLastScrape)
+	}
+
+	// A target's next scrape REPLACES its own contribution rather than adding
+	// to it -- this is a gauge of the last scrape, not a counter.
+	h.RecordSuccess(KindCAdvisor, "cadvisor/node-1", 10)
+	if got := byKind(h.Snapshot())[KindCAdvisor]; got.SamplesLastScrape != 1310 {
+		t.Fatalf("SamplesLastScrape = %d, want 1310 after node-1 re-scraped", got.SamplesLastScrape)
+	}
+}
+
+// A torn-down target must stop contributing to the sum, for the same reason it
+// must stop contributing to TargetsFailing: nothing will ever scrape it again,
+// so its last figure would otherwise be added into every future snapshot.
+func TestClearTargetDropsThatTargetsSampleContribution(t *testing.T) {
+	h := newScrapeHealth()
+	h.SetTargetCount(KindCAdvisor, 2)
+	h.RecordSuccess(KindCAdvisor, "cadvisor/node-1", 500)
+	h.RecordSuccess(KindCAdvisor, "cadvisor/node-2", 700)
+
+	h.ClearTarget(KindCAdvisor, "cadvisor/node-2")
+	h.SetTargetCount(KindCAdvisor, 1)
+
+	got := byKind(h.Snapshot())[KindCAdvisor]
+	if got.SamplesLastScrape != 500 {
+		t.Fatalf("SamplesLastScrape = %d, want 500: node-2 no longer exists", got.SamplesLastScrape)
+	}
+}
+
+// A kind marked not-installed carries no figures from the installation that is
+// gone. "not_installed" next to a sample count and a success timestamp
+// describes no state that ever existed, and an operator reading the row cannot
+// tell whether the numbers are current.
+func TestMarkNotInstalledLeavesNoStaleFigures(t *testing.T) {
+	h := newScrapeHealth()
+	h.SetTargetCount(KindKubeState, 1)
+	h.RecordSuccess(KindKubeState, "kube-state-metrics", 4200)
+
+	if got := byKind(h.Snapshot())[KindKubeState]; got.SamplesLastScrape != 4200 {
+		t.Fatalf("SamplesLastScrape = %d, want 4200 before the component is removed", got.SamplesLastScrape)
+	}
+
+	h.MarkNotInstalled(KindKubeState)
+
+	got := byKind(h.Snapshot())[KindKubeState]
+	if got.State != StateNotInstalled {
+		t.Fatalf("State = %q, want %q", got.State, StateNotInstalled)
+	}
+	if got.SamplesLastScrape != 0 {
+		t.Errorf("SamplesLastScrape = %d, want 0: nothing is being scraped", got.SamplesLastScrape)
+	}
+	if !got.LastSuccess.IsZero() {
+		t.Errorf("LastSuccess = %v, want zero: the success belonged to an installation that is gone",
+			got.LastSuccess)
+	}
+	// The cumulative drop counter is deliberately NOT reset: it is cumulative
+	// since process start, like every other AgentHealth counter, and a
+	// decrease there means "the agent restarted" to the gateway.
+}
+
+// A discovery failure is reported as failing, never as absence, and never as a
+// scrape's classification. The kubelets may be perfectly reachable -- it is the
+// agent's view of them that is broken -- so StateFailing is the honest answer
+// regardless of what kind of error the API server returned.
+func TestRecordDiscoveryFailureReportsFailingNotAbsence(t *testing.T) {
+	h := newScrapeHealth()
+	h.SetTargetCount(KindCAdvisor, 0)
+
+	h.RecordDiscoveryFailure(KindCAdvisor)
+
+	got := byKind(h.Snapshot())[KindCAdvisor]
+	if got.State != StateFailing {
+		t.Fatalf("State = %q, want %q", got.State, StateFailing)
+	}
+	if got.TargetsFailing != 1 {
+		t.Errorf("TargetsFailing = %d, want 1", got.TargetsFailing)
+	}
+
+	// Nothing else would ever clear it -- no scrape is attributed to the
+	// discovery entry -- so a recovered listing must clear it explicitly.
+	h.ClearDiscoveryFailure(KindCAdvisor)
+	if got := byKind(h.Snapshot())[KindCAdvisor]; got.State != StateOK {
+		t.Fatalf("State = %q, want %q after discovery recovered", got.State, StateOK)
+	}
+}
+
+// The synthetic discovery key is a map key and nothing else. HealthProto is
+// the only thing that reaches the wire, and it publishes counts, not names.
+func TestTheDiscoveryTargetNameNeverReachesTheWire(t *testing.T) {
+	h := newScrapeHealth()
+	h.SetTargetCount(KindCAdvisor, 0)
+	h.RecordDiscoveryFailure(KindCAdvisor)
+
+	for _, entry := range HealthProto(h) {
+		raw, err := proto.Marshal(entry)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if bytes.Contains(raw, []byte(discoveryTarget)) {
+			t.Fatalf("the synthetic discovery key reached the wire in %v", entry)
+		}
 	}
 }

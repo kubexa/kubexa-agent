@@ -217,8 +217,29 @@ func (c *Collector) Start(ctx context.Context) error {
 		}
 	}
 
+	// Seed a health row for every CONFIGURED kind before any scraper or
+	// discovery goroutine runs.
+	//
+	// Without this, a kind only ever appears once something succeeds:
+	// SetTargetCount for the generated kinds sits behind a successful node
+	// LIST, and kube-state-metrics' behind a successful presence probe. An
+	// agent whose ClusterRole is stricter than this chart's -- 403 on `list
+	// nodes`, 403 on `get services` -- would then emit scrape_targets with no
+	// entry for either kind, and AgentHealth's own contract says an empty or
+	// absent list means "this agent does not report scrape health at all".
+	// A totally broken integration would render as an old agent, and it would
+	// blind precisely the operator whose RBAC is wrong.
+	//
+	// A seeded kind reads targets_total 0 with last_success_unix_ms 0, which
+	// the wire already documents as "never succeeded" -- not as a zero.
 	if len(c.cfg.CustomTargets) > 0 {
-		c.health.SetTargetCount("custom", len(c.cfg.CustomTargets))
+		c.health.SetTargetCount(KindCustom, len(c.cfg.CustomTargets))
+	}
+	for _, tpl := range c.cfg.DynamicTargets.Templates {
+		c.health.SetTargetCount(tpl.Kind, 0)
+	}
+	if c.cfg.KubeState.Enabled {
+		c.health.SetTargetCount(healthKind(c.cfg.KubeState.Target), 0)
 	}
 
 	for _, target := range c.cfg.CustomTargets {
@@ -384,7 +405,7 @@ func (c *Collector) runCustomTarget(ctx context.Context, target ScrapeTarget) {
 			c.health.RecordFailure(healthKind(target), targetName, err)
 			c.log.Warn("custom metrics scrape failed",
 				logger.F("target", targetName),
-				logger.F("url", target.URL),
+				logger.F("url", safeURL(target.URL)),
 				logger.F("error", err.Error()),
 				logger.F("backoff", backoff.String()),
 			)
@@ -431,9 +452,23 @@ func (c *Collector) runDynamicTargets(ctx context.Context) {
 	for {
 		added, removed, err := c.dynamic.refresh(ctx)
 		if err != nil {
+			// Say so on the wire, not only in a log nobody outside the cluster
+			// reads. A failed discovery leaves the kind's target count at
+			// whatever the last successful listing wrote -- 0 on the first
+			// attempt -- and silence there is indistinguishable from a healthy
+			// kind with nothing to scrape.
+			for _, tpl := range c.dynamic.templates {
+				c.health.RecordDiscoveryFailure(tpl.Kind)
+			}
 			c.log.Warn("dynamic scrape target refresh failed",
 				logger.F("error", err.Error()))
 		} else {
+			// Nothing else ever clears it: no scrape is attributed to the
+			// discovery entry, so a recovered listing would otherwise report
+			// the kind as failing for the rest of the process's life.
+			for _, tpl := range c.dynamic.templates {
+				c.health.ClearDiscoveryFailure(tpl.Kind)
+			}
 			for _, target := range removed {
 				c.stopDynamicTarget(target)
 			}
@@ -530,6 +565,19 @@ func (c *Collector) stopAllDynamicTargets() {
 
 	for _, cancel := range cancels {
 		cancel()
+	}
+
+	// A stopped fleet is not a healthy one. SetTargetCount has already written
+	// targets_total, so a kindState frozen here with its failing set intact
+	// would report a standing outage for nodes nobody is scraping -- and one
+	// with an empty failing set would report `ok` for the same. Dropping
+	// p.current is what stops a later refresh from diffing against a target
+	// set that no longer runs.
+	if c.dynamic != nil {
+		for _, target := range c.dynamic.current {
+			c.health.ClearTarget(healthKind(target), targetLabel(target))
+		}
+		c.dynamic.current = nil
 	}
 }
 
