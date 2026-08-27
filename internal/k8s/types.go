@@ -69,3 +69,24 @@ type PodMetric struct {
 	Timestamp     time.Time
 	Window        time.Duration
 }
+
+// NodeInfo is one node as the scrape path needs to see it: an address to
+// reach, the kubelet's port, and whether the node is in a state worth
+// scraping. It is deliberately not the whole corev1.Node -- holding those
+// would put every node's full status in the agent's heap on every refresh.
+type NodeInfo struct {
+	Name string
+	// InternalIP is the node's InternalIP address. Nodes without one are not
+	// returned at all: they cannot be scraped, and a target with an empty host
+	// reports as broken rather than as absent.
+	InternalIP string
+	// KubeletPort is status.daemonEndpoints.kubeletEndpoint.Port, which is
+	// 10250 on a stock cluster but is configurable and is read rather than
+	// assumed. Zero is replaced with 10250 by the caller building the URL.
+	KubeletPort int32
+	// Ready is the NodeReady condition. A not-ready node is still returned:
+	// its kubelet often still serves /metrics/cadvisor, and dropping it would
+	// turn a node problem into missing data with no explanation.
+	Ready  bool
+	Labels map[string]string
+}
