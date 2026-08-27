@@ -594,6 +594,77 @@
                         "string"
                       ]
                     }
+                  },
+                  "timeout": {
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$",
+                    "description": "A Go duration such as \"10s\". A number, quoted or not, is rejected by the agent at startup."
+                  },
+                  "bearer_token_path": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "tls": {
+                    "type": [
+                      "null",
+                      "object"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "insecure_skip_verify": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "ca_file": {
+                        "type": [
+                          "boolean",
+                          "integer",
+                          "null",
+                          "number",
+                          "string"
+                        ]
+                      }
+                    }
+                  },
+                  "metric_allowlist": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ]
+                    }
+                  },
+                  "metric_denylist": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ]
+                    }
                   }
                 }
               }

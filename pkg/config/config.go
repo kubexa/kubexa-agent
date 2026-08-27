@@ -177,12 +177,39 @@ type MetricsNamespaceRule struct {
 	NodeInterval time.Duration `yaml:"node_interval,omitempty"`
 }
 
+// TLSEndpointConfig configures TLS for one scrape target. It maps onto the
+// collector's own TLSConfig; the two are kept separate so the yaml surface can
+// change without dragging the collector's internals into pkg/config.
+type TLSEndpointConfig struct {
+	// InsecureSkipVerify disables certificate verification. The kubelet serves
+	// a certificate signed for its node name and IP, which a scrape by IP does
+	// not always match; caFile is the correct answer and this is the escape
+	// hatch for clusters that cannot produce one.
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify,omitempty"`
+	// CAFile is a PEM bundle path inside the agent's own filesystem.
+	CAFile string `yaml:"ca_file,omitempty"`
+}
+
 // MetricEndpointConfig defines a scrape target for custom metrics.
 type MetricEndpointConfig struct {
 	Name        string            `yaml:"name"`
 	URL         string            `yaml:"url"`
 	Interval    time.Duration     `yaml:"interval"`
 	ExtraLabels map[string]string `yaml:"extra_labels"`
+	// Timeout bounds one scrape. It must stay below Interval: a timeout at or
+	// above the interval lets a slow target hold its scraper goroutine past the
+	// next tick forever, and the target then reports neither success nor
+	// failure at its configured rate.
+	Timeout time.Duration `yaml:"timeout,omitempty"`
+	// BearerTokenPath is read fresh on every scrape, not cached: a projected
+	// ServiceAccount token is rotated in place and a cached copy expires.
+	BearerTokenPath string            `yaml:"bearer_token_path,omitempty"`
+	TLS             TLSEndpointConfig `yaml:"tls,omitempty"`
+	// MetricAllowlist and MetricDenylist are RE2 patterns matched against the
+	// metric FAMILY name. An empty allowlist admits every family, so leaving
+	// both empty on a cAdvisor target ships roughly 40 series per container.
+	MetricAllowlist []string `yaml:"metric_allowlist,omitempty"`
+	MetricDenylist  []string `yaml:"metric_denylist,omitempty"`
 }
 
 // BufferConfig controls in-memory and on-disk buffering before export.
