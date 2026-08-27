@@ -507,6 +507,22 @@ func TestKubeStateMetricsValidationUsesItsOwnDefaults(t *testing.T) {
 	if config.DefaultKubeStateTimeout == config.DefaultScrapeTimeout {
 		t.Error("the kube-state defaults are the custom-endpoint ones again; this test now proves nothing")
 	}
+
+	// cAdvisor's pair is the same contract and was the same structural risk:
+	// its ApplyDefaults wrote 30s/10s as literals while its validate compared
+	// against DefaultScrapeInterval/DefaultScrapeTimeout. The two agreed
+	// numerically, so there was no bug -- only nothing stopping one from
+	// appearing the moment either side was edited alone.
+	ca := config.CAdvisorConfig{Enabled: true}
+	ca.ApplyDefaults()
+	if ca.Interval != config.DefaultScrapeInterval {
+		t.Errorf("cAdvisor ApplyDefaults Interval = %v, want %v -- validate judges against this constant",
+			ca.Interval, config.DefaultScrapeInterval)
+	}
+	if ca.Timeout != config.DefaultScrapeTimeout {
+		t.Errorf("cAdvisor ApplyDefaults Timeout = %v, want %v -- validate judges against this constant",
+			ca.Timeout, config.DefaultScrapeTimeout)
+	}
 }
 
 // The violation must name the value the operator never wrote. Load runs

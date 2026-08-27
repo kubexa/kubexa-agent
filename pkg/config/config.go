@@ -239,11 +239,16 @@ func (c *CAdvisorConfig) ApplyDefaults() {
 	if c == nil {
 		return
 	}
+	// The CONSTANTS, not the literals validate happens to agree with today.
+	// CAdvisorConfig.validate compares effective values against
+	// DefaultScrapeInterval/DefaultScrapeTimeout; writing the same numbers out
+	// by hand here is the exact drift finding 4 found in the kube-state pair,
+	// left structurally possible.
 	if c.Interval <= 0 {
-		c.Interval = 30 * time.Second
+		c.Interval = DefaultScrapeInterval
 	}
 	if c.Timeout <= 0 {
-		c.Timeout = 10 * time.Second
+		c.Timeout = DefaultScrapeTimeout
 	}
 	if c.RefreshInterval <= 0 {
 		c.RefreshInterval = 2 * time.Minute
