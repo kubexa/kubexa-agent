@@ -224,30 +224,34 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		return fmt.Errorf("mutate policy: %w", err)
 	}
 
-	// A SEPARATE client pair from queryClients above, not a reuse of it.
-	// k8s.QueryClients carries one rate.Limiter shared by every client it
-	// hands out (see its doc comment), and that limiter was carved out to
-	// protect the informer watch budget from ad-hoc QUERY bursts -- it was
-	// never meant to also arbitrate between reads and writes. Sharing it
-	// with mutations would mean a dashboard polling live queries could
-	// throttle an operator's delete, in either direction. 0/0 costs no new
-	// config key: it is the same "same budget as the main client, separate
-	// limiter" contract queryClients already uses.
-	//
-	// The trade, both halves of it: a write no longer queues behind a read
-	// burst (or vice versa) -- but under full saturation the agent can now
-	// issue up to twice the API calls it could with one shared bucket,
-	// because two independent buckets replace one.
-	mutateClients, err := k8s.NewQueryClients(&k8sconfig.Config{}, 0, 0)
-	if err != nil {
-		_ = q.Close()
-		return fmt.Errorf("mutate clients: %w", err)
-	}
-
 	mutationResponder, _, err := buildMutationResponder(
 		cfg,
 		mutatePolicy,
-		*mutateClients,
+		func() (*k8s.QueryClients, error) {
+			// A SEPARATE client pair from queryClients above, not a reuse of
+			// it -- and built here, inside the enabled path, not eagerly:
+			// this closure only runs once buildMutationResponder has already
+			// checked cfg.MutateEnabled(), so a disabled agent resolves no
+			// REST config, builds no dynamic client, and starts no second
+			// rate limiter for a responder it is about to throw away.
+			//
+			// k8s.QueryClients carries one rate.Limiter shared by every
+			// client it hands out (see its doc comment), and that limiter
+			// was carved out to protect the informer watch budget from
+			// ad-hoc QUERY bursts -- it was never meant to also arbitrate
+			// between reads and writes. Sharing it with mutations would mean
+			// a dashboard polling live queries could throttle an operator's
+			// delete, in either direction. 0/0 costs no new config key: it
+			// is the same "same budget as the main client, separate
+			// limiter" contract queryClients already uses.
+			//
+			// The trade, both halves of it: a write no longer queues behind
+			// a read burst (or vice versa) -- but under full saturation the
+			// agent can now issue up to twice the API calls it could with
+			// one shared bucket, because two independent buckets replace
+			// one.
+			return k8s.NewQueryClients(&k8sconfig.Config{}, 0, 0)
+		},
 		logger.New("mutate", logger.WithAgentID(cfg.Agent.AgentID)),
 		mainReg,
 	)
@@ -476,17 +480,23 @@ func compileMutatePolicy(cfg *config.Config, log *logger.Logger) (*mutatepolicy.
 //
 // The responder is nil when mutate.enabled is false; Options is still
 // returned so a caller (or a test) can see what WOULD have been built.
+//
+// newClients is a FACTORY, not a value, and is called only after the
+// MutateEnabled gate below -- never eagerly. Building the mutate client pair
+// (its own REST config resolution, dynamic client, and rate limiter) costs
+// real work, and a disabled agent must not pay it for a responder it is
+// about to throw away. The caller's factory is where the "why a separate
+// pool" trade is explained; this function only decides WHEN to call it.
 func buildMutationResponder(
 	cfg *config.Config,
 	mutatePolicy *mutatepolicy.Policy,
-	clients k8s.QueryClients,
+	newClients func() (*k8s.QueryClients, error),
 	log *logger.Logger,
 	reg prometheus.Registerer,
 ) (stream.MutationResponder, mutate.Options, error) {
 	opts := mutate.Options{
-		Clients: clients,
-		Policy:  mutatePolicy,
-		Logger:  log,
+		Policy: mutatePolicy,
+		Logger: log,
 		// RedactSecrets reuses the query path's setting rather than
 		// inventing a second one: both answer the same question -- does a
 		// secret value leave this agent. Deleting this line, or hardcoding
@@ -499,6 +509,11 @@ func buildMutationResponder(
 	if !cfg.MutateEnabled() {
 		return nil, opts, nil
 	}
+	clients, err := newClients()
+	if err != nil {
+		return nil, opts, fmt.Errorf("mutate clients: %w", err)
+	}
+	opts.Clients = *clients
 	executor, err := mutate.New(opts)
 	if err != nil {
 		return nil, opts, err
