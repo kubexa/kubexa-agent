@@ -11,6 +11,7 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/k8s"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	mutatepolicy "github.com/kubexa/kubexa-agent/internal/mutate/policy"
+	"github.com/kubexa/kubexa-agent/internal/query/policy"
 	"github.com/kubexa/kubexa-agent/pkg/config"
 )
 
@@ -233,4 +234,46 @@ func TestBuildMutationResponderFactoryCalledOnlyWhenEnabled(t *testing.T) {
 			t.Fatal("factory calls = 0, want non-zero when mutate.enabled is true -- the assertion above would be vacuous otherwise")
 		}
 	})
+}
+
+// compiledQueryPolicy compiles a valid, non-nil query policy -- the "what a
+// real serve() call site would hand buildCapabilityReporterOptions" shape,
+// distinct in TYPE (internal/query/policy.Policy) from the mutate policy
+// compiledMutatePolicy builds, for the same reason that function's own
+// comment gives.
+func compiledQueryPolicy(t *testing.T) *policy.Policy {
+	t.Helper()
+	p, err := policy.Compile(&config.Config{})
+	if err != nil {
+		t.Fatalf("policy.Compile: %v", err)
+	}
+	return p
+}
+
+// TestBuildCapabilityReporterOptionsWiresBothPolicies pins the wiring gap
+// Task 6 shipped without: nothing previously asserted that a mutate policy
+// reaches capability.Options at all, so an omitted MutatePolicy line left
+// can_patch/can_delete/can_create/policy_* false for every resource forever,
+// whatever mutate.rules said -- and every OTHER test in this package stayed
+// green, which is exactly why the gap survived the task.
+//
+// Both fields are asserted by IDENTITY, in the same test: Policy must still
+// be the exact query policy passed in, and MutatePolicy must be the exact
+// mutate policy passed in. Checking both together, rather than one field at
+// a time or merely non-nil, is what catches a regression that drops one
+// policy while leaving the other correct -- the shape this task's actual
+// defect took.
+func TestBuildCapabilityReporterOptionsWiresBothPolicies(t *testing.T) {
+	cfg := &config.Config{}
+	queryPolicy := compiledQueryPolicy(t)
+	mutatePolicy := compiledMutatePolicy(t)
+
+	opts := buildCapabilityReporterOptions(cfg, nil, nil, queryPolicy, mutatePolicy)
+
+	if opts.Policy != queryPolicy {
+		t.Fatalf("opts.Policy = %p, want the exact queryPolicy passed in (%p)", opts.Policy, queryPolicy)
+	}
+	if opts.MutatePolicy != mutatePolicy {
+		t.Fatalf("opts.MutatePolicy = %p, want the exact mutatePolicy passed in (%p)", opts.MutatePolicy, mutatePolicy)
+	}
 }
