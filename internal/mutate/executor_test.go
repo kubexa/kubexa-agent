@@ -465,3 +465,51 @@ func TestMergePatchInjectsResourceVersion(t *testing.T) {
 		t.Fatalf("patch body metadata.resourceVersion = %q, want 7", rv)
 	}
 }
+
+// A 429 from the API server is the server saying "not now", the same
+// instruction the concurrency gate gives when IT is the one that is
+// saturated -- so it maps to RESOURCE_EXHAUSTED, not INTERNAL.
+func TestTooManyRequestsMapsToResourceExhausted(t *testing.T) {
+	dyn := newFakeDynamic([]runtime.Object{deployment("dev", "web", "7")})
+	dyn.PrependReactor("delete", "deployments",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewTooManyRequests("slow down", 5)
+		})
+	e := newExecutorWithClient(t, dyn, config.MutateRule{Resources: []string{"deployments"}, Verbs: []string{"delete"}})
+	res := e.Execute(context.Background(), req(agentv1.MutationVerb_MUTATION_VERB_DELETE, "dev", "web"))
+	if res.GetError().GetCode() != agentv1.MutationErrorCode_MUTATION_ERROR_RESOURCE_EXHAUSTED {
+		t.Fatalf("code = %v, want RESOURCE_EXHAUSTED", res.GetError().GetCode())
+	}
+}
+
+// A 503 is the same "not now" instruction as a 429.
+func TestServiceUnavailableMapsToResourceExhausted(t *testing.T) {
+	dyn := newFakeDynamic([]runtime.Object{deployment("dev", "web", "7")})
+	dyn.PrependReactor("delete", "deployments",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewServiceUnavailable("overloaded")
+		})
+	e := newExecutorWithClient(t, dyn, config.MutateRule{Resources: []string{"deployments"}, Verbs: []string{"delete"}})
+	res := e.Execute(context.Background(), req(agentv1.MutationVerb_MUTATION_VERB_DELETE, "dev", "web"))
+	if res.GetError().GetCode() != agentv1.MutationErrorCode_MUTATION_ERROR_RESOURCE_EXHAUSTED {
+		t.Fatalf("code = %v, want RESOURCE_EXHAUSTED", res.GetError().GetCode())
+	}
+}
+
+// The API server's own reported timeout maps to TIMEOUT, joining
+// context.DeadlineExceeded, mirroring internal/query/executor.go's
+// mapAPIError -- which already folds apierrors.IsTimeout into its TIMEOUT
+// case. Left as INTERNAL, a caller could not tell a server-side timeout
+// (safe to retry) from an unclassified platform fault.
+func TestServerTimeoutMapsToTimeout(t *testing.T) {
+	dyn := newFakeDynamic([]runtime.Object{deployment("dev", "web", "7")})
+	dyn.PrependReactor("delete", "deployments",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewTimeoutError("took too long", 5)
+		})
+	e := newExecutorWithClient(t, dyn, config.MutateRule{Resources: []string{"deployments"}, Verbs: []string{"delete"}})
+	res := e.Execute(context.Background(), req(agentv1.MutationVerb_MUTATION_VERB_DELETE, "dev", "web"))
+	if res.GetError().GetCode() != agentv1.MutationErrorCode_MUTATION_ERROR_TIMEOUT {
+		t.Fatalf("code = %v, want TIMEOUT", res.GetError().GetCode())
+	}
+}
