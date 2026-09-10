@@ -327,3 +327,141 @@ func TestDeleteOfMissingObjectIsNotFound(t *testing.T) {
 		t.Fatalf("code = %v, want NOT_FOUND", res.GetError().GetCode())
 	}
 }
+
+// enforceTarget is the most security-relevant logic in this executor: it
+// stops a PATCH(replace) payload whose own metadata.name disagrees with the
+// request name from silently retargeting a different object than the one
+// policy.Decide just authorized (dynamic.Interface's Update takes its target
+// name from the object body, with no separate name argument -- see the
+// enforceTarget comment in executor.go). This asserts both the refusal AND
+// that the mismatch never reaches the client: the reactor fails the test
+// outright if Update is ever invoked, so a regression that only weakens the
+// error code but still lets the call through is caught too.
+func TestPatchReplaceRefusesANameMismatch(t *testing.T) {
+	dyn := newFakeDynamic([]runtime.Object{deployment("dev", "web", "7")})
+	dyn.PrependReactor("update", "deployments",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			t.Fatal("Update reached the client; enforceTarget should have refused the mismatched payload")
+			return true, nil, nil
+		})
+	e := newExecutorWithClient(t, dyn,
+		config.MutateRule{Resources: []string{"deployments"}, Verbs: []string{"patch"}})
+
+	r := req(agentv1.MutationVerb_MUTATION_VERB_PATCH, "dev", "web")
+	r.PatchType = "replace"
+	r.ResourceVersion = "7"
+	// The payload names a DIFFERENT object than the one the request (and
+	// therefore policy.Decide) authorized.
+	r.Payload, _ = json.Marshal(deployment("dev", "not-web", "7").Object)
+
+	res := e.Execute(context.Background(), r)
+	if res.GetError().GetCode() != agentv1.MutationErrorCode_MUTATION_ERROR_INVALID {
+		t.Fatalf("code = %v, want INVALID", res.GetError().GetCode())
+	}
+}
+
+// Same guard, same reasoning, for SCALE: a scale object whose own
+// metadata.name disagrees with the request's target name must be refused
+// before it ever reaches Update("scale").
+func TestScaleRefusesATargetMismatch(t *testing.T) {
+	dyn := newFakeDynamic([]runtime.Object{deployment("dev", "web", "7")})
+	dyn.PrependReactor("update", "deployments",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			t.Fatal("Update reached the client; enforceTarget should have refused the mismatched payload")
+			return true, nil, nil
+		})
+	e := newExecutorWithClient(t, dyn,
+		config.MutateRule{Resources: []string{"deployments"}, Verbs: []string{"scale"}})
+
+	r := req(agentv1.MutationVerb_MUTATION_VERB_SCALE, "dev", "web")
+	scaleObj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "autoscaling/v1",
+		"kind":       "Scale",
+		"metadata":   map[string]any{"name": "not-web", "namespace": "dev"},
+		"spec":       map[string]any{"replicas": int64(3)},
+	}}
+	r.Payload, _ = json.Marshal(scaleObj.Object)
+
+	res := e.Execute(context.Background(), r)
+	if res.GetError().GetCode() != agentv1.MutationErrorCode_MUTATION_ERROR_INVALID {
+		t.Fatalf("code = %v, want INVALID", res.GetError().GetCode())
+	}
+}
+
+// SCALE, exercised end to end: a matching payload actually applies.
+func TestScaleAppliesTheUpdate(t *testing.T) {
+	e := newExecutor(t, []runtime.Object{deployment("dev", "web", "7")},
+		config.MutateRule{Resources: []string{"deployments"}, Verbs: []string{"scale"}})
+
+	r := req(agentv1.MutationVerb_MUTATION_VERB_SCALE, "dev", "web")
+	scaleObj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "autoscaling/v1",
+		"kind":       "Scale",
+		"metadata":   map[string]any{"name": "web", "namespace": "dev"},
+		"spec":       map[string]any{"replicas": int64(3)},
+	}}
+	r.Payload, _ = json.Marshal(scaleObj.Object)
+
+	res := e.Execute(context.Background(), r)
+	if res.GetError() != nil {
+		t.Fatalf("unexpected error: %v", res.GetError())
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(res.GetPayload(), &obj); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	replicas, _, _ := unstructured.NestedFloat64(obj, "spec", "replicas")
+	if replicas != 3 {
+		t.Fatalf("replicas = %v, want 3", replicas)
+	}
+}
+
+// A merge PATCH injects the request's resource_version into the patch body
+// so the API server -- not this code -- can refuse a stale write. If that
+// injection silently stopped happening, every merge/strategic patch would
+// become a blind write despite the earlier "resource_version is required"
+// check: that check only proves the field arrived on the wire, not that it
+// ever reached the server.
+func TestMergePatchInjectsResourceVersion(t *testing.T) {
+	dyn := newFakeDynamic([]runtime.Object{deployment("dev", "web", "7")})
+	var sentPatch []byte
+	dyn.PrependReactor("patch", "deployments",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			pa, ok := action.(clienttesting.PatchAction)
+			if !ok {
+				return false, nil, nil
+			}
+			sentPatch = pa.GetPatch()
+			// Not handled: let the default reactor go on to actually apply
+			// it. A plain JSON merge patch (RFC 7386) needs no struct-tag
+			// metadata, so it applies to an unstructured object fine --
+			// unlike the strategic merge case in
+			// TestRestartSetsKubectlsAnnotation.
+			return false, nil, nil
+		})
+	e := newExecutorWithClient(t, dyn,
+		config.MutateRule{Resources: []string{"deployments"}, Verbs: []string{"patch"}})
+
+	r := req(agentv1.MutationVerb_MUTATION_VERB_PATCH, "dev", "web")
+	r.PatchType = "merge"
+	r.ResourceVersion = "7"
+	r.Payload, _ = json.Marshal(map[string]any{
+		"spec": map[string]any{"replicas": int64(5)},
+	})
+
+	res := e.Execute(context.Background(), r)
+	if res.GetError() != nil {
+		t.Fatalf("unexpected error: %v", res.GetError())
+	}
+	if len(sentPatch) == 0 {
+		t.Fatal("expected the executor to send a patch")
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(sentPatch, &sent); err != nil {
+		t.Fatalf("patch body: %v", err)
+	}
+	rv, _, _ := unstructured.NestedString(sent, "metadata", "resourceVersion")
+	if rv != "7" {
+		t.Fatalf("patch body metadata.resourceVersion = %q, want 7", rv)
+	}
+}
