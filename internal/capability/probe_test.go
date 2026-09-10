@@ -54,7 +54,7 @@ func TestProbeReportsListAndWatchIndependently(t *testing.T) {
 		"secrets:list": false, "secrets:watch": false,
 	}, nil)
 
-	got := byResource(Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 4))
+	got := byResource(Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 4, nil))
 
 	if d := got["deployments"]; !d.CanList || d.CanWatch {
 		t.Fatalf("deployments = list %v / watch %v, want true/false", d.CanList, d.CanWatch)
@@ -77,7 +77,7 @@ func TestProbeMarksProbeFailedRatherThanDenied(t *testing.T) {
 		map[string]bool{"deployments:list": true},
 	)
 
-	got := byResource(Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 4))
+	got := byResource(Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 4, nil))
 
 	d := got["deployments"]
 	if !d.ProbeFailed {
@@ -105,7 +105,7 @@ func TestProbeAsksClusterWide(t *testing.T) {
 			}, nil
 		})
 
-	Probe(context.Background(), cs.AuthorizationV1(), gvrs()[:1], 1)
+	Probe(context.Background(), cs.AuthorizationV1(), gvrs()[:1], 1, nil)
 
 	if len(seen) != 2 {
 		t.Fatalf("issued %d reviews, want 2 (list + watch)", len(seen))
@@ -123,7 +123,7 @@ func TestProbeAsksClusterWide(t *testing.T) {
 
 func TestProbeReturnsOneCapabilityPerGVR(t *testing.T) {
 	cs := authzClient(map[string]bool{}, nil)
-	if got := Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 8); len(got) != 2 {
+	if got := Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 8, nil); len(got) != 2 {
 		t.Fatalf("got %d capabilities, want 2", len(got))
 	}
 }
@@ -150,7 +150,7 @@ func TestProbeSkipsWatchWhenListIsDenied(t *testing.T) {
 			}, nil
 		})
 
-	got := Probe(context.Background(), cs.AuthorizationV1(), gvrs()[:1], 1)
+	got := Probe(context.Background(), cs.AuthorizationV1(), gvrs()[:1], 1, nil)
 
 	if len(verbs) != 1 || verbs[0] != "list" {
 		t.Fatalf("issued reviews for %v, want exactly [list] — watch must not be asked once list is denied", verbs)
@@ -169,7 +169,7 @@ func TestProbeMarksUnknownWhenOnlyTheWatchReviewFails(t *testing.T) {
 		map[string]bool{"deployments:watch": true},
 	)
 
-	got := Probe(context.Background(), cs.AuthorizationV1(), gvrs()[:1], 1)
+	got := Probe(context.Background(), cs.AuthorizationV1(), gvrs()[:1], 1, nil)
 
 	if !got[0].ProbeFailed {
 		t.Fatalf("capability = %+v, want ProbeFailed after the watch review errored", got[0])
