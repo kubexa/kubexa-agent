@@ -88,27 +88,34 @@ func TestCompileRejectsEmptyVerbs(t *testing.T) {
 }
 
 // Review finding 4: prove the wildcard rejection actually fires from
-// Compile, for both the bare and the partial form, using a Go-built
-// MutateRule -- not just via config-load-time validation (pkg/config's own
-// tests already cover that).
+// Compile, using a Go-built MutateRule -- not just via config-load-time
+// validation (pkg/config's own tests already cover that).
+//
+// A bare "*" case was deliberately removed from this test (it was here
+// originally, as a second subtest alongside this one). It does not belong:
+// verified by temporarily deleting the `trimmed == ResourceWildcard` branch
+// in pkg/config's ValidateMutateRules and re-running pkg/config's own
+// TestWildcardResourceIsRefused, which stayed GREEN -- because the very next
+// check, `strings.Contains(trimmed, ResourceWildcard)`, also matches a bare
+// "*" (a string always contains itself) and its message contains "wildcard"
+// too, so the two checks are redundant for the bare form specifically. A
+// Compile-level subtest built the same way this partial-wildcard case is
+// built would therefore pass whether or not any wildcard-specific check
+// exists at all: k8sresource.Parse("*") independently returns "unsupported
+// resource" for a bare "*" (no "/", not a registered alias), so Compile
+// would still error out on it via that unrelated path. Such a subtest cannot
+// fail for the reason its name claims, so it was removed rather than kept as
+// a passing test that pins nothing. The bare form is exercised at the layer
+// where it can actually be isolated: pkg/config/mutate_test.go's
+// TestWildcardResourceIsRefused, which is a config-load-time-shaped test
+// (via ValidateMutateForTest), not this package's Compile-shaped one.
 func TestCompileRejectsWildcardResource(t *testing.T) {
-	cases := []struct {
-		name      string
-		resources []string
-	}{
-		{"bare wildcard", []string{"*"}},
-		{"partial wildcard", []string{"apps/*"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			enabled := true
-			cfg := &config.Config{Mutate: config.MutateConfig{
-				Enabled: &enabled,
-				Rules:   []config.MutateRule{{Resources: tc.resources, Verbs: []string{"delete"}}},
-			}}
-			if _, err := policy.Compile(cfg); err == nil {
-				t.Fatalf("want an error compiling resources %v, got nil", tc.resources)
-			}
-		})
+	enabled := true
+	cfg := &config.Config{Mutate: config.MutateConfig{
+		Enabled: &enabled,
+		Rules:   []config.MutateRule{{Resources: []string{"apps/*"}, Verbs: []string{"delete"}}},
+	}}
+	if _, err := policy.Compile(cfg); err == nil {
+		t.Fatal("want an error compiling resources [apps/*], got nil")
 	}
 }
