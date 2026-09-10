@@ -41,4 +41,23 @@ message ResourceCapability {
   // outside the policy's namespace is refused even when policy_list is true.
   bool policy_list = 9;
   bool policy_get  = 10;
+
+  // Write and exec answers. can_* are the API server's RBAC verdict from a
+  // SelfSubjectAccessReview; policy_* are the cluster owner's config. They
+  // stay separate for the same reason can_list and policy_list do: a UI that
+  // cannot tell them apart sends the operator to the wrong file.
+  //
+  // can_patch/can_delete/can_create are probed ONLY for GVRs the mutate
+  // policy names, because that set is finite -- mutate rules forbid a
+  // wildcard. An unprobed entry reports false for all of them, which is the
+  // same answer an agent without the feature gives.
+  bool can_patch     = 11;
+  bool can_delete    = 12;
+  bool can_create    = 13;
+  bool can_exec      = 14;  // pods and nodes only; phase B/C
+  bool policy_patch  = 15;
+  bool policy_delete = 16;
+  bool policy_create = 17;
+  bool policy_scale  = 18;
+  bool policy_exec   = 19;  // phase B/C
 }

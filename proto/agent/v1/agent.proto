@@ -38,6 +38,7 @@ message AgentMessage {
     PrometheusMetricsEvent prometheus_metrics = 9;
     ResourceCatalog        catalog            = 10;
     ResourceQueryResult    resource_query_result = 11;
+    MutationResult mutation_result = 12;
   }
 }
 
@@ -54,6 +55,9 @@ message AgentCapabilities {
   bool logs    = 1;
   bool state   = 2;
   bool metrics = 3;
+  bool mutate    = 4;
+  bool exec_pod  = 5;   // reserved for phase B; the agent sets it false here
+  bool exec_node = 6;   // reserved for phase C; the agent sets it false here
 }
 
 message Heartbeat {
@@ -153,6 +157,7 @@ message GatewayMessage {
     BackpressureSignal backpressure = 5;
     Shutdown           shutdown     = 6;
     ResourceQuery      resource_query = 7;
+    MutationRequest mutation = 8;
   }
 }
 
@@ -354,4 +359,69 @@ enum QueryErrorCode {
   // restarting the listing from the first page -- reported as INTERNAL it
   // reads as a platform fault and offers no recovery.
   QUERY_ERROR_EXPIRED            = 8;
+}
+
+// ─── Mutations ──────────────────────────────────────────────────────────────
+
+// MutationRequest asks the agent to change one object right now. It is the
+// write counterpart to ResourceQuery and carries the same contract: nothing
+// is started, nothing is remembered, and a reply is ALWAYS sent.
+//
+// resource_version is a precondition, not a hint. There is no blind-write
+// path: a caller that wants to overwrite must read first and send back what
+// it read. The API server produces the conflict; the agent never invents one.
+message MutationRequest {
+  string        mutation_id      = 1;
+  ResourceRef   ref              = 2;
+  MutationVerb  verb             = 3;
+  string        namespace        = 4;
+  string        name             = 5;
+  bytes         payload          = 6;  // JSON: full object, patch body, or scale spec
+  string        patch_type       = 7;  // "replace" | "merge" | "strategic"
+  string        resource_version = 8;
+  string        uid              = 9;
+  DeleteOptions delete_options   = 10;
+  bool          dry_run          = 11;
+  int32         timeout_ms       = 12; // clamped by the agent to [1s, 60s]
+}
+
+enum MutationVerb {
+  MUTATION_VERB_UNSPECIFIED = 0;
+  MUTATION_VERB_PATCH       = 1;
+  MUTATION_VERB_DELETE      = 2;
+  MUTATION_VERB_RESTART     = 3;
+  MUTATION_VERB_SCALE       = 4;
+  MUTATION_VERB_CREATE      = 5;
+}
+
+message DeleteOptions {
+  string propagation_policy   = 1; // "Background" | "Foreground" | "Orphan"
+  int64  grace_period_seconds = 2; // -1 means unset
+}
+
+message MutationResult {
+  string        mutation_id = 1;
+  MutationError error       = 2; // when set, payload is empty
+  bytes         payload     = 3; // resulting object JSON; empty for DELETE
+}
+
+message MutationError {
+  MutationErrorCode code    = 1;
+  string            message = 2;
+}
+
+// POLICY_DENIED and RBAC_DENIED stay separate for the same reason they do on
+// the query path: they send the operator to two different files. CONFLICT is
+// separate from INVALID because it is the one failure the caller can fix, by
+// re-reading and re-submitting.
+enum MutationErrorCode {
+  MUTATION_ERROR_UNSPECIFIED   = 0;
+  MUTATION_ERROR_POLICY_DENIED = 1;
+  MUTATION_ERROR_RBAC_DENIED   = 2;
+  MUTATION_ERROR_NOT_FOUND     = 3;
+  MUTATION_ERROR_CONFLICT      = 4;
+  MUTATION_ERROR_INVALID       = 5;
+  MUTATION_ERROR_TIMEOUT       = 6;
+  MUTATION_ERROR_TOO_LARGE     = 7;
+  MUTATION_ERROR_INTERNAL      = 8;
 }
