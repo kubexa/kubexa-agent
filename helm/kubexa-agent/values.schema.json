@@ -6,6 +6,40 @@
     "secret"
   ],
   "properties": {
+    "rbac": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "readAll": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "write": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Grants the ServiceAccount patch/update/delete/create and the scale subresource. NOT derived from mutate.rules -- see the comment beside rbac.write in values.yaml."
+        },
+        "extraRules": {
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      }
+    },
     "agent": {
       "type": "object",
       "additionalProperties": false,
