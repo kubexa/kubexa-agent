@@ -266,6 +266,40 @@ func TestClusterRoleWriteNeverWildcards(t *testing.T) {
 	}
 }
 
+// rbac.write must exclude two resources the read block otherwise legitimizes
+// copying verbatim:
+//
+//   - nodes: write verbs on cluster Nodes are cluster-capacity-affecting, and
+//     cordon/drain are deferred out of this phase for the same reason -- this
+//     flag must not hand a mutate policy the ability to delete a Node.
+//   - the whole rbac.authorization.k8s.io group (roles, rolebindings,
+//     clusterroles, clusterrolebindings): Kubernetes' privilege-escalation
+//     check passes when the creator already holds the permissions being
+//     granted, and the write block's own resource set is exactly that --
+//     granting create/patch here lets a mutation bind the agent's own write
+//     powers to any subject.
+//
+// bareResourceEntries below matches a "- name" bullet line exactly, not a
+// substring, so it does not false-positive on "nodes/metrics" (not present in
+// the write block anyway) or any "*/scale" entry.
+func TestClusterRoleWriteExcludesNodesAndRBACGroup(t *testing.T) {
+	block := writeBlock(t)
+
+	bareResourceEntries := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?m)^\s*-\s+([a-z0-9./]+)\s*$`).FindAllStringSubmatch(block, -1) {
+		bareResourceEntries[m[1]] = true
+	}
+	if bareResourceEntries["nodes"] {
+		t.Error(`write block must not grant write verbs on "nodes" -- cluster capacity, and cordon/drain are deferred out of this phase`)
+	}
+
+	if strings.Contains(block, `rbac.authorization.k8s.io`) {
+		t.Error(`write block must not grant write verbs in the rbac.authorization.k8s.io apiGroup -- ` +
+			`the agent's ServiceAccount already holds exactly this resource set, so create/patch on ` +
+			`(cluster)role(binding)s is a privilege-escalation path to binding the agent's own write powers to any subject`)
+	}
+}
+
 // A default install (rbac.write off, so this block never renders) must not
 // rely on the write block for registry coverage: TestClusterRoleCoversRegistry
 // must keep passing purely on the enumerated READ rules. Mirrors
