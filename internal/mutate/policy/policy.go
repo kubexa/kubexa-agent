@@ -182,6 +182,45 @@ func (p *Policy) Decide(ref Ref, verb Verb, namespace, name string) Decision {
 		verb, refString(ref), namespace)}
 }
 
+// AllowsAnyWrite reports, per verb, whether any rule grants that verb on
+// this resource in any namespace or name. It answers the capability
+// catalog's question -- "could a mutation of this type ever succeed" -- and
+// is deliberately coarser than Decide: a per-GVR boolean cannot express a
+// namespace- or name-scoped rule, so Decide stays authoritative at request
+// time.
+//
+// scale is reported here from configuration alone. The agent's RBAC probe
+// for it differs from the other three verbs -- scale is a patch on the
+// deployments/scale SUBRESOURCE, which the SelfSubjectAccessReview helper
+// used for patch/delete/create cannot express -- so the catalog reports
+// policy_scale only, with no matching can_scale.
+func (p *Policy) AllowsAnyWrite(group, version, resource string) (patch, delete, create, scale bool) {
+	if p == nil || !p.enabled {
+		return false, false, false, false
+	}
+	ref := Ref{Group: group, Version: version, Resource: resource}
+	// Same validation Decide applies, for the same reason AllowsAnyList
+	// validates in internal/query/policy: with a wildcard rule in force this
+	// would otherwise answer true for any string at all, and the capability
+	// reporter would publish an entry for a GVR that cannot exist. Mutate
+	// rules cannot actually carry a wildcard (ValidateMutateRules rejects
+	// one at Compile time), but validateRef is cheap and keeps this method
+	// honest even if that invariant is ever loosened.
+	if err := validateRef(ref); err != nil {
+		return false, false, false, false
+	}
+	for _, r := range p.rules {
+		if !r.matchesResource(ref) {
+			continue
+		}
+		patch = patch || r.verbs[VerbPatch]
+		delete = delete || r.verbs[VerbDelete]
+		create = create || r.verbs[VerbCreate]
+		scale = scale || r.verbs[VerbScale]
+	}
+	return patch, delete, create, scale
+}
+
 // validateRef rejects a ref whose segments cannot name a real Kubernetes
 // resource. It runs before any rule is consulted, so no rule can permit one.
 //
