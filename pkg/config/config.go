@@ -38,6 +38,7 @@ type Config struct {
 	Gateway       GatewayConfig       `yaml:"gateway"`
 	Collect       CollectConfig       `yaml:"collect"`
 	Query         QueryConfig         `yaml:"query"`
+	Mutate        MutateConfig        `yaml:"mutate"`
 	Buffer        BufferConfig        `yaml:"buffer"`
 	Observability ObservabilityConfig `yaml:"observability"`
 	Log           LogConfig           `yaml:"log"`
@@ -635,6 +636,7 @@ func (c *Config) Validate() error {
 	violations = append(violations, c.Collect.State.validate()...)
 	violations = append(violations, c.Collect.Metrics.validate()...)
 	violations = append(violations, c.validateQuery()...)
+	violations = append(violations, c.validateMutate()...)
 
 	if len(violations) == 0 {
 		return nil

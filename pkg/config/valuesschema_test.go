@@ -202,7 +202,8 @@ func checkType(t *testing.T, where string, field reflect.Type, node map[string]a
 // config it exits on, and only a narrow type lets the pattern do its work.
 func narrowStringPaths() map[string]bool {
 	return map[string]bool{
-		`query.rules items: "verbs"`: true,
+		`query.rules items: "verbs"`:  true,
+		`mutate.rules items: "verbs"`: true,
 	}
 }
 

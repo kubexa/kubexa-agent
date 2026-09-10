@@ -1051,6 +1051,95 @@
         }
       }
     },
+    "mutate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": [
+              "null",
+              "object"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "null",
+                  "number",
+                  "string"
+                ]
+              },
+              "namespace": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "null",
+                  "number",
+                  "string"
+                ],
+                "pattern": "^[^*]*\\*?$"
+              },
+              "resources": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "null",
+                    "number",
+                    "string"
+                  ],
+                  "pattern": "^[^*]*$",
+                  "minLength": 1
+                }
+              },
+              "names": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": [
+                    "boolean",
+                    "integer",
+                    "null",
+                    "number",
+                    "string"
+                  ],
+                  "pattern": "^[^*]*\\*?$"
+                }
+              },
+              "verbs": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": [
+                    "null",
+                    "string"
+                  ],
+                  "pattern": "^\\s*([Pp][Aa][Tt][Cc][Hh]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Rr][Ee][Ss][Tt][Aa][Rr][Tt]|[Ss][Cc][Aa][Ll][Ee]|[Cc][Rr][Ee][Aa][Tt][Ee])\\s*$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "buffer": {
       "type": "object",
       "additionalProperties": false,

@@ -347,6 +347,28 @@ query:
   #    names: ["be-*"]
   #    verbs: [list, get]
 
+# Write operations the Kubexa platform may perform on this cluster.
+# Disabled by default. Enabling it here is NOT enough: the ServiceAccount also
+# needs the verbs, which is rbac.write below -- deliberately a separate flag,
+# because this config can be mounted from a file the chart never sees.
+mutate:
+  enabled: false
+  # Rules pass through verbatim, so these keys are the AGENT's snake_case
+  # keys, not chart camelCase.
+  #
+  # verbs is REQUIRED on every rule and an empty list grants nothing. This is
+  # the opposite of query.rules, where an omitted verbs means "list and get".
+  #
+  # No resource entry may contain "*" in any form, bare or partial -- there is
+  # no wildcard write grant. An entry like "apps/*" is refused at startup
+  # rather than silently matching nothing.
+  rules: []
+  #  - id: app-team
+  #    namespace: prod
+  #    resources: [deployments, statefulsets]
+  #    names: ["api-*"]
+  #    verbs: [patch, restart, scale]
+
 # Byte counts are plain integers -- a Kubernetes quantity ("512Mi") is refused,
 # because the agent's loader reads these as numbers, not as quantities.
 buffer:
