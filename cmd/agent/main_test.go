@@ -86,6 +86,16 @@ func fakeMutateClients() k8s.QueryClients {
 	return k8s.QueryClients{Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())}
 }
 
+// fakeMutateClientsFactory adapts fakeMutateClients to the
+// func() (*k8s.QueryClients, error) shape buildMutationResponder now takes,
+// for the tests that don't care whether or how often it was called.
+func fakeMutateClientsFactory() func() (*k8s.QueryClients, error) {
+	return func() (*k8s.QueryClients, error) {
+		c := fakeMutateClients()
+		return &c, nil
+	}
+}
+
 // compiledMutatePolicy compiles a valid, non-nil mutate policy -- the
 // "what a real serve() call site would hand buildMutationResponder" shape,
 // distinct in TYPE (internal/mutate/policy.Policy) from the query policy
@@ -112,7 +122,7 @@ func TestBuildMutationResponderWiresTheMutatePolicy(t *testing.T) {
 	cfg := &config.Config{Mutate: config.MutateConfig{Enabled: &enabled}}
 	mutatePolicy := compiledMutatePolicy(t)
 
-	responder, opts, err := buildMutationResponder(cfg, mutatePolicy, fakeMutateClients(), logger.New("test"), nil)
+	responder, opts, err := buildMutationResponder(cfg, mutatePolicy, fakeMutateClientsFactory(), logger.New("test"), nil)
 	if err != nil {
 		t.Fatalf("buildMutationResponder: %v", err)
 	}
@@ -142,7 +152,7 @@ func TestBuildMutationResponderWiresRedactSecrets(t *testing.T) {
 			}
 			mutatePolicy := compiledMutatePolicy(t)
 
-			_, opts, err := buildMutationResponder(cfg, mutatePolicy, fakeMutateClients(), logger.New("test"), nil)
+			_, opts, err := buildMutationResponder(cfg, mutatePolicy, fakeMutateClientsFactory(), logger.New("test"), nil)
 			if err != nil {
 				t.Fatalf("buildMutationResponder: %v", err)
 			}
@@ -166,7 +176,7 @@ func TestBuildMutationResponderNilResponderWhenDisabled(t *testing.T) {
 	// a disabled section that compiled cleanly (or warned and swallowed an
 	// error) -- buildMutationResponder must not dereference it before
 	// checking MutateEnabled.
-	responder, opts, err := buildMutationResponder(cfg, nil, fakeMutateClients(), logger.New("test"), nil)
+	responder, opts, err := buildMutationResponder(cfg, nil, fakeMutateClientsFactory(), logger.New("test"), nil)
 	if err != nil {
 		t.Fatalf("buildMutationResponder: %v", err)
 	}
@@ -176,4 +186,51 @@ func TestBuildMutationResponderNilResponderWhenDisabled(t *testing.T) {
 	if opts.Policy != nil {
 		t.Fatalf("opts.Policy = %v, want nil (the policy passed in was nil)", opts.Policy)
 	}
+}
+
+// TestBuildMutationResponderFactoryCalledOnlyWhenEnabled is the point of
+// this round: a disabled agent must not resolve a REST config, build a
+// dynamic client, or start a rate limiter for a mutate client pool it is
+// about to throw away -- and a NewQueryClients failure on that path must
+// not become a fatal error for an agent that wants nothing from Kubernetes.
+// The factory itself must not run before the MutateEnabled gate.
+//
+// Both directions are asserted, not just the zero case: a factory that is
+// unconditionally never called would pass the disabled subtest vacuously,
+// so the enabled subtest asserting a non-zero count is load-bearing too.
+func TestBuildMutationResponderFactoryCalledOnlyWhenEnabled(t *testing.T) {
+	countingFactory := func(calls *int) func() (*k8s.QueryClients, error) {
+		return func() (*k8s.QueryClients, error) {
+			*calls++
+			c := fakeMutateClients()
+			return &c, nil
+		}
+	}
+
+	t.Run("disabled: factory not called", func(t *testing.T) {
+		disabled := false
+		cfg := &config.Config{Mutate: config.MutateConfig{Enabled: &disabled}}
+
+		var calls int
+		if _, _, err := buildMutationResponder(cfg, nil, countingFactory(&calls), logger.New("test"), nil); err != nil {
+			t.Fatalf("buildMutationResponder: %v", err)
+		}
+		if calls != 0 {
+			t.Fatalf("factory calls = %d, want 0 when mutate.enabled is false", calls)
+		}
+	})
+
+	t.Run("enabled: factory called", func(t *testing.T) {
+		enabled := true
+		cfg := &config.Config{Mutate: config.MutateConfig{Enabled: &enabled}}
+		mutatePolicy := compiledMutatePolicy(t)
+
+		var calls int
+		if _, _, err := buildMutationResponder(cfg, mutatePolicy, countingFactory(&calls), logger.New("test"), nil); err != nil {
+			t.Fatalf("buildMutationResponder: %v", err)
+		}
+		if calls == 0 {
+			t.Fatal("factory calls = 0, want non-zero when mutate.enabled is true -- the assertion above would be vacuous otherwise")
+		}
+	})
 }
