@@ -15,6 +15,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	"github.com/kubexa/kubexa-agent/internal/capability"
@@ -270,7 +271,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	// heartbeat reports one number per reason.
 	ruleCounters := ingestrules.NewCounters()
 
-	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy, rulesStore, ruleCounters)
+	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy, mutatePolicy, rulesStore, ruleCounters)
 	if err != nil {
 		_ = q.Close()
 		return fmt.Errorf("collectors: %w", err)
@@ -521,6 +522,38 @@ func buildMutationResponder(
 	return executor, opts, nil
 }
 
+// buildCapabilityReporterOptions builds the Options capability.NewReporter is
+// called with. It exists as its own pure function -- rather than staying
+// inline in buildCollectors -- for the same reason buildMutationResponder
+// above does: the wiring itself (dropping MutatePolicy, or handing it the
+// wrong policy) is exactly what a test on buildCollectors's return value
+// cannot see, since Reporter keeps its policy fields unexported. Returning
+// Options lets a test assert on the wiring directly -- which policy landed
+// in which field -- without reaching into the reporter itself.
+func buildCapabilityReporterOptions(
+	cfg *config.Config,
+	probeCS kubernetes.Interface,
+	q queue.Queue,
+	queryPolicy *policy.Policy,
+	mutatePolicy *mutatepolicy.Policy,
+) capability.Options {
+	return capability.Options{
+		Clientset: probeCS,
+		Writer:    state.NewQueueWriter(q, state.ConfigFromRoot(cfg).WriteTimeout),
+		AgentMeta: &commonv1.AgentMetadata{
+			ClusterId: cfg.Agent.ClusterID,
+			AgentId:   cfg.Agent.AgentID,
+		},
+		Logger: logger.New("capability-reporter", logger.WithAgentID(cfg.Agent.AgentID)),
+		Policy: queryPolicy,
+		// MutatePolicy is a second, independent policy source from Policy
+		// above (see capability.Options's own doc comment) -- it must be
+		// wired here or can_patch/can_delete/can_create/policy_* report
+		// false for every resource forever, whatever mutate.rules says.
+		MutatePolicy: mutatePolicy,
+	}
+}
+
 func buildCollectors(
 	cfg *config.Config,
 	kube k8s.Client,
@@ -528,6 +561,7 @@ func buildCollectors(
 	reg prometheus.Registerer,
 	log *logger.Logger,
 	queryPolicy *policy.Policy,
+	mutatePolicy *mutatepolicy.Policy,
 	rules *ingestrules.Store,
 	counters *ingestrules.Counters,
 ) ([]Collector, error) {
@@ -583,16 +617,9 @@ func buildCollectors(
 		if err != nil {
 			return nil, err
 		}
-		capReporter, err := capability.NewReporter(capability.Options{
-			Clientset: probeCS,
-			Writer:    state.NewQueueWriter(q, state.ConfigFromRoot(cfg).WriteTimeout),
-			AgentMeta: &commonv1.AgentMetadata{
-				ClusterId: cfg.Agent.ClusterID,
-				AgentId:   cfg.Agent.AgentID,
-			},
-			Logger: logger.New("capability-reporter", logger.WithAgentID(cfg.Agent.AgentID)),
-			Policy: queryPolicy,
-		})
+		capReporter, err := capability.NewReporter(
+			buildCapabilityReporterOptions(cfg, probeCS, q, queryPolicy, mutatePolicy),
+		)
 		if err != nil {
 			return nil, err
 		}
