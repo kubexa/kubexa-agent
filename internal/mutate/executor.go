@@ -560,7 +560,24 @@ func mapAPIError(err error) *agentv1.MutationError {
 		return mutationError(agentv1.MutationErrorCode_MUTATION_ERROR_INVALID, err.Error())
 	case apierrors.IsRequestEntityTooLargeError(err):
 		return mutationError(agentv1.MutationErrorCode_MUTATION_ERROR_TOO_LARGE, err.Error())
-	case errors.Is(err, context.DeadlineExceeded):
+
+	// These three are the API server saying "not now", not "this failed" --
+	// a different instruction to the caller than every branch above (and
+	// than the default below). A 429 or a 503 is exactly the "retry
+	// shortly" condition RESOURCE_EXHAUSTED already exists for, the same
+	// code the concurrency gate reports when IT is the one saying not now.
+	// The server's own reported timeout joins context.DeadlineExceeded
+	// rather than falling through to INTERNAL, mirroring
+	// internal/query/executor.go's mapAPIError, which already folds
+	// apierrors.IsTimeout into its TIMEOUT case. Each Is* predicate here
+	// checks a distinct StatusReason first (falling back to an HTTP code
+	// only for a reason apierrors does not recognise), and every reason
+	// used anywhere in this switch is a known one, so none of these three
+	// can be shadowed by -- or shadow -- IsInvalid/IsBadRequest/IsConflict/
+	// etc. above.
+	case apierrors.IsTooManyRequests(err), apierrors.IsServiceUnavailable(err):
+		return mutationError(agentv1.MutationErrorCode_MUTATION_ERROR_RESOURCE_EXHAUSTED, err.Error())
+	case errors.Is(err, context.DeadlineExceeded), apierrors.IsTimeout(err):
 		return mutationError(agentv1.MutationErrorCode_MUTATION_ERROR_TIMEOUT, err.Error())
 	default:
 		return mutationError(agentv1.MutationErrorCode_MUTATION_ERROR_INTERNAL, err.Error())
