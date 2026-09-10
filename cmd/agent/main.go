@@ -27,6 +27,8 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/k8s/k8sconfig"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	"github.com/kubexa/kubexa-agent/internal/metrics"
+	"github.com/kubexa/kubexa-agent/internal/mutate"
+	mutatepolicy "github.com/kubexa/kubexa-agent/internal/mutate/policy"
 	agentpprof "github.com/kubexa/kubexa-agent/internal/pprof"
 	"github.com/kubexa/kubexa-agent/internal/query"
 	"github.com/kubexa/kubexa-agent/internal/query/policy"
@@ -212,6 +214,32 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		return fmt.Errorf("query executor: %w", err)
 	}
 
+	// See compileMutatePolicy's doc comment for the fatal-vs-warning ruling
+	// this applies. Its error is fatal exactly when mutate is enabled --
+	// mirroring the query policy above -- because a compile failure while
+	// mutate is disabled has already been logged and swallowed inside it.
+	mutatePolicy, err := compileMutatePolicy(cfg, log)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("mutate policy: %w", err)
+	}
+
+	var mutationResponder stream.MutationResponder
+	if cfg.MutateEnabled() {
+		mutateExecutor, err := mutate.New(mutate.Options{
+			Clients:       *queryClients,
+			Policy:        mutatePolicy,
+			Logger:        logger.New("mutate", logger.WithAgentID(cfg.Agent.AgentID)),
+			Registerer:    mainReg,
+			RedactSecrets: cfg.QueryRedactSecrets(),
+		})
+		if err != nil {
+			_ = q.Close()
+			return fmt.Errorf("mutate executor: %w", err)
+		}
+		mutationResponder = mutateExecutor
+	}
+
 	// One rule store, shared. The stream manager is its only writer (it is the
 	// only component that sees the gateway's messages) and the log collector
 	// reads it. Created here because the collectors are built before the
@@ -262,6 +290,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		agentMetrics.Connection(),
 		reconciler,
 		queryExecutor,
+		mutationResponder,
 		rulesStore,
 		ruleCounters,
 		scrapeHealth,
@@ -373,6 +402,47 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		return runErr
 	}
 	return nil
+}
+
+// compileMutatePolicy compiles the mutate policy and applies the ruling this
+// task exists to enforce.
+//
+// mutatepolicy.Compile validates mutate.rules UNCONDITIONALLY, even when
+// mutate.enabled is false -- see its own doc comment: a disabled section's
+// rule must be rejected now, not silently at the moment an operator flips
+// the section on later. That makes a malformed rule a real config error even
+// while the section is off.
+//
+// But it must not be handled the way the query policy's compile error is
+// handled above in serve(): the chart deploys this agent with
+// restartPolicy: Always, so treating this as fatal unconditionally would
+// crash-loop the WHOLE agent -- logs, metrics, live query, everything --
+// over one bad rule sitting inside a section nobody has switched on yet.
+//
+//   - mutate.enabled true and Compile fails: the error is returned (fatal in
+//     serve, exactly like the query policy) -- the operator asked for
+//     mutations and cannot have them, so say so loudly.
+//   - mutate.enabled false and Compile fails: the error is logged as a
+//     warning naming the offending rule and swallowed; (nil, nil) is
+//     returned so the agent starts with mutation disabled, same as if the
+//     section were empty.
+//
+// Do not "simplify" this into one uniform fatal branch matching the query
+// policy above -- the two sections have different blast radii for a bad
+// rule, which is the whole reason this function exists instead of inlining
+// the same two lines the query policy uses.
+func compileMutatePolicy(cfg *config.Config, log *logger.Logger) (*mutatepolicy.Policy, error) {
+	p, err := mutatepolicy.Compile(cfg)
+	if err == nil {
+		return p, nil
+	}
+	if cfg.MutateEnabled() {
+		return nil, err
+	}
+	log.Warn("mutate policy has an invalid rule; mutation stays disabled",
+		logger.F("error", err.Error()),
+	)
+	return nil, nil
 }
 
 func buildCollectors(
