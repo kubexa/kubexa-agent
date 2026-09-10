@@ -49,6 +49,14 @@ type QueryResponder interface {
 	Execute(ctx context.Context, q *agentv1.ResourceQuery) *agentv1.ResourceQueryResult
 }
 
+// MutationResponder applies a mutation requested by the gateway. It is
+// declared here rather than imported so this package does not depend on
+// internal/mutate; *mutate.Executor satisfies it structurally, the same way
+// *query.Executor satisfies QueryResponder.
+type MutationResponder interface {
+	Execute(ctx context.Context, m *agentv1.MutationRequest) *agentv1.MutationResult
+}
+
 // ScrapeHealthSource supplies the scrape health a heartbeat reports. It is an
 // interface, not the metrics collector itself, so a build without metrics
 // collection enabled has nothing to satisfy and reports no scrape_targets at
@@ -117,6 +125,13 @@ type streamManager struct {
 	// refused (handleResourceQuery is a no-op) when this agent does not run
 	// live resource queries.
 	responder QueryResponder
+
+	// mutationResponder applies mutations requested by the gateway. Set once
+	// at construction and read-only afterward. Nil is valid — mutations are
+	// refused (handleMutation is a no-op) when mutate.enabled is false, or
+	// when the mutate policy failed to compile while disabled (see
+	// cmd/agent/main.go for why that case is a warning, not a fatal error).
+	mutationResponder MutationResponder
 
 	// scrapeHealth supplies per-kind scrape health for the heartbeat. Set
 	// once at construction and read-only afterward. Nil is valid — an agent
@@ -200,9 +215,11 @@ func (g *throttleGate) throttled() bool {
 // New constructs a stream Manager wired to cfg, queue, logger, and shared
 // agent metrics. reconciler receives every gateway watch config update; pass
 // nil if this agent does not run demand-driven state collection. responder
-// answers live resource queries; pass nil to refuse them. scrapeHealth
-// supplies the heartbeat's per-kind scrape health; pass nil if this agent
-// does not run metrics collection.
+// answers live resource queries; pass nil to refuse them. mutationResponder
+// applies mutations; pass nil to refuse them (mutate.enabled is false, or its
+// policy failed to compile while disabled). scrapeHealth supplies the
+// heartbeat's per-kind scrape health; pass nil if this agent does not run
+// metrics collection.
 func New(
 	cfg *config.Config,
 	q queue.Queue,
@@ -211,6 +228,7 @@ func New(
 	connMetrics *agentmetrics.ConnectionMetrics,
 	reconciler WatchReconciler,
 	responder QueryResponder,
+	mutationResponder MutationResponder,
 	rules *ingestrules.Store,
 	counters *ingestrules.Counters,
 	scrapeHealth ScrapeHealthSource,
@@ -229,21 +247,22 @@ func New(
 	}
 
 	m := &streamManager{
-		cfg:           cfg,
-		queue:         q,
-		log:           log,
-		streamMetrics: streamMetrics,
-		connMetrics:   connMetrics,
-		reconciler:    reconciler,
-		responder:     responder,
-		scrapeHealth:  scrapeHealth,
-		rng:           rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
-		sleep:         defaultSleeper,
-		sendCh:        make(chan *agentv1.AgentMessage, defaultSendChannelSize),
-		state:         StateIdle,
-		rules:         rules,
-		counters:      counters,
-		ackCh:         make(chan []string, 64),
+		cfg:               cfg,
+		queue:             q,
+		log:               log,
+		streamMetrics:     streamMetrics,
+		connMetrics:       connMetrics,
+		reconciler:        reconciler,
+		responder:         responder,
+		mutationResponder: mutationResponder,
+		scrapeHealth:      scrapeHealth,
+		rng:               rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
+		sleep:             defaultSleeper,
+		sendCh:            make(chan *agentv1.AgentMessage, defaultSendChannelSize),
+		state:             StateIdle,
+		rules:             rules,
+		counters:          counters,
+		ackCh:             make(chan []string, 64),
 	}
 	// The manager is the store's only writer and Set panics on a nil receiver,
 	// so a caller that passes none gets a private store rather than a crash on
@@ -582,6 +601,9 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 					Logs:    m.cfg.Collect.Logs.Enabled,
 					State:   m.cfg.Collect.State.Enabled,
 					Metrics: m.cfg.Collect.Metrics.Enabled,
+					Mutate:  m.cfg.MutateEnabled(),
+					// ExecPod and ExecNode are reserved for phases B and C;
+					// left unset (false) here on purpose.
 				},
 			},
 		},
@@ -1065,6 +1087,8 @@ func (m *streamManager) handleGatewayMessage(ctx context.Context, msg *agentv1.G
 		}
 	case *agentv1.GatewayMessage_ResourceQuery:
 		m.handleResourceQuery(ctx, p.ResourceQuery)
+	case *agentv1.GatewayMessage_Mutation:
+		m.handleMutation(ctx, p.Mutation)
 	default:
 	}
 }
@@ -1099,6 +1123,40 @@ func (m *streamManager) handleResourceQuery(ctx context.Context, q *agentv1.Reso
 		if err := m.Send(ctx, msg); err != nil {
 			m.log.Err(err).Warn("failed to send resource query result",
 				logger.F("query_id", q.GetQueryId()),
+			)
+		}
+	}()
+}
+
+// handleMutation applies a mutation on its own goroutine, mirroring
+// handleResourceQuery above for the same reason: running it inline would
+// block the recv loop -- and therefore acks, backpressure and shutdown --
+// for as long as the write takes. The executor's own concurrency gate is
+// what bounds how many of these goroutines can be doing real work at once.
+//
+// This goroutine carries the session ctx but is deliberately not registered
+// with sessionWG, so endSession's sessionWG.Wait() does not wait for it to
+// finish. A mutation reply is session-scoped: once the session ends the
+// gateway's stream is gone, so a result that arrives after reconnect has
+// nowhere useful to go. Draining it on shutdown would only delay teardown
+// for no benefit; ctx cancellation (and Send's own failure once the stream
+// is torn down) is what stops it from doing pointless work.
+func (m *streamManager) handleMutation(ctx context.Context, req *agentv1.MutationRequest) {
+	if m.mutationResponder == nil || req == nil {
+		return
+	}
+	go func() {
+		result := m.mutationResponder.Execute(ctx, req)
+		if result == nil {
+			return
+		}
+		msg := &agentv1.AgentMessage{
+			MessageId: uuid.NewString(),
+			Payload:   &agentv1.AgentMessage_MutationResult{MutationResult: result},
+		}
+		if err := m.Send(ctx, msg); err != nil {
+			m.log.Err(err).Warn("failed to send mutation result",
+				logger.F("mutation_id", req.GetMutationId()),
 			)
 		}
 	}()
