@@ -118,8 +118,26 @@ type ResourceCapability struct {
 	// succeed" -- a policy scoped to a namespace or a name prefix cannot be
 	// reduced to one boolean. The agent still checks every request, so a query
 	// outside the policy's namespace is refused even when policy_list is true.
-	PolicyList    bool `protobuf:"varint,9,opt,name=policy_list,json=policyList,proto3" json:"policy_list,omitempty"`
-	PolicyGet     bool `protobuf:"varint,10,opt,name=policy_get,json=policyGet,proto3" json:"policy_get,omitempty"`
+	PolicyList bool `protobuf:"varint,9,opt,name=policy_list,json=policyList,proto3" json:"policy_list,omitempty"`
+	PolicyGet  bool `protobuf:"varint,10,opt,name=policy_get,json=policyGet,proto3" json:"policy_get,omitempty"`
+	// Write and exec answers. can_* are the API server's RBAC verdict from a
+	// SelfSubjectAccessReview; policy_* are the cluster owner's config. They
+	// stay separate for the same reason can_list and policy_list do: a UI that
+	// cannot tell them apart sends the operator to the wrong file.
+	//
+	// can_patch/can_delete/can_create are probed ONLY for GVRs the mutate
+	// policy names, because that set is finite -- mutate rules forbid a
+	// wildcard. An unprobed entry reports false for all of them, which is the
+	// same answer an agent without the feature gives.
+	CanPatch      bool `protobuf:"varint,11,opt,name=can_patch,json=canPatch,proto3" json:"can_patch,omitempty"`
+	CanDelete     bool `protobuf:"varint,12,opt,name=can_delete,json=canDelete,proto3" json:"can_delete,omitempty"`
+	CanCreate     bool `protobuf:"varint,13,opt,name=can_create,json=canCreate,proto3" json:"can_create,omitempty"`
+	CanExec       bool `protobuf:"varint,14,opt,name=can_exec,json=canExec,proto3" json:"can_exec,omitempty"` // pods and nodes only; phase B/C
+	PolicyPatch   bool `protobuf:"varint,15,opt,name=policy_patch,json=policyPatch,proto3" json:"policy_patch,omitempty"`
+	PolicyDelete  bool `protobuf:"varint,16,opt,name=policy_delete,json=policyDelete,proto3" json:"policy_delete,omitempty"`
+	PolicyCreate  bool `protobuf:"varint,17,opt,name=policy_create,json=policyCreate,proto3" json:"policy_create,omitempty"`
+	PolicyScale   bool `protobuf:"varint,18,opt,name=policy_scale,json=policyScale,proto3" json:"policy_scale,omitempty"`
+	PolicyExec    bool `protobuf:"varint,19,opt,name=policy_exec,json=policyExec,proto3" json:"policy_exec,omitempty"` // phase B/C
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -224,6 +242,69 @@ func (x *ResourceCapability) GetPolicyGet() bool {
 	return false
 }
 
+func (x *ResourceCapability) GetCanPatch() bool {
+	if x != nil {
+		return x.CanPatch
+	}
+	return false
+}
+
+func (x *ResourceCapability) GetCanDelete() bool {
+	if x != nil {
+		return x.CanDelete
+	}
+	return false
+}
+
+func (x *ResourceCapability) GetCanCreate() bool {
+	if x != nil {
+		return x.CanCreate
+	}
+	return false
+}
+
+func (x *ResourceCapability) GetCanExec() bool {
+	if x != nil {
+		return x.CanExec
+	}
+	return false
+}
+
+func (x *ResourceCapability) GetPolicyPatch() bool {
+	if x != nil {
+		return x.PolicyPatch
+	}
+	return false
+}
+
+func (x *ResourceCapability) GetPolicyDelete() bool {
+	if x != nil {
+		return x.PolicyDelete
+	}
+	return false
+}
+
+func (x *ResourceCapability) GetPolicyCreate() bool {
+	if x != nil {
+		return x.PolicyCreate
+	}
+	return false
+}
+
+func (x *ResourceCapability) GetPolicyScale() bool {
+	if x != nil {
+		return x.PolicyScale
+	}
+	return false
+}
+
+func (x *ResourceCapability) GetPolicyExec() bool {
+	if x != nil {
+		return x.PolicyExec
+	}
+	return false
+}
+
 var File_proto_agent_v1_catalog_proto protoreflect.FileDescriptor
 
 const file_proto_agent_v1_catalog_proto_rawDesc = "" +
@@ -233,7 +314,7 @@ const file_proto_agent_v1_catalog_proto_rawDesc = "" +
 	"\vfingerprint\x18\x01 \x01(\tR\vfingerprint\x12!\n" +
 	"\fcollected_at\x18\x02 \x01(\x03R\vcollectedAt\x126\n" +
 	"\aentries\x18\x03 \x03(\v2\x1c.agent.v1.ResourceCapabilityR\aentries\x12#\n" +
-	"\rfailed_groups\x18\x04 \x03(\tR\ffailedGroups\"\xaf\x02\n" +
+	"\rfailed_groups\x18\x04 \x03(\tR\ffailedGroups\"\xd6\x04\n" +
 	"\x12ResourceCapability\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x1a\n" +
@@ -249,7 +330,19 @@ const file_proto_agent_v1_catalog_proto_rawDesc = "" +
 	"policyList\x12\x1d\n" +
 	"\n" +
 	"policy_get\x18\n" +
-	" \x01(\bR\tpolicyGetB>Z<github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1b\x06proto3"
+	" \x01(\bR\tpolicyGet\x12\x1b\n" +
+	"\tcan_patch\x18\v \x01(\bR\bcanPatch\x12\x1d\n" +
+	"\n" +
+	"can_delete\x18\f \x01(\bR\tcanDelete\x12\x1d\n" +
+	"\n" +
+	"can_create\x18\r \x01(\bR\tcanCreate\x12\x19\n" +
+	"\bcan_exec\x18\x0e \x01(\bR\acanExec\x12!\n" +
+	"\fpolicy_patch\x18\x0f \x01(\bR\vpolicyPatch\x12#\n" +
+	"\rpolicy_delete\x18\x10 \x01(\bR\fpolicyDelete\x12#\n" +
+	"\rpolicy_create\x18\x11 \x01(\bR\fpolicyCreate\x12!\n" +
+	"\fpolicy_scale\x18\x12 \x01(\bR\vpolicyScale\x12\x1f\n" +
+	"\vpolicy_exec\x18\x13 \x01(\bR\n" +
+	"policyExecB>Z<github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1b\x06proto3"
 
 var (
 	file_proto_agent_v1_catalog_proto_rawDescOnce sync.Once
