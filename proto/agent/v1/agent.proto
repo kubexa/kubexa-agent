@@ -424,4 +424,11 @@ enum MutationErrorCode {
   MUTATION_ERROR_TIMEOUT       = 6;
   MUTATION_ERROR_TOO_LARGE     = 7;
   MUTATION_ERROR_INTERNAL      = 8;
+  // The agent's own concurrency gate is full. Distinct from INTERNAL for the
+  // same reason QUERY_ERROR_RESOURCE_EXHAUSTED is distinct from
+  // QUERY_ERROR_INTERNAL: this is a "retry shortly" condition, not a
+  // platform fault, and the backend maps error code NAMES to HTTP statuses
+  // -- reported as INTERNAL it reads as a 500 and forecloses a safe
+  // auto-retry.
+  MUTATION_ERROR_RESOURCE_EXHAUSTED = 9;
 }

@@ -204,7 +204,7 @@ func (e *Executor) execute(ctx context.Context, req *agentv1.MutationRequest) *a
 	if !ok {
 		e.metrics.observe(string(verb), ref.Resource, "resource_exhausted", 0, 0)
 		return &agentv1.MutationResult{
-			Error: mutationError(agentv1.MutationErrorCode_MUTATION_ERROR_INTERNAL,
+			Error: mutationError(agentv1.MutationErrorCode_MUTATION_ERROR_RESOURCE_EXHAUSTED,
 				"too many concurrent mutations for this agent; retry shortly"),
 		}
 	}
@@ -229,6 +229,17 @@ func (e *Executor) execute(ctx context.Context, req *agentv1.MutationRequest) *a
 		res = e.scale(ctx, ref, req)
 	case policy.VerbCreate:
 		res = e.create(ctx, ref, req, createObj)
+	default:
+		// Unreachable today: mutationVerb maps 1:1 onto this switch's five
+		// cases, so every verb that reaches here already matched one of
+		// them. Kept anyway -- res staying nil here would panic at the
+		// GetError() call below, and Execute's caller dereferences the
+		// result unconditionally to set MutationId. A future verb added to
+		// the enum without a case here must degrade to a reported error,
+		// not a crash inside a customer's cluster.
+		res = &agentv1.MutationResult{
+			Error: mutationError(agentv1.MutationErrorCode_MUTATION_ERROR_INTERNAL, "unhandled verb"),
+		}
 	}
 	outcome := "ok"
 	if res.GetError() != nil {

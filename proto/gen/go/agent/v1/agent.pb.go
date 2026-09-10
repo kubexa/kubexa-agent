@@ -271,6 +271,13 @@ const (
 	MutationErrorCode_MUTATION_ERROR_TIMEOUT       MutationErrorCode = 6
 	MutationErrorCode_MUTATION_ERROR_TOO_LARGE     MutationErrorCode = 7
 	MutationErrorCode_MUTATION_ERROR_INTERNAL      MutationErrorCode = 8
+	// The agent's own concurrency gate is full. Distinct from INTERNAL for the
+	// same reason QUERY_ERROR_RESOURCE_EXHAUSTED is distinct from
+	// QUERY_ERROR_INTERNAL: this is a "retry shortly" condition, not a
+	// platform fault, and the backend maps error code NAMES to HTTP statuses
+	// -- reported as INTERNAL it reads as a 500 and forecloses a safe
+	// auto-retry.
+	MutationErrorCode_MUTATION_ERROR_RESOURCE_EXHAUSTED MutationErrorCode = 9
 )
 
 // Enum value maps for MutationErrorCode.
@@ -285,17 +292,19 @@ var (
 		6: "MUTATION_ERROR_TIMEOUT",
 		7: "MUTATION_ERROR_TOO_LARGE",
 		8: "MUTATION_ERROR_INTERNAL",
+		9: "MUTATION_ERROR_RESOURCE_EXHAUSTED",
 	}
 	MutationErrorCode_value = map[string]int32{
-		"MUTATION_ERROR_UNSPECIFIED":   0,
-		"MUTATION_ERROR_POLICY_DENIED": 1,
-		"MUTATION_ERROR_RBAC_DENIED":   2,
-		"MUTATION_ERROR_NOT_FOUND":     3,
-		"MUTATION_ERROR_CONFLICT":      4,
-		"MUTATION_ERROR_INVALID":       5,
-		"MUTATION_ERROR_TIMEOUT":       6,
-		"MUTATION_ERROR_TOO_LARGE":     7,
-		"MUTATION_ERROR_INTERNAL":      8,
+		"MUTATION_ERROR_UNSPECIFIED":        0,
+		"MUTATION_ERROR_POLICY_DENIED":      1,
+		"MUTATION_ERROR_RBAC_DENIED":        2,
+		"MUTATION_ERROR_NOT_FOUND":          3,
+		"MUTATION_ERROR_CONFLICT":           4,
+		"MUTATION_ERROR_INVALID":            5,
+		"MUTATION_ERROR_TIMEOUT":            6,
+		"MUTATION_ERROR_TOO_LARGE":          7,
+		"MUTATION_ERROR_INTERNAL":           8,
+		"MUTATION_ERROR_RESOURCE_EXHAUSTED": 9,
 	}
 )
 
@@ -2765,7 +2774,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x14MUTATION_VERB_DELETE\x10\x02\x12\x19\n" +
 	"\x15MUTATION_VERB_RESTART\x10\x03\x12\x17\n" +
 	"\x13MUTATION_VERB_SCALE\x10\x04\x12\x18\n" +
-	"\x14MUTATION_VERB_CREATE\x10\x05*\xa3\x02\n" +
+	"\x14MUTATION_VERB_CREATE\x10\x05*\xca\x02\n" +
 	"\x11MutationErrorCode\x12\x1e\n" +
 	"\x1aMUTATION_ERROR_UNSPECIFIED\x10\x00\x12 \n" +
 	"\x1cMUTATION_ERROR_POLICY_DENIED\x10\x01\x12\x1e\n" +
@@ -2775,7 +2784,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x16MUTATION_ERROR_INVALID\x10\x05\x12\x1a\n" +
 	"\x16MUTATION_ERROR_TIMEOUT\x10\x06\x12\x1c\n" +
 	"\x18MUTATION_ERROR_TOO_LARGE\x10\a\x12\x1b\n" +
-	"\x17MUTATION_ERROR_INTERNAL\x10\b2O\n" +
+	"\x17MUTATION_ERROR_INTERNAL\x10\b\x12%\n" +
+	"!MUTATION_ERROR_RESOURCE_EXHAUSTED\x10\t2O\n" +
 	"\fAgentService\x12?\n" +
 	"\aConnect\x12\x16.agent.v1.AgentMessage\x1a\x18.agent.v1.GatewayMessage(\x010\x01B>Z<github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1b\x06proto3"
 
