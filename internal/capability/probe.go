@@ -125,6 +125,11 @@ func Probe(
 				// The list answer is real, but reporting it alongside a
 				// defaulted canWatch=false would silently downgrade a
 				// watchable type to polling. Unknown is the honest state.
+				// The write fields probeWrites already set on c are deliberately
+				// left standing, not wiped along with list/watch: they came from a
+				// separate SelfSubjectAccessReview this error says nothing about,
+				// and catalog.proto's probe_failed comment scopes its meaning to
+				// can_list/can_watch only -- not to the entry as a whole.
 				c.ProbeFailed = true
 				c.CanList = false
 				c.CanWatch = false
@@ -155,6 +160,12 @@ func Probe(
 // can_scale does not exist on the wire: scale RBAC is a patch on the
 // deployments/scale SUBRESOURCE, which allowed() cannot express, so scale is
 // reported as policy only.
+//
+// probeWrites is called unconditionally, before the list/watch checks below
+// it in Probe, and is NOT gated on canList: write permission is an
+// independent RBAC fact from read permission, so a GVR this agent cannot
+// list may still be one it can patch, and probing writes must not be skipped
+// just because list/watch skipped their own second call.
 func probeWrites(
 	ctx context.Context,
 	authz authzv1client.AuthorizationV1Interface,
