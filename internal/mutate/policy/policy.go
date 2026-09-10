@@ -66,6 +66,24 @@ func Compile(root *pkgconfig.Config) (*Policy, error) {
 	}
 
 	rules := root.MutateRules()
+
+	// Validated unconditionally, before enabled is even read below, and NOT
+	// via root's own (disabled-aware) config validation. pkg/config's
+	// validateMutate short-circuits to nil for a disabled section -- correct
+	// at config-load time, where there is nothing yet to protect -- but a
+	// section disabled today is enabled tomorrow by an operator who was told
+	// the config was valid. Compile has no "load time"; it must reject those
+	// rules now, or ship a policy an operator believes was checked and
+	// wasn't. This is the query policy's wildcard fail-open in miniature: a
+	// disabled section's rule reached compile time unvalidated because
+	// validation had already returned early. ValidateMutateRules is the
+	// single implementation of these per-rule checks -- pkg/config's own
+	// validator calls the same function -- so there is nothing left to drift
+	// between the two call sites.
+	if errs := pkgconfig.ValidateMutateRules(rules); len(errs) > 0 {
+		return nil, fmt.Errorf("invalid mutate config: %s", strings.Join(errs, "; "))
+	}
+
 	compiled := make([]compiledRule, 0, len(rules))
 	for i, r := range rules {
 		label := r.ID
@@ -74,18 +92,12 @@ func Compile(root *pkgconfig.Config) (*Policy, error) {
 		}
 		refs := make([]Ref, 0, len(r.Resources))
 		for _, name := range r.Resources {
-			trimmed := strings.TrimSpace(name)
-			// Difference from the query policy, #3: there is no wildcard
-			// branch at all. Config validation (pkg/config/mutate.go)
-			// already refuses every "*" form, bare or partial, in
-			// mutate.rules[].resources -- a write path has no use for "every
-			// resource this token names", so matchesResource below compares
-			// parsed GVRs by equality only.
-			if trimmed == pkgconfig.ResourceWildcard || strings.Contains(trimmed, pkgconfig.ResourceWildcard) {
-				return nil, fmt.Errorf("mutate rule %s: %q is not a supported resource: no wildcard form is permitted on a write path",
-					label, name)
-			}
-			d, err := k8sresource.Parse(trimmed)
+			// ValidateMutateRules has already rejected every wildcard form,
+			// bare or partial, and every string k8sresource.Parse cannot
+			// parse -- see difference #3 in the package doc comment: there
+			// is no wildcard branch anywhere in this package, including
+			// here, because none can survive validation above.
+			d, err := k8sresource.Parse(strings.TrimSpace(name))
 			if err != nil {
 				return nil, fmt.Errorf("mutate rule %s: %w", label, err)
 			}

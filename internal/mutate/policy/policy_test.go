@@ -60,3 +60,55 @@ func TestNonDNS1123RefIsRefused(t *testing.T) {
 		t.Fatal("a non-DNS-1123 resource must be refused at the gate")
 	}
 }
+
+// Review finding 3: guard the "empty verbs" case directly, instead of
+// relying on TestVerbNotGrantedIsRefused's map-miss to also happen to catch
+// it -- a regression reintroducing the query policy's "empty means all"
+// default for verbs must fail this test even if every other test in the
+// package still passes.
+//
+// This does NOT compile successfully and then check Decide, unlike the
+// other tests here. Compile now calls config.ValidateMutateRules
+// unconditionally (see the fix for review findings 1+2, in policy.go's
+// Compile), and that validator refuses a rule with no verbs -- the same
+// check pkg/config/mutate.go already enforced at config-load time. So an
+// empty-Verbs rule can never produce a *Policy to call Decide on; Compile
+// itself is the gate that must refuse it, one step earlier than Decide.
+// That is a strictly stronger guarantee than "compiles, but denies", so
+// this test asserts the gate that actually exists.
+func TestCompileRejectsEmptyVerbs(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{Mutate: config.MutateConfig{
+		Enabled: &enabled,
+		Rules:   []config.MutateRule{{Resources: []string{"pods"}}},
+	}}
+	if _, err := policy.Compile(cfg); err == nil {
+		t.Fatal("want an error compiling a rule with no verbs, got nil")
+	}
+}
+
+// Review finding 4: prove the wildcard rejection actually fires from
+// Compile, for both the bare and the partial form, using a Go-built
+// MutateRule -- not just via config-load-time validation (pkg/config's own
+// tests already cover that).
+func TestCompileRejectsWildcardResource(t *testing.T) {
+	cases := []struct {
+		name      string
+		resources []string
+	}{
+		{"bare wildcard", []string{"*"}},
+		{"partial wildcard", []string{"apps/*"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enabled := true
+			cfg := &config.Config{Mutate: config.MutateConfig{
+				Enabled: &enabled,
+				Rules:   []config.MutateRule{{Resources: tc.resources, Verbs: []string{"delete"}}},
+			}}
+			if _, err := policy.Compile(cfg); err == nil {
+				t.Fatalf("want an error compiling resources %v, got nil", tc.resources)
+			}
+		})
+	}
+}

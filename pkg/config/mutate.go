@@ -64,8 +64,20 @@ func (c *Config) validateMutate() []string {
 }
 
 func validateMutateConfig(m MutateConfig) []string {
+	return ValidateMutateRules(m.Rules)
+}
+
+// ValidateMutateRules validates each rule in isolation. It does NOT consult
+// MutateConfig.Enabled -- unlike validateMutate, which short-circuits to nil
+// for a disabled section because that is the right behaviour at config-load
+// time (see its comment). This function exists for a caller that must not
+// inherit that short-circuit: internal/mutate/policy.Compile calls it
+// unconditionally, because a section that is disabled today is enabled
+// tomorrow by an operator who was told the config was valid, and the rules
+// it validates today are the rules that take effect then.
+func ValidateMutateRules(rules []MutateRule) []string {
 	var errs []string
-	for i, r := range m.Rules {
+	for i, r := range rules {
 		prefix := fmt.Sprintf("mutate.rules[%d]", i)
 		if len(r.Resources) == 0 {
 			errs = append(errs, prefix+".resources must not be empty")
