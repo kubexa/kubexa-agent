@@ -224,20 +224,36 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		return fmt.Errorf("mutate policy: %w", err)
 	}
 
-	var mutationResponder stream.MutationResponder
-	if cfg.MutateEnabled() {
-		mutateExecutor, err := mutate.New(mutate.Options{
-			Clients:       *queryClients,
-			Policy:        mutatePolicy,
-			Logger:        logger.New("mutate", logger.WithAgentID(cfg.Agent.AgentID)),
-			Registerer:    mainReg,
-			RedactSecrets: cfg.QueryRedactSecrets(),
-		})
-		if err != nil {
-			_ = q.Close()
-			return fmt.Errorf("mutate executor: %w", err)
-		}
-		mutationResponder = mutateExecutor
+	// A SEPARATE client pair from queryClients above, not a reuse of it.
+	// k8s.QueryClients carries one rate.Limiter shared by every client it
+	// hands out (see its doc comment), and that limiter was carved out to
+	// protect the informer watch budget from ad-hoc QUERY bursts -- it was
+	// never meant to also arbitrate between reads and writes. Sharing it
+	// with mutations would mean a dashboard polling live queries could
+	// throttle an operator's delete, in either direction. 0/0 costs no new
+	// config key: it is the same "same budget as the main client, separate
+	// limiter" contract queryClients already uses.
+	//
+	// The trade, both halves of it: a write no longer queues behind a read
+	// burst (or vice versa) -- but under full saturation the agent can now
+	// issue up to twice the API calls it could with one shared bucket,
+	// because two independent buckets replace one.
+	mutateClients, err := k8s.NewQueryClients(&k8sconfig.Config{}, 0, 0)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("mutate clients: %w", err)
+	}
+
+	mutationResponder, _, err := buildMutationResponder(
+		cfg,
+		mutatePolicy,
+		*mutateClients,
+		logger.New("mutate", logger.WithAgentID(cfg.Agent.AgentID)),
+		mainReg,
+	)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("mutate executor: %w", err)
 	}
 
 	// One rule store, shared. The stream manager is its only writer (it is the
@@ -443,6 +459,51 @@ func compileMutatePolicy(cfg *config.Config, log *logger.Logger) (*mutatepolicy.
 		logger.F("error", err.Error()),
 	)
 	return nil, nil
+}
+
+// buildMutationResponder wires cfg's mutate settings into a mutate.Executor
+// and hands both the built responder AND the Options it was built from back
+// to the caller.
+//
+// It exists as its own pure function -- rather than staying inline in
+// serve() -- because the wiring itself is exactly what a test that only
+// covers compileMutatePolicy's branching cannot see: passing queryPolicy
+// instead of mutatePolicy, or hardcoding RedactSecrets: false, both compile
+// and both leave every other test green. Returning Options alongside the
+// responder lets a test assert on the wiring directly -- which policy went
+// in, what RedactSecrets resolved to -- without reaching into the
+// executor's unexported fields.
+//
+// The responder is nil when mutate.enabled is false; Options is still
+// returned so a caller (or a test) can see what WOULD have been built.
+func buildMutationResponder(
+	cfg *config.Config,
+	mutatePolicy *mutatepolicy.Policy,
+	clients k8s.QueryClients,
+	log *logger.Logger,
+	reg prometheus.Registerer,
+) (stream.MutationResponder, mutate.Options, error) {
+	opts := mutate.Options{
+		Clients: clients,
+		Policy:  mutatePolicy,
+		Logger:  log,
+		// RedactSecrets reuses the query path's setting rather than
+		// inventing a second one: both answer the same question -- does a
+		// secret value leave this agent. Deleting this line, or hardcoding
+		// it to false, silently hands live Secret values back on every
+		// mutation regardless of what the owner configured -- exactly the
+		// kind of one-line regression this function's tests exist to catch.
+		RedactSecrets: cfg.QueryRedactSecrets(),
+		Registerer:    reg,
+	}
+	if !cfg.MutateEnabled() {
+		return nil, opts, nil
+	}
+	executor, err := mutate.New(opts)
+	if err != nil {
+		return nil, opts, err
+	}
+	return executor, opts, nil
 }
 
 func buildCollectors(
