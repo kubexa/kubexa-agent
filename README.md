@@ -76,6 +76,16 @@ Chart values map directly to `pkg/config.Config`. Key sections:
 | `observability.*` | `observability.*` | Health and metrics ports |
 | `log.*` | `log.*` | Agent logger level/format |
 
+`rbac.*` is chart-only — it controls the generated ClusterRole, not a field inside
+`pkg/config.Config`, so it is not part of the table above:
+
+| Values path | Description |
+|-------------|-------------|
+| `rbac.create` | Whether the chart creates the ClusterRole/ClusterRoleBinding at all. Default `true`. |
+| `rbac.readAll` | Grants `get`/`list`/`watch` on every apiGroup and resource, CRDs included. Off by default, and deliberately NOT derived from `query.rules`/`collect.state.rules` — the agent's config can be supplied as a mounted file this chart never sees, in which case a derived template would find no rules and silently render the narrow role. Pair with a query/collect rule naming `resources: ["*"]`, or the API server refuses everything the enumerated rules do not name. |
+| `rbac.write` | Grants `patch`/`update`/`delete`/`create` and the `*/scale` subresource, enumerated over the same resource lists `readAll`'s neighboring read rules cover — never a wildcard, because `mutate.rules` rejects every wildcard resource form. Off by default, and deliberately NOT derived from `mutate.rules`, for the same mounted-config reason as `readAll`. `mutate.enabled` alone is not enough to let the agent write: this flag is the ServiceAccount side of the same decision. |
+| `rbac.extraRules` | Extra `PolicyRule` entries appended to the generated ClusterRole verbatim. |
+
 ### Example: namespace-scoped log collection
 
 ```bash

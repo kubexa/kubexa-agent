@@ -27,6 +27,12 @@ rbac:
   # config can be supplied as a mounted file this chart never sees, in which
   # case the template would find no rules and silently render the narrow role.
   readAll: false
+  # write grants the ServiceAccount patch/update/delete/create and the scale
+  # subresource. It is NOT derived from mutate.rules: the agent config can be
+  # mounted from a file this chart never sees, and a derived template would
+  # then render a narrow Role while the policy said yes. Same reasoning as
+  # rbac.readAll.
+  write: false
   # Extra ClusterRole rules appended to the generated role.
   extraRules: []
   # The generated ClusterRole grants read access to the resource block below
