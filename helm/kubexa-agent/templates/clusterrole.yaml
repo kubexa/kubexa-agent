@@ -185,6 +185,10 @@ rules:
   # above answers only to itself: the agent config can be mounted from a file
   # this chart never sees, so deriving the grant from the write policy's own
   # rule list would render a narrow Role while that policy said yes.
+  # nodes is deliberately absent here, unlike the read block above: write
+  # verbs on a cluster Node affect cluster capacity, not just one workload,
+  # and cordon/drain -- the mutations that would actually use them -- are
+  # deferred out of this phase. Do not add it back to match the read block.
   - apiGroups: [""]
     resources:
       - pods
@@ -195,7 +199,6 @@ rules:
       - persistentvolumeclaims
       - persistentvolumes
       - serviceaccounts
-      - nodes
       - resourcequotas
       - limitranges
       - replicationcontrollers
@@ -217,13 +220,16 @@ rules:
       - ingresses
       - networkpolicies
     verbs: ["patch", "update", "delete", "create"]
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources:
-      - roles
-      - rolebindings
-      - clusterroles
-      - clusterrolebindings
-    verbs: ["patch", "update", "delete", "create"]
+  # The whole RBAC API group (roles, rolebindings, clusterroles,
+  # clusterrolebindings) is deliberately absent here, unlike the read block
+  # above -- this is not an oversight, it is a privilege-escalation hole
+  # waiting to happen. Kubernetes' own escalation check permits a
+  # create/patch on a Role/ClusterRole/(Cluster)RoleBinding whenever the
+  # actor already holds every permission being granted, and this write
+  # block's own resource set is exactly that: granting create/patch on
+  # roles/clusterroles/rolebindings/clusterrolebindings here would let any
+  # mutate policy bind the agent's own write powers to an arbitrary
+  # subject. Do not add this apiGroup back to match the read block.
   - apiGroups: ["autoscaling"]
     resources: ["horizontalpodautoscalers"]
     verbs: ["patch", "update", "delete", "create"]
