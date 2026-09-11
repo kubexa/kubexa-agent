@@ -50,6 +50,28 @@ func TestNamespaceAndNamePatternsBind(t *testing.T) {
 	}
 }
 
+// An empty name must not short-circuit the names: allowlist. A rule
+// restricting deletes to "nginx-*" was matching an empty-name delete on
+// anything in the namespace -- what actually refused it was client-go's
+// own "name is required", not this policy. A rule with no names: at all
+// must keep allowing an empty name, since it never restricted names in
+// the first place.
+func TestEmptyNameConsultsNamesAllowlist(t *testing.T) {
+	restricted := compile(t, true, config.MutateRule{
+		Resources: []string{"pods"}, Names: []string{"nginx-*"}, Verbs: []string{"delete"},
+	})
+	if d := restricted.Decide(podsRef, policy.VerbDelete, "dev", ""); d.Allowed {
+		t.Fatal("an empty name must not bypass a rule's names: allowlist")
+	}
+
+	unrestricted := compile(t, true, config.MutateRule{
+		Resources: []string{"pods"}, Verbs: []string{"delete"},
+	})
+	if d := unrestricted.Decide(podsRef, policy.VerbDelete, "dev", ""); !d.Allowed {
+		t.Fatalf("a rule with no names: must still allow an empty name, got %q", d.Reason)
+	}
+}
+
 // The same choke point the query policy grew after the wildcard incident:
 // a ref whose segments are not DNS-1123 never reaches the dynamic client,
 // which builds its URL with path.Join and validates nothing.
