@@ -20,6 +20,12 @@ service AgentService {
   // Agent → Gateway: log/state/metric verisi
   // Gateway → Agent: config update, ack, backpressure, shutdown
   rpc Connect(stream AgentMessage) returns (stream GatewayMessage);
+
+  // ExecSession carries one interactive console session's bytes. The agent
+  // opens it ONLY after receiving ExecOpen on Connect, and the first frame
+  // is always ExecAttach. Data never rides Connect: one oversized or slow
+  // exec frame must not be able to tear down telemetry.
+  rpc ExecSession(stream ExecClientMessage) returns (stream ExecServerMessage);
 }
 
 // ─── Agent → Gateway ────────────────────────────────────────────────────────
@@ -158,6 +164,7 @@ message GatewayMessage {
     Shutdown           shutdown     = 6;
     ResourceQuery      resource_query = 7;
     MutationRequest mutation = 8;
+    ExecOpen exec_open = 9;
   }
 }
 
@@ -431,4 +438,105 @@ enum MutationErrorCode {
   // -- reported as INTERNAL it reads as a 500 and forecloses a safe
   // auto-retry.
   MUTATION_ERROR_RESOURCE_EXHAUSTED = 9;
+}
+
+// ─── Console ────────────────────────────────────────────────────────────────
+
+// ExecOpen asks the agent to start one console session and dial ExecSession
+// for it. It carries no bytes. The gateway sends it only to a session whose
+// handshake advertised exec_pod (or, in phase C, exec_node).
+message ExecOpen {
+  string          session_id        = 1;
+  ExecTarget      target            = 2;
+  repeated string command           = 3;  // empty means the agent's configured default shell
+  bool            tty               = 4;
+  bool            stdin             = 5;
+  int32           resume_window_sec = 6;  // how long the agent holds the session after a stream drop
+  int32           max_session_sec   = 7;  // gateway's cap; the agent clamps it to its own
+}
+
+message ExecTarget {
+  oneof target {
+    PodTarget  pod  = 1;
+    NodeTarget node = 2;
+  }
+}
+
+message PodTarget  { string namespace = 1; string name = 2; string container = 3; }
+message NodeTarget { string name = 1; }
+
+// ExecClientMessage is what the AGENT sends on ExecSession.
+message ExecClientMessage {
+  oneof payload {
+    ExecAttach attach = 1;  // always the first frame
+    ExecData   data   = 2;
+    ExecExit   exit   = 3;
+  }
+}
+
+// ExecServerMessage is what the GATEWAY sends on ExecSession.
+message ExecServerMessage {
+  oneof payload {
+    ExecAttachAck ack    = 1;
+    ExecData      stdin  = 2;
+    ExecResize    resize = 3;
+    ExecClose     close  = 4;
+  }
+}
+
+// ExecAttach authenticates the new stream. The gateway accepts it only when
+// the token resolves, session_id is parked, and the parked session's tenant
+// and cluster match -- token alone would let any tenant attach to another
+// tenant's session id.
+message ExecAttach {
+  string session_id   = 1;
+  string cluster_id   = 2;
+  string tenant_token = 3;
+  uint64 resume_seq   = 4;  // highest STDIN seq the agent has applied; 0 on a fresh attach
+}
+
+message ExecAttachAck {
+  bool   accepted         = 1;
+  string rejection_reason = 2;
+  // replay_from_seq is the highest OUTPUT seq the gateway had received before
+  // the stream dropped. The agent replays every buffered frame with a seq
+  // above it, then continues live. 0 on a fresh attach.
+  uint64 replay_from_seq  = 3;
+}
+
+message ExecData {
+  ExecChannel channel = 1;
+  bytes       chunk   = 2;
+  uint64      seq     = 3;  // monotonic per session, per direction, from 1
+}
+
+message ExecResize { int32 cols = 1; int32 rows = 2; }
+message ExecClose  { string reason = 1; }
+
+// ExecExit ends the session from the agent's side. reason UNSPECIFIED means
+// the process ran and exited with code; any other reason means the session
+// never ran or was cut short, and message says why.
+message ExecExit {
+  int32          code    = 1;
+  string         message = 2;
+  ExecExitReason reason  = 3;
+}
+
+enum ExecChannel {
+  EXEC_CHANNEL_UNSPECIFIED = 0;
+  EXEC_CHANNEL_STDIN       = 1;
+  EXEC_CHANNEL_STDOUT      = 2;
+  EXEC_CHANNEL_STDERR      = 3;
+}
+
+enum ExecExitReason {
+  EXEC_EXIT_REASON_UNSPECIFIED       = 0;  // process exited; code is meaningful
+  EXEC_EXIT_REASON_POLICY_DENIED     = 1;  // exec.pod rules refused the target
+  EXEC_EXIT_REASON_RBAC_DENIED       = 2;  // the API server refused pods/exec
+  EXEC_EXIT_REASON_NOT_FOUND         = 3;  // pod or container does not exist
+  EXEC_EXIT_REASON_TOO_MANY_SESSIONS = 4;  // exec.pod.max_sessions reached
+  EXEC_EXIT_REASON_MAX_SESSION       = 5;  // max_session_sec hard stop
+  EXEC_EXIT_REASON_RESUME_EXPIRED    = 6;  // no re-attach inside resume_window_sec
+  EXEC_EXIT_REASON_CLOSED            = 7;  // the gateway sent ExecClose
+  EXEC_EXIT_REASON_INTERNAL          = 8;
 }
