@@ -22,6 +22,8 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/collector/logs"
 	metricscollector "github.com/kubexa/kubexa-agent/internal/collector/metrics"
 	"github.com/kubexa/kubexa-agent/internal/collector/state"
+	"github.com/kubexa/kubexa-agent/internal/exec"
+	execpolicy "github.com/kubexa/kubexa-agent/internal/exec/policy"
 	"github.com/kubexa/kubexa-agent/internal/health"
 	"github.com/kubexa/kubexa-agent/internal/ingestrules"
 	"github.com/kubexa/kubexa-agent/internal/k8s"
@@ -261,6 +263,33 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		return fmt.Errorf("mutate executor: %w", err)
 	}
 
+	// The same fatal-vs-warning ruling, applied to exec.pod: see
+	// compileExecPolicy.
+	execPolicy, err := compileExecPolicy(cfg, log)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("exec policy: %w", err)
+	}
+
+	execResponder, _, err := buildExecResponder(
+		cfg,
+		execPolicy,
+		func() (*k8s.ExecClients, error) {
+			// Built only inside the enabled path, for the reason the mutate
+			// factory above gives: a disabled agent resolves no REST config
+			// for a console it will never open. 0/0 is the main client's
+			// budget through a separate limiter.
+			return k8s.NewExecClients(&k8sconfig.Config{}, 0, 0)
+		},
+		stream.NewExecDialer(cfg, logger.New("exec-dial", logger.WithAgentID(cfg.Agent.AgentID))),
+		logger.New("exec", logger.WithAgentID(cfg.Agent.AgentID)),
+		mainReg,
+	)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("exec transport: %w", err)
+	}
+
 	// One rule store, shared. The stream manager is its only writer (it is the
 	// only component that sees the gateway's messages) and the log collector
 	// reads it. Created here because the collectors are built before the
@@ -312,6 +341,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		reconciler,
 		queryExecutor,
 		mutationResponder,
+		execResponder,
 		rulesStore,
 		ruleCounters,
 		scrapeHealth,
@@ -520,6 +550,64 @@ func buildMutationResponder(
 		return nil, opts, err
 	}
 	return executor, opts, nil
+}
+
+// compileExecPolicy applies compileMutatePolicy's ruling to exec.pod:
+// execpolicy.Compile validates the rules unconditionally, so a bad rule
+// under an enabled section is fatal (the operator asked for consoles and
+// cannot have them) while under a disabled section it is a warning naming
+// the rule and a nil policy -- every *execpolicy.Policy method is nil-safe
+// and denies. See compileMutatePolicy for why the two branches must stay
+// different from the query policy's single fatal one.
+func compileExecPolicy(cfg *config.Config, log *logger.Logger) (*execpolicy.Policy, error) {
+	p, err := execpolicy.Compile(cfg)
+	if err == nil {
+		return p, nil
+	}
+	if cfg.ExecPodEnabled() {
+		return nil, err
+	}
+	log.Warn("exec.pod policy has an invalid rule; the pod console stays disabled",
+		logger.F("error", err.Error()),
+	)
+	return nil, nil
+}
+
+// buildExecResponder wires exec.pod into an exec.Transport. Nil when the
+// section is disabled, so a disabled agent resolves no REST config and
+// opens no gRPC connection for a feature it will not answer. The policy is
+// compiled unconditionally (compileExecPolicy) for the reason
+// compileMutatePolicy gives. Options is returned alongside for the reason
+// buildMutationResponder gives: the wiring is what a test must see.
+func buildExecResponder(
+	cfg *config.Config,
+	execPolicy *execpolicy.Policy,
+	newClients func() (*k8s.ExecClients, error),
+	dial exec.Dialer,
+	log *logger.Logger,
+	reg prometheus.Registerer,
+) (stream.ExecResponder, exec.Options, error) {
+	opts := exec.Options{
+		Policy:     execPolicy,
+		Settings:   cfg.ExecPodSettings(),
+		Logger:     log,
+		Registerer: reg,
+	}
+	if !cfg.ExecPodEnabled() {
+		return nil, opts, nil
+	}
+	clients, err := newClients()
+	if err != nil {
+		return nil, opts, fmt.Errorf("exec clients: %w", err)
+	}
+	opts.Clients = *clients
+	m, err := exec.New(opts)
+	if err != nil {
+		return nil, opts, err
+	}
+	return exec.NewTransport(m, dial, exec.Identity{
+		ClusterID: cfg.Agent.ClusterID, TenantToken: cfg.Agent.TenantToken,
+	}, log), opts, nil
 }
 
 // buildCapabilityReporterOptions builds the Options capability.NewReporter is
