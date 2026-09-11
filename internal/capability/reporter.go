@@ -41,6 +41,13 @@ type Options struct {
 	DiscoveryInterval time.Duration
 	SweepInterval     time.Duration
 	Policy            PolicySource
+	// MutatePolicy is a second, independent policy source from Policy above:
+	// live query and mutation are configured (or not) independently, and a
+	// nil value here means mutation is not configured, exactly as a nil
+	// Policy means live query is not configured. See MutatePolicySource's
+	// doc comment in probe.go for why this is not a second method on
+	// PolicySource.
+	MutatePolicy MutatePolicySource
 }
 
 // PolicySource reports the agent's configured live-query policy per resource.
@@ -76,6 +83,7 @@ type Reporter struct {
 	discoveryInterval time.Duration
 	sweepInterval     time.Duration
 	policy            PolicySource
+	mutatePolicy      MutatePolicySource
 
 	state sweepState
 
@@ -127,6 +135,7 @@ func NewReporter(opts Options) (*Reporter, error) {
 		discoveryInterval: opts.DiscoveryInterval,
 		sweepInterval:     opts.SweepInterval,
 		policy:            opts.Policy,
+		mutatePolicy:      opts.MutatePolicy,
 	}
 	if r.discoveryInterval <= 0 {
 		r.discoveryInterval = defaultDiscoveryInterval
@@ -216,7 +225,7 @@ func (r *Reporter) refresh(ctx context.Context) {
 		return
 	}
 
-	capabilities := Probe(ctx, r.cs.AuthorizationV1(), gvrs, r.workers)
+	capabilities := Probe(ctx, r.cs.AuthorizationV1(), gvrs, r.workers, r.mutatePolicy)
 	if ctx.Err() != nil {
 		return
 	}
@@ -269,16 +278,24 @@ func buildCatalog(
 	entries := make([]*agentv1.ResourceCapability, 0, len(caps))
 	for _, c := range caps {
 		entries = append(entries, &agentv1.ResourceCapability{
-			Group:       c.Group,
-			Version:     c.Version,
-			Resource:    c.Resource,
-			Kind:        c.Kind,
-			Namespaced:  c.Namespaced,
-			CanList:     c.CanList,
-			CanWatch:    c.CanWatch,
-			ProbeFailed: c.ProbeFailed,
-			PolicyList:  c.PolicyList,
-			PolicyGet:   c.PolicyGet,
+			Group:        c.Group,
+			Version:      c.Version,
+			Resource:     c.Resource,
+			Kind:         c.Kind,
+			Namespaced:   c.Namespaced,
+			CanList:      c.CanList,
+			CanWatch:     c.CanWatch,
+			ProbeFailed:  c.ProbeFailed,
+			PolicyList:   c.PolicyList,
+			PolicyGet:    c.PolicyGet,
+			CanPatch:     c.CanPatch,
+			CanDelete:    c.CanDelete,
+			CanCreate:    c.CanCreate,
+			PolicyPatch:  c.PolicyPatch,
+			PolicyDelete: c.PolicyDelete,
+			PolicyCreate: c.PolicyCreate,
+			PolicyScale:  c.PolicyScale,
+			// CanExec/PolicyExec stay false: exec is phase B/C, not this task.
 		})
 	}
 	return &agentv1.ResourceCatalog{

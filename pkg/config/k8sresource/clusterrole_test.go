@@ -184,6 +184,197 @@ func TestClusterRoleGrantsKubeletMetricsForCAdvisor(t *testing.T) {
 	assertGatedOnParentMetricsFlag(t, chart, `resources: ["nodes/metrics"]`)
 }
 
+// rbac.write must gate the mutation-verb rules on its own -- and on nothing
+// else. In particular it must NOT be derived from mutate.enabled or
+// mutate.rules: the agent config can be mounted from a file this chart never
+// sees, so a template that derived the grant from mutate.rules would render a
+// narrow (or empty) Role while the policy said yes. Same reasoning as
+// rbac.readAll.
+func TestClusterRoleWriteGateIsRbacWriteOnly(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "helm", "kubexa-agent", "templates", "clusterrole.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	chart := string(raw)
+
+	idx := strings.Index(chart, `verbs: ["patch", "update", "delete", "create"]`)
+	if idx < 0 {
+		t.Fatal(`no write rule (verbs: ["patch", "update", "delete", "create"]) in the ClusterRole`)
+	}
+	// The {{- if }} immediately above the rule is the one that gates it.
+	head := chart[:idx]
+	gate := head[strings.LastIndex(head, "{{- if"):]
+	if !strings.Contains(gate, "rbac.write") {
+		t.Errorf("the write rule is not gated on rbac.write; gate is %q", strings.TrimSpace(gate))
+	}
+	if strings.Contains(gate, "mutate.enabled") || strings.Contains(gate, "mutate.rules") {
+		t.Errorf("the write rule's gate must not be derived from mutate.enabled/mutate.rules; gate is %q",
+			strings.TrimSpace(gate))
+	}
+}
+
+// The write block must grant exactly the four RBAC verbs a five-verb
+// MutationVerb enum maps onto (RESTART is a patch, SCALE is an update on the
+// scale subresource), and must include the scale subresources for the
+// workload kinds the agent can scale.
+func TestClusterRoleWriteGrantsFourVerbsAndScaleSubresources(t *testing.T) {
+	block := writeBlock(t)
+
+	wantVerbs := map[string]bool{"patch": true, "update": true, "delete": true, "create": true}
+	gotVerbs := map[string]bool{}
+	for _, m := range regexp.MustCompile(`verbs:\s*\[([^\]]*)\]`).FindAllStringSubmatch(block, -1) {
+		for _, v := range strings.Split(m[1], ",") {
+			gotVerbs[strings.Trim(strings.TrimSpace(v), `"'`)] = true
+		}
+	}
+	if len(gotVerbs) != len(wantVerbs) {
+		t.Errorf("write block verbs = %v, want exactly %v", gotVerbs, wantVerbs)
+	}
+	for v := range gotVerbs {
+		if !wantVerbs[v] {
+			t.Errorf("write block grants unexpected verb %q; only patch/update/delete/create are allowed", v)
+		}
+	}
+	for v := range wantVerbs {
+		if !gotVerbs[v] {
+			t.Errorf("write block does not grant verb %q", v)
+		}
+	}
+
+	for _, scale := range []string{
+		"deployments/scale",
+		"statefulsets/scale",
+		"replicasets/scale",
+		"replicationcontrollers/scale",
+	} {
+		if !strings.Contains(block, scale) {
+			t.Errorf("write block does not name the scale subresource %q", scale)
+		}
+	}
+}
+
+// rbac.write grants apiGroups enumerated over the read block's own resource
+// lists -- it must never be a wildcard, because mutate rules reject every
+// wildcard form and a "*" write grant would be permanently wider than any
+// policy could ever use.
+func TestClusterRoleWriteNeverWildcards(t *testing.T) {
+	block := writeBlock(t)
+
+	if strings.Contains(block, `apiGroups: ["*"]`) || strings.Contains(block, `resources: ["*"]`) {
+		t.Error(`write block must not use a wildcard apiGroups/resources form`)
+	}
+}
+
+// rbac.write must exclude two resources the read block otherwise legitimizes
+// copying verbatim:
+//
+//   - nodes: write verbs on cluster Nodes are cluster-capacity-affecting, and
+//     cordon/drain are deferred out of this phase for the same reason -- this
+//     flag must not hand a mutate policy the ability to delete a Node.
+//   - the whole rbac.authorization.k8s.io group (roles, rolebindings,
+//     clusterroles, clusterrolebindings): Kubernetes' privilege-escalation
+//     check passes when the creator already holds the permissions being
+//     granted, and the write block's own resource set is exactly that --
+//     granting create/patch here lets a mutation bind the agent's own write
+//     powers to any subject.
+//
+// bareResourceEntries below matches a "- name" bullet line exactly, not a
+// substring, so it does not false-positive on "nodes/metrics" (not present in
+// the write block anyway) or any "*/scale" entry.
+func TestClusterRoleWriteExcludesNodesAndRBACGroup(t *testing.T) {
+	block := writeBlock(t)
+
+	bareResourceEntries := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?m)^\s*-\s+([a-z0-9./]+)\s*$`).FindAllStringSubmatch(block, -1) {
+		bareResourceEntries[m[1]] = true
+	}
+	if bareResourceEntries["nodes"] {
+		t.Error(`write block must not grant write verbs on "nodes" -- cluster capacity, and cordon/drain are deferred out of this phase`)
+	}
+
+	if strings.Contains(block, `rbac.authorization.k8s.io`) {
+		t.Error(`write block must not grant write verbs in the rbac.authorization.k8s.io apiGroup -- ` +
+			`the agent's ServiceAccount already holds exactly this resource set, so create/patch on ` +
+			`(cluster)role(binding)s is a privilege-escalation path to binding the agent's own write powers to any subject`)
+	}
+}
+
+// A default install (rbac.write off, so this block never renders) must not
+// rely on the write block for registry coverage: TestClusterRoleCoversRegistry
+// must keep passing purely on the enumerated READ rules. Mirrors
+// TestReadAllDoesNotSatisfyRegistryCoverage in intent, but the write block is
+// itself enumerated (not a wildcard) so it legitimately names many registry
+// resources -- the check here is that stripping the write block out of the
+// chart entirely still leaves every registry resource covered by what
+// remains.
+func TestClusterRoleWriteDoesNotSatisfyRegistryCoverage(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "helm", "kubexa-agent", "templates", "clusterrole.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	chart := string(raw)
+
+	start := strings.Index(chart, "{{- if .Values.rbac.write }}")
+	if start < 0 {
+		t.Fatal("no rbac.write block in the ClusterRole")
+	}
+	relEnd := strings.Index(chart[start:], "{{- end }}")
+	if relEnd < 0 {
+		t.Fatal("the rbac.write block is not closed")
+	}
+	end := start + relEnd + len("{{- end }}")
+	withoutWriteBlock := chart[:start] + chart[end:]
+
+	granted := grantedResources(withoutWriteBlock)
+
+	missing := []string{}
+	seen := map[string]bool{}
+	for _, alias := range k8sresource.KnownAliases() {
+		d, err := k8sresource.Parse(alias)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", alias, err)
+		}
+		resource := d.GVR.Resource
+		if seen[resource] {
+			continue
+		}
+		seen[resource] = true
+		if !granted[resource] {
+			missing = append(missing, resource)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("with the rbac.write block removed, these registry resources are no longer covered: %v\n"+
+			"the enumerated READ rules must be what covers the registry, not the write block -- "+
+			"a default install (rbac.write off) must be unaffected", missing)
+	}
+}
+
+// writeBlock returns the text of the {{- if .Values.rbac.write }} ... {{- end }}
+// block in the ClusterRole template.
+func writeBlock(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "..", "helm", "kubexa-agent", "templates", "clusterrole.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	chart := string(raw)
+
+	start := strings.Index(chart, "{{- if .Values.rbac.write }}")
+	if start < 0 {
+		t.Fatal("no rbac.write block in the ClusterRole")
+	}
+	end := strings.Index(chart[start:], "{{- end }}")
+	if end < 0 {
+		t.Fatal("the rbac.write block is not closed")
+	}
+	return chart[start : start+end]
+}
+
 // assertGatedOnParentMetricsFlag checks that the {{- if }} immediately above a
 // rule also consults collect.metrics.enabled, not just its own child block.
 func assertGatedOnParentMetricsFlag(t *testing.T, chart, rule string) {
