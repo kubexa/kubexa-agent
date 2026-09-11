@@ -300,7 +300,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	// heartbeat reports one number per reason.
 	ruleCounters := ingestrules.NewCounters()
 
-	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy, mutatePolicy, rulesStore, ruleCounters)
+	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy, mutatePolicy, execPolicy, rulesStore, ruleCounters)
 	if err != nil {
 		_ = q.Close()
 		return fmt.Errorf("collectors: %w", err)
@@ -624,6 +624,7 @@ func buildCapabilityReporterOptions(
 	q queue.Queue,
 	queryPolicy *policy.Policy,
 	mutatePolicy *mutatepolicy.Policy,
+	execPolicy *execpolicy.Policy,
 ) capability.Options {
 	return capability.Options{
 		Clientset: probeCS,
@@ -639,6 +640,19 @@ func buildCapabilityReporterOptions(
 		// wired here or can_patch/can_delete/can_create/policy_* report
 		// false for every resource forever, whatever mutate.rules says.
 		MutatePolicy: mutatePolicy,
+		// ExecPolicy is a THIRD, independent policy source from both Policy
+		// and MutatePolicy above -- it must be wired here or can_exec/
+		// policy_exec report false for the pods entry forever, whatever
+		// exec.pod.rules says. A disabled or invalid exec.pod section
+		// compiles to a nil *execpolicy.Policy (see compileExecPolicy),
+		// which assigning to this interface field yields a non-nil
+		// ExecPolicySource holding a nil pointer -- not a nil interface.
+		// That is harmless here: every *execpolicy.Policy method, including
+		// AllowsAnyPod, is nil-safe and answers false/denied, exactly the
+		// "not configured" answer this field is supposed to give. Do not add
+		// a nil check on execPolicy here to "fix" this: it would just mask
+		// the same harmless typed-nil shape mutatePolicy above already has.
+		ExecPolicy: execPolicy,
 	}
 }
 
@@ -650,6 +664,7 @@ func buildCollectors(
 	log *logger.Logger,
 	queryPolicy *policy.Policy,
 	mutatePolicy *mutatepolicy.Policy,
+	execPolicy *execpolicy.Policy,
 	rules *ingestrules.Store,
 	counters *ingestrules.Counters,
 ) ([]Collector, error) {
@@ -706,7 +721,7 @@ func buildCollectors(
 			return nil, err
 		}
 		capReporter, err := capability.NewReporter(
-			buildCapabilityReporterOptions(cfg, probeCS, q, queryPolicy, mutatePolicy),
+			buildCapabilityReporterOptions(cfg, probeCS, q, queryPolicy, mutatePolicy, execPolicy),
 		)
 		if err != nil {
 			return nil, err
