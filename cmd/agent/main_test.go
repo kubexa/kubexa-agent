@@ -2,17 +2,23 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 
+	execpolicy "github.com/kubexa/kubexa-agent/internal/exec/policy"
 	"github.com/kubexa/kubexa-agent/internal/k8s"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	mutatepolicy "github.com/kubexa/kubexa-agent/internal/mutate/policy"
 	"github.com/kubexa/kubexa-agent/internal/query/policy"
 	"github.com/kubexa/kubexa-agent/pkg/config"
+	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
 
 // invalidMutateRule fails ValidateMutateRules for the simplest possible
@@ -275,5 +281,134 @@ func TestBuildCapabilityReporterOptionsWiresBothPolicies(t *testing.T) {
 	}
 	if opts.MutatePolicy != mutatePolicy {
 		t.Fatalf("opts.MutatePolicy = %p, want the exact mutatePolicy passed in (%p)", opts.MutatePolicy, mutatePolicy)
+	}
+}
+
+// fakeExecClientsFactory satisfies exec.New's "clients are required" check
+// without touching a real cluster; nothing here opens a session.
+func fakeExecClientsFactory() func() (*k8s.ExecClients, error) {
+	return func() (*k8s.ExecClients, error) {
+		return &k8s.ExecClients{
+			Clientset: k8sfake.NewSimpleClientset(),
+			REST:      &rest.Config{Host: "https://example"},
+		}, nil
+	}
+}
+
+// nilExecDialer is never called by these tests: the transport dials only
+// once an exec_open arrives.
+func nilExecDialer(context.Context) (agentv1.AgentService_ExecSessionClient, error) {
+	return nil, errors.New("not dialled in tests")
+}
+
+// TestCompileExecPolicyWarnsAndContinuesWhenDisabled pins the ruling
+// compileMutatePolicy established, applied to exec.pod: a bad rule under a
+// DISABLED section is a warning naming the rule and a nil policy, never a
+// crash-loop; under an ENABLED section it is fatal.
+func TestCompileExecPolicyWarnsAndContinuesWhenDisabled(t *testing.T) {
+	bad := []config.PodExecRule{{Namespace: "de*v"}}
+
+	t.Run("disabled", func(t *testing.T) {
+		disabled := false
+		cfg := &config.Config{}
+		cfg.Exec.Pod.Enabled = &disabled
+		cfg.Exec.Pod.Rules = bad
+		var buf bytes.Buffer
+		p, err := compileExecPolicy(cfg, logger.New("test", logger.WithWriter(&buf)))
+		if err != nil {
+			t.Fatalf("compileExecPolicy() error = %v, want nil for a disabled section", err)
+		}
+		if p != nil {
+			t.Fatalf("compileExecPolicy() policy = %+v, want nil -- the console must stay disabled", p)
+		}
+		if logged := buf.String(); !strings.Contains(logged, "exec.pod.rules[0]") || !strings.Contains(strings.ToLower(logged), "warn") {
+			t.Fatalf("warning log = %q, want a warn line naming exec.pod.rules[0]", logged)
+		}
+	})
+
+	t.Run("enabled", func(t *testing.T) {
+		enabled := true
+		cfg := &config.Config{}
+		cfg.Exec.Pod.Enabled = &enabled
+		cfg.Exec.Pod.Rules = bad
+		p, err := compileExecPolicy(cfg, logger.New("test"))
+		if err == nil {
+			t.Fatal("compileExecPolicy() error = nil, want an error for an invalid rule with exec.pod enabled")
+		}
+		if p != nil {
+			t.Fatalf("compileExecPolicy() policy = %+v, want nil alongside a fatal error", p)
+		}
+	})
+}
+
+// TestBuildExecResponderIsNilWhenDisabled mirrors
+// TestBuildMutationResponderNilResponderWhenDisabled and its factory
+// counterpart: a disabled agent gets a nil responder (so the dispatcher
+// drops exec_open) and never resolves exec clients for it.
+func TestBuildExecResponderIsNilWhenDisabled(t *testing.T) {
+	disabled := false
+	cfg := &config.Config{}
+	cfg.Exec.Pod.Enabled = &disabled
+
+	calls := 0
+	factory := func() (*k8s.ExecClients, error) {
+		calls++
+		return fakeExecClientsFactory()()
+	}
+	responder, opts, err := buildExecResponder(cfg, nil, factory, nilExecDialer, logger.New("test"), nil)
+	if err != nil {
+		t.Fatalf("buildExecResponder: %v", err)
+	}
+	if responder != nil {
+		t.Fatalf("responder = %v, want nil when exec.pod.enabled is false", responder)
+	}
+	if calls != 0 {
+		t.Fatalf("clients factory called %d times, want 0 for a disabled section", calls)
+	}
+	if opts.Policy != nil {
+		t.Fatalf("opts.Policy = %v, want nil (the policy passed in was nil)", opts.Policy)
+	}
+}
+
+// TestBuildExecResponderWiresPolicyAndSettings pins the wiring the way
+// TestBuildMutationResponderWiresTheMutatePolicy does: the exact policy
+// lands on Options, the settings come from cfg.ExecPodSettings() (with the
+// operator's limits, not the defaults), and an enabled section yields a
+// non-nil responder built from the factory's clients.
+func TestBuildExecResponderWiresPolicyAndSettings(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Exec.Pod.Enabled = &enabled
+	cfg.Exec.Pod.Rules = []config.PodExecRule{{Namespace: "dev"}}
+	cfg.Exec.Pod.MaxSessions = 2
+	cfg.Exec.Pod.MaxSessionSec = 120
+	execPolicy, err := execpolicy.Compile(cfg)
+	if err != nil {
+		t.Fatalf("execpolicy.Compile: %v", err)
+	}
+
+	calls := 0
+	factory := func() (*k8s.ExecClients, error) {
+		calls++
+		return fakeExecClientsFactory()()
+	}
+	responder, opts, err := buildExecResponder(cfg, execPolicy, factory, nilExecDialer, logger.New("test"), nil)
+	if err != nil {
+		t.Fatalf("buildExecResponder: %v", err)
+	}
+	if responder == nil {
+		t.Fatal("responder = nil, want a transport when exec.pod.enabled is true")
+	}
+	if calls != 1 {
+		t.Fatalf("clients factory called %d times, want exactly 1", calls)
+	}
+	if opts.Policy != execPolicy {
+		t.Fatalf("opts.Policy = %p, want the exact policy passed in (%p)", opts.Policy, execPolicy)
+	}
+	if opts.Settings.MaxSessions != 2 || opts.Settings.MaxSessionSec != 120 {
+		t.Fatalf("opts.Settings = %+v, want MaxSessions 2 and MaxSessionSec 120 from cfg", opts.Settings)
+	}
+	if opts.Clients.Clientset == nil || opts.Clients.REST == nil {
+		t.Fatalf("opts.Clients = %+v, want the factory's clients", opts.Clients)
 	}
 }
