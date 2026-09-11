@@ -178,8 +178,13 @@ func (t *Transport) pump(stream agentv1.AgentService_ExecSessionClient, sess *Se
 	}
 	out := sess.Output()
 
+	// streamErr carries stream.Recv errors ONLY. A WriteStdin failure is
+	// the session ending (finish closed the pipe, or done is closed), never
+	// the stream breaking; reporting it here would race the Done branch
+	// below, and losing that race drops the exit frame.
 	streamErr := make(chan error, 1)
 	go func() {
+		stdinClosed := false
 		for {
 			msg, err := stream.Recv()
 			if err != nil {
@@ -188,9 +193,15 @@ func (t *Transport) pump(stream agentv1.AgentService_ExecSessionClient, sess *Se
 			}
 			switch p := msg.GetPayload().(type) {
 			case *agentv1.ExecServerMessage_Stdin:
+				if stdinClosed {
+					continue
+				}
 				if err := sess.WriteStdin(p.Stdin.GetChunk()); err != nil {
-					streamErr <- err
-					return
+					// The session is over; keep consuming so the Done
+					// branch still sees the gateway end the stream, but
+					// write nothing more.
+					stdinClosed = true
+					continue
 				}
 				// Noted only once applied: resume_seq promises the gateway
 				// that everything up to it reached the process.
