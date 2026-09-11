@@ -256,31 +256,56 @@ func compiledQueryPolicy(t *testing.T) *policy.Policy {
 	return p
 }
 
+// compiledExecPolicy compiles a valid, non-nil exec policy -- the "what a
+// real serve() call site would hand buildCapabilityReporterOptions" shape,
+// distinct in TYPE (internal/exec/policy.Policy) from both the query and
+// mutate policies above, for the same reason compiledMutatePolicy's own
+// comment gives.
+func compiledExecPolicy(t *testing.T) *execpolicy.Policy {
+	t.Helper()
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Exec.Pod.Enabled = &enabled
+	cfg.Exec.Pod.Rules = []config.PodExecRule{{Namespace: "dev"}}
+	p, err := execpolicy.Compile(cfg)
+	if err != nil {
+		t.Fatalf("execpolicy.Compile: %v", err)
+	}
+	return p
+}
+
 // TestBuildCapabilityReporterOptionsWiresBothPolicies pins the wiring gap
 // Task 6 shipped without: nothing previously asserted that a mutate policy
 // reaches capability.Options at all, so an omitted MutatePolicy line left
 // can_patch/can_delete/can_create/policy_* false for every resource forever,
 // whatever mutate.rules said -- and every OTHER test in this package stayed
-// green, which is exactly why the gap survived the task.
+// green, which is exactly why the gap survived the task. Extended by the pod
+// console's own Task 6 to pin ExecPolicy the same way: an omitted line here
+// leaves can_exec/policy_exec false for the pods entry forever, whatever
+// exec.pod.rules says.
 //
-// Both fields are asserted by IDENTITY, in the same test: Policy must still
-// be the exact query policy passed in, and MutatePolicy must be the exact
-// mutate policy passed in. Checking both together, rather than one field at
-// a time or merely non-nil, is what catches a regression that drops one
-// policy while leaving the other correct -- the shape this task's actual
-// defect took.
+// All three fields are asserted by IDENTITY, in the same test: Policy must
+// still be the exact query policy passed in, MutatePolicy must be the exact
+// mutate policy passed in, and ExecPolicy must be the exact exec policy
+// passed in. Checking all three together, rather than one field at a time or
+// merely non-nil, is what catches a regression that drops one policy while
+// leaving the others correct -- the shape this task's actual defect took.
 func TestBuildCapabilityReporterOptionsWiresBothPolicies(t *testing.T) {
 	cfg := &config.Config{}
 	queryPolicy := compiledQueryPolicy(t)
 	mutatePolicy := compiledMutatePolicy(t)
+	execPolicy := compiledExecPolicy(t)
 
-	opts := buildCapabilityReporterOptions(cfg, nil, nil, queryPolicy, mutatePolicy)
+	opts := buildCapabilityReporterOptions(cfg, nil, nil, queryPolicy, mutatePolicy, execPolicy)
 
 	if opts.Policy != queryPolicy {
 		t.Fatalf("opts.Policy = %p, want the exact queryPolicy passed in (%p)", opts.Policy, queryPolicy)
 	}
 	if opts.MutatePolicy != mutatePolicy {
 		t.Fatalf("opts.MutatePolicy = %p, want the exact mutatePolicy passed in (%p)", opts.MutatePolicy, mutatePolicy)
+	}
+	if opts.ExecPolicy != execPolicy {
+		t.Fatalf("opts.ExecPolicy = %p, want the exact execPolicy passed in (%p)", opts.ExecPolicy, execPolicy)
 	}
 }
 

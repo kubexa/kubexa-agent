@@ -48,6 +48,12 @@ type Options struct {
 	// doc comment in probe.go for why this is not a second method on
 	// PolicySource.
 	MutatePolicy MutatePolicySource
+	// ExecPolicy is a THIRD, independent policy source from both Policy and
+	// MutatePolicy above: live query, mutation, and exec are each configured
+	// (or not) independently, and a nil value here means exec is not
+	// configured, exactly as a nil MutatePolicy means mutation is not
+	// configured. See ExecPolicySource's doc comment in probe.go.
+	ExecPolicy ExecPolicySource
 }
 
 // PolicySource reports the agent's configured live-query policy per resource.
@@ -84,6 +90,7 @@ type Reporter struct {
 	sweepInterval     time.Duration
 	policy            PolicySource
 	mutatePolicy      MutatePolicySource
+	execPolicy        ExecPolicySource
 
 	state sweepState
 
@@ -136,6 +143,7 @@ func NewReporter(opts Options) (*Reporter, error) {
 		sweepInterval:     opts.SweepInterval,
 		policy:            opts.Policy,
 		mutatePolicy:      opts.MutatePolicy,
+		execPolicy:        opts.ExecPolicy,
 	}
 	if r.discoveryInterval <= 0 {
 		r.discoveryInterval = defaultDiscoveryInterval
@@ -225,7 +233,7 @@ func (r *Reporter) refresh(ctx context.Context) {
 		return
 	}
 
-	capabilities := Probe(ctx, r.cs.AuthorizationV1(), gvrs, r.workers, r.mutatePolicy)
+	capabilities := Probe(ctx, r.cs.AuthorizationV1(), gvrs, r.workers, r.mutatePolicy, r.execPolicy)
 	if ctx.Err() != nil {
 		return
 	}
@@ -295,7 +303,8 @@ func buildCatalog(
 			PolicyDelete: c.PolicyDelete,
 			PolicyCreate: c.PolicyCreate,
 			PolicyScale:  c.PolicyScale,
-			// CanExec/PolicyExec stay false: exec is phase B/C, not this task.
+			CanExec:      c.CanExec,
+			PolicyExec:   c.PolicyExec,
 		})
 	}
 	return &agentv1.ResourceCatalog{

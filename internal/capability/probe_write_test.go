@@ -71,7 +71,7 @@ func TestWriteVerbsAreProbedOnlyForPolicyNamedResources(t *testing.T) {
 	cs := countingAuthzClient(tally)
 	mp := fakeMutatePolicy{named: map[string]bool{"apps/v1/deployments": true}}
 
-	Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 4, mp)
+	Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 4, mp, nil)
 
 	for _, verb := range []string{"patch", "delete", "create"} {
 		if n := tally.get("secrets", verb); n != 0 {
@@ -97,6 +97,65 @@ func TestWriteVerbsAreProbedOnlyForPolicyNamedResources(t *testing.T) {
 	}
 }
 
+// fakeExecPolicy answers AllowsAnyPod as configured, mirroring
+// fakeMutatePolicy's shape for the same probe-gating pattern: a primitive
+// bool the probe consults before spending an SSAR.
+type fakeExecPolicy struct {
+	allow bool
+}
+
+func (f fakeExecPolicy) AllowsAnyPod() bool { return f.allow }
+
+// podAndDeploymentGVRs is a two-entry catalog for the exec test: a core-group
+// pods entry (the only one exec is ever reported for) and a deployments entry
+// (the contrast case -- Phase B does not touch it).
+func podAndDeploymentGVRs() []GVR {
+	return []GVR{
+		{Group: "", Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		{Group: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment", Namespaced: true},
+	}
+}
+
+// TestCatalogReportsExecForPodsOnly pins the third independent policy
+// source: exec's can_exec/policy_exec, mirroring the CanPatch/PolicyPatch
+// pattern above but gated on the core-group "pods" resource specifically,
+// never on any other GVR (nodes are Phase C).
+func TestCatalogReportsExecForPodsOnly(t *testing.T) {
+	tally := &verbTally{}
+	cs := countingAuthzClient(tally)
+	ep := fakeExecPolicy{allow: true}
+
+	got := byResource(Probe(context.Background(), cs.AuthorizationV1(), podAndDeploymentGVRs(), 4, nil, ep))
+
+	pods := got["pods"]
+	if !pods.CanExec || !pods.PolicyExec {
+		t.Fatalf("pods = %+v, want CanExec and PolicyExec both true", pods)
+	}
+	if n := tally.get("pods", "create"); n != 1 {
+		t.Fatalf("pods:create (exec subresource) issued %d SelfSubjectAccessReviews, want exactly 1", n)
+	}
+
+	deployments := got["deployments"]
+	if deployments.CanExec || deployments.PolicyExec {
+		t.Fatalf("deployments = %+v, want CanExec and PolicyExec both false -- exec is pods-only", deployments)
+	}
+
+	t.Run("nil exec policy", func(t *testing.T) {
+		tally2 := &verbTally{}
+		cs2 := countingAuthzClient(tally2)
+
+		got2 := byResource(Probe(context.Background(), cs2.AuthorizationV1(), podAndDeploymentGVRs(), 4, nil, nil))
+
+		pods2 := got2["pods"]
+		if pods2.CanExec || pods2.PolicyExec {
+			t.Fatalf("pods = %+v, want CanExec and PolicyExec both false when ExecPolicy is nil", pods2)
+		}
+		if n := tally2.get("pods", "create"); n != 0 {
+			t.Fatalf("pods:create (exec subresource) issued %d SelfSubjectAccessReviews, want 0 when ExecPolicy is nil", n)
+		}
+	})
+}
+
 // An unprobed entry reports false, which is the same answer an agent
 // without the feature gives -- not "unknown", and never "allowed".
 func TestUnprobedEntriesReportFalse(t *testing.T) {
@@ -106,7 +165,7 @@ func TestUnprobedEntriesReportFalse(t *testing.T) {
 	}, nil)
 	mp := fakeMutatePolicy{named: map[string]bool{"apps/v1/deployments": true}}
 
-	got := byResource(Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 4, mp))
+	got := byResource(Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 4, mp, nil))
 
 	s := got["secrets"]
 	if s.CanPatch || s.CanDelete || s.CanCreate {
