@@ -437,6 +437,17 @@ func chartOnlyKeys() map[string]string {
 		"gateway.address": "rendered by the gatewayAddress helper, which falls back to host:port",
 		"gateway.host":    "joined with port into gateway.address by the gatewayAddress helper",
 		"gateway.port":    "joined with host into gateway.address by the gatewayAddress helper",
+		// exec.pod is a struct-shaped block name, not a leaf value -- the same
+		// shape as collect.metrics.cadvisor/kubeStateMetrics, one level
+		// deeper than templateKeys' block regex resolves (it only splits
+		// "collect.X" specially; "exec.pod" reads as key "pod" of block
+		// "exec", never as its own block). Unlike cadvisor/kubeStateMetrics,
+		// nothing here guards exec.pod with a nil-safe `{{- if (...) }}`
+		// immediately before its own "pod:" line, so renderedPairs never
+		// gets a pairing for "exec.pod" itself. Its own leaves --
+		// enabled, rules, defaultShell, maxSessionSec, maxSessions,
+		// resumeWindowSec -- are each paired and type-checked individually.
+		"exec.pod": "a nested block name (PodExecConfig), not a scalar; its own fields are each checked",
 	}
 }
 
