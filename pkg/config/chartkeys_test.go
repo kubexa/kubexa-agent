@@ -37,6 +37,7 @@ func rulePaths() map[string]reflect.Type {
 		"collect.metrics.customEndpoints": reflect.TypeOf(config.MetricEndpointConfig{}),
 		"query.rules":                     reflect.TypeOf(config.QueryRule{}),
 		"mutate.rules":                    reflect.TypeOf(config.MutateRule{}),
+		"exec.pod.rules":                  reflect.TypeOf(config.PodExecRule{}),
 	}
 }
 
