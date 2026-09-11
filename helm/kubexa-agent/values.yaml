@@ -355,7 +355,7 @@ query:
 
 # Write operations the Kubexa platform may perform on this cluster.
 # Disabled by default. Enabling it here is NOT enough: the ServiceAccount also
-# needs the verbs, which is rbac.write below -- deliberately a separate flag,
+# needs the verbs, which is rbac.write above -- deliberately a separate flag,
 # because this config can be mounted from a file the chart never sees.
 mutate:
   enabled: false
