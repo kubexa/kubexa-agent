@@ -15,6 +15,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	"github.com/kubexa/kubexa-agent/internal/capability"
@@ -27,6 +28,8 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/k8s/k8sconfig"
 	"github.com/kubexa/kubexa-agent/internal/logger"
 	"github.com/kubexa/kubexa-agent/internal/metrics"
+	"github.com/kubexa/kubexa-agent/internal/mutate"
+	mutatepolicy "github.com/kubexa/kubexa-agent/internal/mutate/policy"
 	agentpprof "github.com/kubexa/kubexa-agent/internal/pprof"
 	"github.com/kubexa/kubexa-agent/internal/query"
 	"github.com/kubexa/kubexa-agent/internal/query/policy"
@@ -212,6 +215,52 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		return fmt.Errorf("query executor: %w", err)
 	}
 
+	// See compileMutatePolicy's doc comment for the fatal-vs-warning ruling
+	// this applies. Its error is fatal exactly when mutate is enabled --
+	// mirroring the query policy above -- because a compile failure while
+	// mutate is disabled has already been logged and swallowed inside it.
+	mutatePolicy, err := compileMutatePolicy(cfg, log)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("mutate policy: %w", err)
+	}
+
+	mutationResponder, _, err := buildMutationResponder(
+		cfg,
+		mutatePolicy,
+		func() (*k8s.QueryClients, error) {
+			// A SEPARATE client pair from queryClients above, not a reuse of
+			// it -- and built here, inside the enabled path, not eagerly:
+			// this closure only runs once buildMutationResponder has already
+			// checked cfg.MutateEnabled(), so a disabled agent resolves no
+			// REST config, builds no dynamic client, and starts no second
+			// rate limiter for a responder it is about to throw away.
+			//
+			// k8s.QueryClients carries one rate.Limiter shared by every
+			// client it hands out (see its doc comment), and that limiter
+			// was carved out to protect the informer watch budget from
+			// ad-hoc QUERY bursts -- it was never meant to also arbitrate
+			// between reads and writes. Sharing it with mutations would mean
+			// a dashboard polling live queries could throttle an operator's
+			// delete, in either direction. 0/0 costs no new config key: it
+			// is the same "same budget as the main client, separate
+			// limiter" contract queryClients already uses.
+			//
+			// The trade, both halves of it: a write no longer queues behind
+			// a read burst (or vice versa) -- but under full saturation the
+			// agent can now issue up to twice the API calls it could with
+			// one shared bucket, because two independent buckets replace
+			// one.
+			return k8s.NewQueryClients(&k8sconfig.Config{}, 0, 0)
+		},
+		logger.New("mutate", logger.WithAgentID(cfg.Agent.AgentID)),
+		mainReg,
+	)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("mutate executor: %w", err)
+	}
+
 	// One rule store, shared. The stream manager is its only writer (it is the
 	// only component that sees the gateway's messages) and the log collector
 	// reads it. Created here because the collectors are built before the
@@ -222,7 +271,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	// heartbeat reports one number per reason.
 	ruleCounters := ingestrules.NewCounters()
 
-	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy, rulesStore, ruleCounters)
+	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy, mutatePolicy, rulesStore, ruleCounters)
 	if err != nil {
 		_ = q.Close()
 		return fmt.Errorf("collectors: %w", err)
@@ -262,6 +311,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		agentMetrics.Connection(),
 		reconciler,
 		queryExecutor,
+		mutationResponder,
 		rulesStore,
 		ruleCounters,
 		scrapeHealth,
@@ -375,6 +425,135 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	return nil
 }
 
+// compileMutatePolicy compiles the mutate policy and applies the ruling this
+// task exists to enforce.
+//
+// mutatepolicy.Compile validates mutate.rules UNCONDITIONALLY, even when
+// mutate.enabled is false -- see its own doc comment: a disabled section's
+// rule must be rejected now, not silently at the moment an operator flips
+// the section on later. That makes a malformed rule a real config error even
+// while the section is off.
+//
+// But it must not be handled the way the query policy's compile error is
+// handled above in serve(): the chart deploys this agent with
+// restartPolicy: Always, so treating this as fatal unconditionally would
+// crash-loop the WHOLE agent -- logs, metrics, live query, everything --
+// over one bad rule sitting inside a section nobody has switched on yet.
+//
+//   - mutate.enabled true and Compile fails: the error is returned (fatal in
+//     serve, exactly like the query policy) -- the operator asked for
+//     mutations and cannot have them, so say so loudly.
+//   - mutate.enabled false and Compile fails: the error is logged as a
+//     warning naming the offending rule and swallowed; (nil, nil) is
+//     returned so the agent starts with mutation disabled, same as if the
+//     section were empty.
+//
+// Do not "simplify" this into one uniform fatal branch matching the query
+// policy above -- the two sections have different blast radii for a bad
+// rule, which is the whole reason this function exists instead of inlining
+// the same two lines the query policy uses.
+func compileMutatePolicy(cfg *config.Config, log *logger.Logger) (*mutatepolicy.Policy, error) {
+	p, err := mutatepolicy.Compile(cfg)
+	if err == nil {
+		return p, nil
+	}
+	if cfg.MutateEnabled() {
+		return nil, err
+	}
+	log.Warn("mutate policy has an invalid rule; mutation stays disabled",
+		logger.F("error", err.Error()),
+	)
+	return nil, nil
+}
+
+// buildMutationResponder wires cfg's mutate settings into a mutate.Executor
+// and hands both the built responder AND the Options it was built from back
+// to the caller.
+//
+// It exists as its own pure function -- rather than staying inline in
+// serve() -- because the wiring itself is exactly what a test that only
+// covers compileMutatePolicy's branching cannot see: passing queryPolicy
+// instead of mutatePolicy, or hardcoding RedactSecrets: false, both compile
+// and both leave every other test green. Returning Options alongside the
+// responder lets a test assert on the wiring directly -- which policy went
+// in, what RedactSecrets resolved to -- without reaching into the
+// executor's unexported fields.
+//
+// The responder is nil when mutate.enabled is false; Options is still
+// returned so a caller (or a test) can see what WOULD have been built.
+//
+// newClients is a FACTORY, not a value, and is called only after the
+// MutateEnabled gate below -- never eagerly. Building the mutate client pair
+// (its own REST config resolution, dynamic client, and rate limiter) costs
+// real work, and a disabled agent must not pay it for a responder it is
+// about to throw away. The caller's factory is where the "why a separate
+// pool" trade is explained; this function only decides WHEN to call it.
+func buildMutationResponder(
+	cfg *config.Config,
+	mutatePolicy *mutatepolicy.Policy,
+	newClients func() (*k8s.QueryClients, error),
+	log *logger.Logger,
+	reg prometheus.Registerer,
+) (stream.MutationResponder, mutate.Options, error) {
+	opts := mutate.Options{
+		Policy: mutatePolicy,
+		Logger: log,
+		// RedactSecrets reuses the query path's setting rather than
+		// inventing a second one: both answer the same question -- does a
+		// secret value leave this agent. Deleting this line, or hardcoding
+		// it to false, silently hands live Secret values back on every
+		// mutation regardless of what the owner configured -- exactly the
+		// kind of one-line regression this function's tests exist to catch.
+		RedactSecrets: cfg.QueryRedactSecrets(),
+		Registerer:    reg,
+	}
+	if !cfg.MutateEnabled() {
+		return nil, opts, nil
+	}
+	clients, err := newClients()
+	if err != nil {
+		return nil, opts, fmt.Errorf("mutate clients: %w", err)
+	}
+	opts.Clients = *clients
+	executor, err := mutate.New(opts)
+	if err != nil {
+		return nil, opts, err
+	}
+	return executor, opts, nil
+}
+
+// buildCapabilityReporterOptions builds the Options capability.NewReporter is
+// called with. It exists as its own pure function -- rather than staying
+// inline in buildCollectors -- for the same reason buildMutationResponder
+// above does: the wiring itself (dropping MutatePolicy, or handing it the
+// wrong policy) is exactly what a test on buildCollectors's return value
+// cannot see, since Reporter keeps its policy fields unexported. Returning
+// Options lets a test assert on the wiring directly -- which policy landed
+// in which field -- without reaching into the reporter itself.
+func buildCapabilityReporterOptions(
+	cfg *config.Config,
+	probeCS kubernetes.Interface,
+	q queue.Queue,
+	queryPolicy *policy.Policy,
+	mutatePolicy *mutatepolicy.Policy,
+) capability.Options {
+	return capability.Options{
+		Clientset: probeCS,
+		Writer:    state.NewQueueWriter(q, state.ConfigFromRoot(cfg).WriteTimeout),
+		AgentMeta: &commonv1.AgentMetadata{
+			ClusterId: cfg.Agent.ClusterID,
+			AgentId:   cfg.Agent.AgentID,
+		},
+		Logger: logger.New("capability-reporter", logger.WithAgentID(cfg.Agent.AgentID)),
+		Policy: queryPolicy,
+		// MutatePolicy is a second, independent policy source from Policy
+		// above (see capability.Options's own doc comment) -- it must be
+		// wired here or can_patch/can_delete/can_create/policy_* report
+		// false for every resource forever, whatever mutate.rules says.
+		MutatePolicy: mutatePolicy,
+	}
+}
+
 func buildCollectors(
 	cfg *config.Config,
 	kube k8s.Client,
@@ -382,6 +561,7 @@ func buildCollectors(
 	reg prometheus.Registerer,
 	log *logger.Logger,
 	queryPolicy *policy.Policy,
+	mutatePolicy *mutatepolicy.Policy,
 	rules *ingestrules.Store,
 	counters *ingestrules.Counters,
 ) ([]Collector, error) {
@@ -437,16 +617,9 @@ func buildCollectors(
 		if err != nil {
 			return nil, err
 		}
-		capReporter, err := capability.NewReporter(capability.Options{
-			Clientset: probeCS,
-			Writer:    state.NewQueueWriter(q, state.ConfigFromRoot(cfg).WriteTimeout),
-			AgentMeta: &commonv1.AgentMetadata{
-				ClusterId: cfg.Agent.ClusterID,
-				AgentId:   cfg.Agent.AgentID,
-			},
-			Logger: logger.New("capability-reporter", logger.WithAgentID(cfg.Agent.AgentID)),
-			Policy: queryPolicy,
-		})
+		capReporter, err := capability.NewReporter(
+			buildCapabilityReporterOptions(cfg, probeCS, q, queryPolicy, mutatePolicy),
+		)
 		if err != nil {
 			return nil, err
 		}

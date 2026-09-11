@@ -176,6 +176,13 @@ data:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 
+    mutate:
+      enabled: {{ .Values.mutate.enabled }}
+      {{- with .Values.mutate.rules }}
+      rules:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
     buffer:
       max_memory_bytes: {{ .Values.buffer.maxMemoryBytes }}
       spill_dir: {{ .Values.buffer.spillDir | quote }}

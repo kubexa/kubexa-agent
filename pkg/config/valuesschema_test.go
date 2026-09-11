@@ -202,7 +202,8 @@ func checkType(t *testing.T, where string, field reflect.Type, node map[string]a
 // config it exits on, and only a narrow type lets the pattern do its work.
 func narrowStringPaths() map[string]bool {
 	return map[string]bool{
-		`query.rules items: "verbs"`: true,
+		`query.rules items: "verbs"`:  true,
+		`mutate.rules items: "verbs"`: true,
 	}
 }
 
@@ -865,6 +866,32 @@ func TestHelmAcceptsTheShippedChart(t *testing.T) {
 			// working cluster-wide grant, not a partial form.
 			name: "a padded bare wildcard",
 			args: []string{"--set-json", `query.rules[0]={"resources":["* "]}`},
+		},
+		{
+			// Unlike query.rules, mutate.rules permits no wildcard at
+			// all -- not even the bare form. The schema pattern is
+			// `^[^*]*$`, deliberately tighter than query's
+			// `^(\s*\*\s*|[^*]*)$`, so this must be caught at the
+			// helm gate, not left to the agent's own startup refusal.
+			name: "a bare wildcard resource on a mutate rule",
+			args: []string{"--set-json", `mutate.rules[0]={"resources":["*"],"verbs":["delete"]}`},
+			want: "resources",
+		},
+		{
+			// k8sresource.Parse tolerates "apps/*" and returns a GVR whose
+			// Resource is literally "*" with a nil error, so this form
+			// must be refused too, not just the bare wildcard.
+			name: "a partial wildcard resource on a mutate rule",
+			args: []string{"--set-json", `mutate.rules[0]={"resources":["apps/*"],"verbs":["delete"]}`},
+			want: "resources",
+		},
+		{
+			// mutate.rules.verbs is a closed set (patch/delete/restart/
+			// scale/create); this asserts the schema pattern refuses an
+			// unsupported verb at the helm gate.
+			name: "an unsupported verb on a mutate rule",
+			args: []string{"--set-json", `mutate.rules[0]={"resources":["pods"],"verbs":["exec"]}`},
+			want: "verbs",
 		},
 	}
 
