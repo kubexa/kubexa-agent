@@ -37,6 +37,12 @@ type sessionSpec struct {
 // Session is one running console. The transport (attach.go) Attaches to
 // consume Output, Detaches when its stream drops, and the session keeps
 // running for resumeWindow with nobody attached.
+//
+// The ring is the only replay source. After Detach returns, Output holds
+// nothing; Replay is the sole source of anything produced before re-attach,
+// and it also empties Output, so a transport consumes Replay(replayFrom)
+// and then Output with no dedupe. Output's channel identity changes at
+// those two points: fetch it after Replay, not before.
 type Session struct {
 	spec sessionSpec
 	// target and ruleID are set by the Manager for the transport's log lines.
@@ -46,11 +52,16 @@ type Session struct {
 	stdinR *io.PipeReader
 	stdinW *io.PipeWriter
 	sizeQ  *sizeQueue
-	out    chan Frame
 
-	mu           sync.Mutex
-	attached     bool
-	detachedAt   time.Time
+	mu         sync.Mutex
+	attached   bool
+	detachedAt time.Time
+	// out is the live channel for the current attachment. Detach and Replay
+	// retire it (close outGen, swap in an empty one) so a writer blocked on
+	// the old channel moves on and nothing queued there is ever read; the
+	// ring already holds every such frame.
+	out          chan Frame
+	outGen       chan struct{}
 	lastStdinSeq uint64
 
 	done     chan struct{}
@@ -67,19 +78,39 @@ func newSession(spec sessionSpec) *Session {
 		stdinW: pw,
 		sizeQ:  newSizeQueue(),
 		out:    make(chan Frame, outputQueue),
+		outGen: make(chan struct{}),
 		done:   make(chan struct{}),
 	}
 }
 
-func (s *Session) ID() string            { return s.spec.id }
-func (s *Session) Output() <-chan Frame  { return s.out }
+func (s *Session) ID() string { return s.spec.id }
+
+// Output is the live channel of the current attachment; see the type's
+// doc comment for when it is replaced.
+func (s *Session) Output() <-chan Frame {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.out
+}
 func (s *Session) Done() <-chan struct{} { return s.done }
 func (s *Session) Exit() *agentv1.ExecExit {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.exit
 }
-func (s *Session) Replay(after uint64) ([]Frame, bool) { return s.spec.ring.since(after) }
+
+// Replay returns every retained frame with Seq > after, and whether older
+// ones were evicted. It is the attach-time sync point: under the same lock
+// the writer decides with, it retires Output, so a frame is either in the
+// returned slice or will arrive on the Output fetched afterwards -- never
+// both.
+func (s *Session) Replay(after uint64) ([]Frame, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	frames, gap := s.spec.ring.since(after)
+	s.retireOutputLocked()
+	return frames, gap
+}
 func (s *Session) LastStdinSeq() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -102,12 +133,24 @@ func (s *Session) Attach() {
 	s.mu.Unlock()
 }
 
-// Detach starts the resume window.
+// Detach starts the resume window. After it returns, Output holds nothing:
+// whatever was queued for the departed transport is still in the ring, and
+// Replay on re-attach is the sole source of it.
 func (s *Session) Detach() {
 	s.mu.Lock()
 	s.attached = false
 	s.detachedAt = time.Now()
+	s.retireOutputLocked()
 	s.mu.Unlock()
+}
+
+// retireOutputLocked swaps in an empty live channel. Closing outGen frees a
+// writer blocked on the old channel; a send that still lands there goes to
+// a channel nobody will ever read. Caller holds mu.
+func (s *Session) retireOutputLocked() {
+	close(s.outGen)
+	s.out = make(chan Frame, outputQueue)
+	s.outGen = make(chan struct{})
 }
 
 func (s *Session) WriteStdin(b []byte) error {
@@ -235,13 +278,19 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 		if n > MaxChunkBytes {
 			n = MaxChunkBytes
 		}
-		f := w.s.spec.ring.push(w.ch, p[:n])
+		// The ring push and the live-or-not decision sit under one lock with
+		// Replay and Detach, so each frame lands on exactly one side of
+		// those sync points. Only the send itself happens outside it: it
+		// may block (backpressure), and it blocks on the channel of THIS
+		// attachment, which retiring releases.
 		w.s.mu.Lock()
-		attached := w.s.attached
+		f := w.s.spec.ring.push(w.ch, p[:n])
+		attached, out, gen := w.s.attached, w.s.out, w.s.outGen
 		w.s.mu.Unlock()
 		if attached {
 			select {
-			case w.s.out <- f:
+			case out <- f:
+			case <-gen: // retired: the frame is reachable through Replay
 			case <-w.s.done:
 				return total, io.ErrClosedPipe
 			}
