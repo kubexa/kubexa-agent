@@ -190,3 +190,93 @@ func TestSessionResizeAfterCloseDoesNotPanic(t *testing.T) {
 	s.Resize(80, 24)
 	s.Resize(100, 40)
 }
+
+func joinChunks(frames []Frame) string {
+	var b strings.Builder
+	for _, f := range frames {
+		b.Write(f.Chunk)
+	}
+	return b.String()
+}
+
+func outputIsEmpty(t *testing.T, s *Session) {
+	t.Helper()
+	select {
+	case f := <-s.Output():
+		t.Fatalf("Output() still held seq %d %q", f.Seq, f.Chunk)
+	default:
+	}
+}
+
+// The ring is the only replay source. Output produced while attached but
+// never consumed must not survive a Detach: after re-attach the transport
+// takes Replay and then Output with no dedupe.
+func TestSessionDetachEmptiesOutput(t *testing.T) {
+	s, _ := startSession(t, time.Second)
+	s.Attach()
+	_ = s.WriteStdin([]byte("one\n"))
+	time.Sleep(50 * time.Millisecond)
+	_ = s.WriteStdin([]byte("two\n"))
+	time.Sleep(100 * time.Millisecond) // both echoes are queued in Output, unread
+	s.Detach()
+	outputIsEmpty(t, s)
+	s.Attach()
+	frames, gap := s.Replay(0)
+	if gap || len(frames) != 2 || frames[0].Seq != 1 || frames[1].Seq != 2 {
+		t.Fatalf("replay = %v gap=%v", frames, gap)
+	}
+	if got := joinChunks(frames); !strings.Contains(got, "echo:one") || !strings.Contains(got, "echo:two") {
+		t.Fatalf("replay lost output: %q", got)
+	}
+	outputIsEmpty(t, s)
+}
+
+// Replay is the attach-time sync point: whatever it returns is gone from
+// Output, and whatever lands after it arrives on Output alone.
+func TestSessionReplayResetsOutput(t *testing.T) {
+	s, _ := startSession(t, time.Second)
+	s.Attach()
+	_ = s.WriteStdin([]byte("one\n"))
+	time.Sleep(100 * time.Millisecond)
+	frames, gap := s.Replay(0)
+	if gap || !strings.Contains(joinChunks(frames), "echo:one") {
+		t.Fatalf("replay = %v gap=%v", frames, gap)
+	}
+	outputIsEmpty(t, s)
+	_ = s.WriteStdin([]byte("two\n"))
+	collect(t, s, "echo:two")
+}
+
+// A writer blocked on a full Output with nobody reading must not stall the
+// process through the whole resume window: Detach releases it, and the
+// frames stay reachable through Replay.
+func TestSessionDetachReleasesBlockedWriter(t *testing.T) {
+	s, _ := startSession(t, time.Second)
+	s.Attach()
+	w := &chunkWriter{s: s, ch: agentv1.ExecChannel_EXEC_CHANNEL_STDOUT}
+	wrote := make(chan struct{})
+	go func() {
+		defer close(wrote)
+		for i := 0; i < outputQueue+1; i++ {
+			if _, err := w.Write([]byte("x")); err != nil {
+				t.Errorf("write %d: %v", i, err)
+				return
+			}
+		}
+	}()
+	select {
+	case <-wrote:
+		t.Fatal("writer did not block on a full Output")
+	case <-time.After(100 * time.Millisecond):
+	}
+	s.Detach()
+	select {
+	case <-wrote:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Detach did not release the blocked writer")
+	}
+	if frames, gap := s.Replay(0); gap || len(frames) != outputQueue+1 {
+		t.Fatalf("replay has %d frames gap=%v, want %d", len(frames), gap, outputQueue+1)
+	}
+	outputIsEmpty(t, s)
+}
