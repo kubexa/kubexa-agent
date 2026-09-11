@@ -2,6 +2,28 @@ apiVersion: v2
 name: kubexa-agent
 description: Kubexa agent — collects Kubernetes logs, state, and metrics and streams them to the Kubexa gateway.
 type: application
+# 0.7.9 moves the image to 0.7.6: the agent answers mutation requests --
+# patch, delete, restart, scale and create -- over the same stream it already
+# streams telemetry on. Two independent gates decide every one, and both ship
+# OFF:
+#   - rbac.write grants the ServiceAccount the write verbs and the scale
+#     subresource. It is NOT derived from mutate.rules, because the agent
+#     config can be mounted from a file this chart never sees; a derived Role
+#     would then be narrow while the policy said yes. Off: every write is
+#     RBAC_DENIED by the customer's own API server.
+#   - mutate.enabled + mutate.rules is the owner's policy, passed through
+#     verbatim (snake_case, the agent's keys). A verb outside the rules is
+#     POLICY_DENIED before anything touches the network. verbs is REQUIRED
+#     on every rule and an empty list grants nothing -- the opposite of
+#     query.rules -- and no resource entry may contain "*" in any form.
+# The platform tells the two refusals apart, which is why they stay two
+# flags. The handshake now advertises the capability, so a gateway older than
+# the feature ignores it and a newer gateway refuses a mutation against an
+# agent below 0.7.6 with an "upgrade the agent" answer, never a timeout.
+# Also in 0.7.6: a rule's names: allowlist is consulted for an empty name too
+# (before, an empty name skipped it and only client-go's own "name is
+# required" stood in the way).
+#
 # 0.7.6 changes no image and one template line's worth of nothing: it finishes
 # values.schema.json. 0.7.5 described the collect.* passthrough lists and the
 # chart keys immediately around them; everything else that lands in the agent's
@@ -113,8 +135,8 @@ type: application
 # install order constraint against the gateway: an older gateway ignores the
 # new heartbeat field, and a newer gateway reads its ABSENCE as "this agent
 # does not report scrape health" rather than as "everything is fine".
-version: 0.7.8
-appVersion: "0.7.5"
+version: 0.7.9
+appVersion: "0.7.6"
 keywords:
   - kubexa
   - observability
