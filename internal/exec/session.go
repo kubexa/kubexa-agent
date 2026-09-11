@@ -191,19 +191,22 @@ func (s *Session) finish(e *agentv1.ExecExit) {
 // resume-window and max-session timers.
 func (s *Session) run(ctx context.Context, ex remotecommand.Executor) {
 	ctx, cancel := context.WithTimeout(ctx, s.spec.maxSession)
-	s.mu.Lock()
-	s.cancel = cancel
-	s.mu.Unlock()
 	defer cancel()
 
-	// Closed before the process started (the transport can Close between
-	// Open returning and this goroutine being scheduled): finish already
-	// recorded the reason and found no cancel to call, so do not dial.
-	select {
-	case <-s.done:
+	// Close can run before this goroutine is scheduled (the transport may
+	// Close between Open returning and here). The decision is made under
+	// the lock finish sets exit under, so exactly one of two things holds:
+	// finish saw this cancel and called it, or run sees exit and never
+	// dials. Checking done instead would leave a window -- finish closes
+	// done after releasing the lock -- in which a stream nobody cancels
+	// holds the session slot and the SPDY connection until max_session_sec.
+	s.mu.Lock()
+	if s.exit != nil {
+		s.mu.Unlock()
 		return
-	default:
 	}
+	s.cancel = cancel
+	s.mu.Unlock()
 
 	// Resume-window watchdog.
 	go func() {
