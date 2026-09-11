@@ -280,3 +280,60 @@ func TestSessionDetachReleasesBlockedWriter(t *testing.T) {
 	}
 	outputIsEmpty(t, s)
 }
+
+// recordingExecutor notes whether a stream was ever started.
+type recordingExecutor struct {
+	called chan struct{}
+}
+
+func (r *recordingExecutor) Stream(remotecommand.StreamOptions) error { panic("unused") }
+func (r *recordingExecutor) StreamWithContext(ctx context.Context, _ remotecommand.StreamOptions) error {
+	close(r.called)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// Close can run before the Manager's run goroutine is scheduled. run must
+// then never dial: a stream nobody cancels would hold the session slot and
+// the SPDY connection until max_session_sec.
+func TestSessionCloseBeforeRunNeverDials(t *testing.T) {
+	s := newSession(sessionSpec{
+		id: "s1", tty: true, resumeWindow: time.Second, maxSession: time.Minute, ring: newRing(RingBytes),
+	})
+	s.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "gone before start")
+	rec := &recordingExecutor{called: make(chan struct{})}
+	s.run(context.Background(), rec) // synchronous: returns without streaming
+	select {
+	case <-rec.called:
+		t.Fatal("run dialled after Close")
+	default:
+	}
+	if e := s.Exit(); e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED || e.GetMessage() != "gone before start" {
+		t.Fatalf("exit = %v", e)
+	}
+}
+
+// The window the sequential test cannot reach: finish has set exit and
+// released the lock but not yet closed done. run must decide on exit, under
+// that lock, or it dials a stream nobody will cancel.
+func TestSessionRunSeesFinishMidFlight(t *testing.T) {
+	s := newSession(sessionSpec{
+		id: "s1", tty: true, resumeWindow: time.Second, maxSession: time.Minute, ring: newRing(RingBytes),
+	})
+	s.mu.Lock()
+	s.exit = refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "mid-flight") // finish, first half
+	s.mu.Unlock()
+	rec := &recordingExecutor{called: make(chan struct{})}
+	ran := make(chan struct{})
+	go func() { defer close(ran); s.run(context.Background(), rec) }()
+	select {
+	case <-ran:
+	case <-rec.called:
+		s.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "") // release the goroutine before failing
+		<-ran
+		t.Fatal("run dialled although finish had already recorded the exit")
+	case <-time.After(2 * time.Second):
+		t.Fatal("run neither returned nor dialled")
+	}
+	s.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "") // finish, second half
+}
