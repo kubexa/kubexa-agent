@@ -166,7 +166,14 @@ func (p *Policy) Decide(ref Ref, verb Verb, namespace, name string) Decision {
 		if !r.matchesNamespace(namespace) {
 			continue
 		}
-		if name != "" && !matchesPattern(name, r.names) {
+		// Consulted for every name, empty included: matchesPattern returns
+		// true for an empty pattern list, so a rule with no names: is
+		// unaffected, but a rule that restricts names now also refuses an
+		// empty one instead of treating it as an implicit match-all. Every
+		// verb reaches here with a name -- create's is decoded from its
+		// payload and refused earlier if empty (see the executor) -- so
+		// there is no legitimate request this can wrongly deny.
+		if !matchesPattern(name, r.names) {
 			continue
 		}
 		if !r.verbs[verb] {

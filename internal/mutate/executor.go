@@ -132,13 +132,12 @@ func (e *Executor) execute(ctx context.Context, req *agentv1.MutationRequest) *a
 
 	// CREATE is decoded before the policy check, not after: the object's
 	// name lives in the body, not on the wire (req.Name is typically empty
-	// for a create), and Decide's name-pattern matching only runs when it is
-	// given a non-empty name. Deciding on the empty wire name first would
-	// silently bypass a rule's `names:` filter for every create -- the same
-	// class of "matched more than the owner intended" bug the query and
-	// config packages already guard against for wildcards. Decoding is pure
-	// parsing, not a network call, so doing it before the gate costs nothing
-	// a well-formed request would not pay anyway.
+	// for a create). Deciding on the empty wire name first would ask
+	// Decide's `names:` filter about a name the owner never wrote a rule
+	// against, refusing or granting on the wrong string instead of the one
+	// actually being created. Decoding is pure parsing, not a network call,
+	// so doing it before the gate costs nothing a well-formed request would
+	// not pay anyway.
 	name := req.GetName()
 	var createObj *unstructured.Unstructured
 	if verb == policy.VerbCreate {
@@ -147,6 +146,13 @@ func (e *Executor) execute(ctx context.Context, req *agentv1.MutationRequest) *a
 			e.metrics.observe(string(verb), unknownResource, "invalid", 0, 0)
 			return invalidResult(fmt.Sprintf("decode create payload: %v", verr))
 		}
+		// Refused here, not left for Decide: Decide's `names:` allowlist now
+		// applies to every name it is given, empty included, so an
+		// empty-named create would already be denied by any rule that
+		// restricts names -- but denied with a policy-shaped reason for a
+		// request that is actually malformed. This check makes the real
+		// problem explicit and guarantees every verb reaches Decide with a
+		// name.
 		if obj.GetName() == "" {
 			e.metrics.observe(string(verb), unknownResource, "invalid", 0, 0)
 			return invalidResult("create payload metadata.name must not be empty")
