@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,7 +16,13 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
+	kexec "k8s.io/client-go/util/exec"
 
+	"github.com/kubexa/kubexa-agent/internal/exec/policy"
+	"github.com/kubexa/kubexa-agent/internal/k8s"
 	"github.com/kubexa/kubexa-agent/pkg/config"
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
@@ -318,4 +325,92 @@ func TestTransportSendsRefusalAsExit(t *testing.T) {
 		t.Fatalf("exit = %v, want POLICY_DENIED", e)
 	}
 	waitEnded(t, call)
+}
+
+// burstThenExitExecutor reads the first line, floods stdout with more
+// frames than outputQueue holds (so the pump is still draining them when
+// the process ends), then reads exactly ONE byte of the next stdin frame --
+// which synchronises on that frame's WriteStdin being inside the unbuffered
+// pipe -- and returns exit 3 with the rest of the write still blocked
+// there. finish then closes the pipe under the blocked write, so the write's
+// failure and the session's end coincide by construction, while the pump is
+// mid-drain and its next select sees output, Done and any stream error
+// ready together.
+type burstThenExitExecutor struct{ frames int }
+
+func (burstThenExitExecutor) Stream(remotecommand.StreamOptions) error { panic("unused") }
+func (e burstThenExitExecutor) StreamWithContext(_ context.Context, o remotecommand.StreamOptions) error {
+	buf := make([]byte, 64)
+	if _, err := o.Stdin.Read(buf); err != nil {
+		return err
+	}
+	for i := 0; i < e.frames; i++ {
+		if _, err := o.Stdout.Write([]byte("x")); err != nil {
+			return err
+		}
+	}
+	if _, err := o.Stdin.Read(buf[:1]); err != nil {
+		return err
+	}
+	return kexec.CodeExitError{Err: io.EOF, Code: 3}
+}
+
+// TestTransportSendsExitWhenStdinWriteFailsAtSessionEnd pins that a stdin
+// chunk in flight as the process dies does not cost the gateway the exit
+// frame: the WriteStdin failure is the session ending, not the stream
+// breaking, and must never be reported as the latter. Every output frame
+// produced before the exit must precede it on the stream.
+func TestTransportSendsExitWhenStdinWriteFailsAtSessionEnd(t *testing.T) {
+	const burst = outputQueue + 64
+	srv := &fakeExecServer{}
+	dial := startExecServer(t, srv)
+
+	c := &config.Config{}
+	on := true
+	c.Exec.Pod.Enabled = &on
+	c.Exec.Pod.Rules = devRule()
+	pol, err := policy.Compile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := New(Options{
+		Policy:   pol,
+		Clients:  k8s.ExecClients{Clientset: fake.NewSimpleClientset(webPod()), REST: &rest.Config{Host: "https://example"}},
+		Settings: c.ExecPodSettings(),
+		newExecutor: func(*rest.Config, *url.URL) (remotecommand.Executor, error) {
+			return burstThenExitExecutor{frames: burst}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := NewTransport(m, dial, Identity{ClusterID: "c1", TenantToken: "tok"}, nil)
+	tr.Open(context.Background(), open("dev", "web-1", ""))
+
+	call := waitCall(t, srv)
+	pushStdin(call, 1, "go\n")
+	pushStdin(call, 2, "more\n")
+
+	var data int
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case msg := <-call.fromAgent:
+			if e := msg.GetExit(); e != nil {
+				if e.GetCode() != 3 || e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_UNSPECIFIED {
+					t.Fatalf("exit = %v, want code 3", e)
+				}
+				if data != burst {
+					t.Fatalf("%d output frames preceded the exit, want %d", data, burst)
+				}
+				waitEnded(t, call)
+				return
+			}
+			if msg.GetData() != nil {
+				data++
+			}
+		case <-deadline:
+			t.Fatalf("no ExecExit arrived; %d output frames seen", data)
+		}
+	}
 }
