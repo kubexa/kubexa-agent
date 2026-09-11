@@ -32,6 +32,13 @@
           ],
           "description": "Grants the ServiceAccount patch/update/delete/create and the scale subresource. NOT derived from mutate.rules -- see the comment beside rbac.write in values.yaml."
         },
+        "exec": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Grants the ServiceAccount pods get and pods/exec create. NOT derived from exec.pod -- see the comment beside rbac.exec in values.yaml."
+        },
         "extraRules": {
           "type": [
             "array",
@@ -1169,6 +1176,126 @@
                   "pattern": "^\\s*([Pp][Aa][Tt][Cc][Hh]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Rr][Ee][Ss][Tt][Aa][Rr][Tt]|[Ss][Cc][Aa][Ll][Ee]|[Cc][Rr][Ee][Aa][Tt][Ee])\\s*$"
                 }
               }
+            }
+          }
+        }
+      }
+    },
+    "exec": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "pod": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": [
+                  "null",
+                  "object"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ]
+                  },
+                  "namespace": {
+                    "type": [
+                      "boolean",
+                      "integer",
+                      "null",
+                      "number",
+                      "string"
+                    ],
+                    "pattern": "^[^*]*\\*?$"
+                  },
+                  "names": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ],
+                      "pattern": "^[^*]*\\*?$"
+                    }
+                  },
+                  "containers": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "boolean",
+                        "integer",
+                        "null",
+                        "number",
+                        "string"
+                      ],
+                      "pattern": "^[^*]*\\*?$"
+                    }
+                  }
+                }
+              }
+            },
+            "defaultShell": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "null",
+                  "number",
+                  "string"
+                ]
+              }
+            },
+            "maxSessionSec": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maxSessions": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "resumeWindowSec": {
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           }
         }

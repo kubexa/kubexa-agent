@@ -33,6 +33,11 @@ rbac:
   # then render a narrow Role while the policy said yes. Same reasoning as
   # rbac.readAll.
   write: false
+  # exec grants the ServiceAccount `create` on pods/exec (and `get` on pods,
+  # which the console needs to resolve the default container). NOT derived
+  # from exec.pod.rules, for the reason rbac.write and rbac.readAll give:
+  # the agent config can be mounted from a file this chart never sees.
+  exec: false
   # Extra ClusterRole rules appended to the generated role.
   extraRules: []
   # The generated ClusterRole grants read access to the resource block below
@@ -374,6 +379,30 @@ mutate:
   #    resources: [deployments, statefulsets]
   #    names: ["api-*"]
   #    verbs: [patch, restart, scale]
+
+# Interactive console sessions the Kubexa platform may open in this cluster.
+# Disabled by default. Enabling it here is NOT enough: the ServiceAccount also
+# needs pods/exec, which is rbac.exec above -- deliberately a separate flag.
+exec:
+  pod:
+    enabled: false
+    # Rules pass through verbatim: AGENT snake_case keys. Every omitted field
+    # matches everything; a rule with no fields permits a shell in any
+    # container the ServiceAccount can reach.
+    rules: []
+    #  - id: dev
+    #    namespace: dev-*
+    #    names: ["*"]
+    #    containers: ["app"]
+    # What runs when the platform sends no command.
+    defaultShell: ["/bin/sh"]
+    # Hard stop for one session, seconds. [10, 86400]
+    maxSessionSec: 1800
+    # Concurrent sessions on this agent. [1, 64]
+    maxSessions: 4
+    # How long a session stays alive with no attached stream so a proxy cut
+    # resumes rather than ends the shell. [0, 600]
+    resumeWindowSec: 60
 
 # Byte counts are plain integers -- a Kubernetes quantity ("512Mi") is refused,
 # because the agent's loader reads these as numbers, not as quantities.

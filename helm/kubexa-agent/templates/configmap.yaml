@@ -183,6 +183,21 @@ data:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 
+    exec:
+      pod:
+        enabled: {{ .Values.exec.pod.enabled }}
+        {{- with .Values.exec.pod.rules }}
+        rules:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.exec.pod.defaultShell }}
+        default_shell:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        max_session_sec: {{ .Values.exec.pod.maxSessionSec }}
+        max_sessions: {{ .Values.exec.pod.maxSessions }}
+        resume_window_sec: {{ .Values.exec.pod.resumeWindowSec }}
+
     buffer:
       max_memory_bytes: {{ .Values.buffer.maxMemoryBytes }}
       spill_dir: {{ .Values.buffer.spillDir | quote }}

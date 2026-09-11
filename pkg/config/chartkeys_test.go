@@ -139,6 +139,7 @@ var scalarPassthroughs = map[string]bool{
 	"collect.metrics.cadvisor.metricDenylist":          true,
 	"collect.metrics.kubeStateMetrics.metricAllowlist": true,
 	"collect.metrics.kubeStateMetrics.metricDenylist":  true,
+	"exec.pod.defaultShell":                            true,
 }
 
 var toYamlValue = regexp.MustCompile(`\.Values\.([A-Za-z0-9_.]+)`)
