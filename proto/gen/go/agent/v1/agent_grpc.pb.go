@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AgentService_Connect_FullMethodName = "/agent.v1.AgentService/Connect"
+	AgentService_Connect_FullMethodName     = "/agent.v1.AgentService/Connect"
+	AgentService_ExecSession_FullMethodName = "/agent.v1.AgentService/ExecSession"
 )
 
 // AgentServiceClient is the client API for AgentService service.
@@ -30,6 +31,11 @@ type AgentServiceClient interface {
 	// Agent → Gateway: log/state/metric verisi
 	// Gateway → Agent: config update, ack, backpressure, shutdown
 	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentMessage, GatewayMessage], error)
+	// ExecSession carries one interactive console session's bytes. The agent
+	// opens it ONLY after receiving ExecOpen on Connect, and the first frame
+	// is always ExecAttach. Data never rides Connect: one oversized or slow
+	// exec frame must not be able to tear down telemetry.
+	ExecSession(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ExecClientMessage, ExecServerMessage], error)
 }
 
 type agentServiceClient struct {
@@ -53,6 +59,19 @@ func (c *agentServiceClient) Connect(ctx context.Context, opts ...grpc.CallOptio
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AgentService_ConnectClient = grpc.BidiStreamingClient[AgentMessage, GatewayMessage]
 
+func (c *agentServiceClient) ExecSession(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ExecClientMessage, ExecServerMessage], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &AgentService_ServiceDesc.Streams[1], AgentService_ExecSession_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ExecClientMessage, ExecServerMessage]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AgentService_ExecSessionClient = grpc.BidiStreamingClient[ExecClientMessage, ExecServerMessage]
+
 // AgentServiceServer is the server API for AgentService service.
 // All implementations must embed UnimplementedAgentServiceServer
 // for forward compatibility.
@@ -61,6 +80,11 @@ type AgentServiceServer interface {
 	// Agent → Gateway: log/state/metric verisi
 	// Gateway → Agent: config update, ack, backpressure, shutdown
 	Connect(grpc.BidiStreamingServer[AgentMessage, GatewayMessage]) error
+	// ExecSession carries one interactive console session's bytes. The agent
+	// opens it ONLY after receiving ExecOpen on Connect, and the first frame
+	// is always ExecAttach. Data never rides Connect: one oversized or slow
+	// exec frame must not be able to tear down telemetry.
+	ExecSession(grpc.BidiStreamingServer[ExecClientMessage, ExecServerMessage]) error
 	mustEmbedUnimplementedAgentServiceServer()
 }
 
@@ -73,6 +97,9 @@ type UnimplementedAgentServiceServer struct{}
 
 func (UnimplementedAgentServiceServer) Connect(grpc.BidiStreamingServer[AgentMessage, GatewayMessage]) error {
 	return status.Error(codes.Unimplemented, "method Connect not implemented")
+}
+func (UnimplementedAgentServiceServer) ExecSession(grpc.BidiStreamingServer[ExecClientMessage, ExecServerMessage]) error {
+	return status.Error(codes.Unimplemented, "method ExecSession not implemented")
 }
 func (UnimplementedAgentServiceServer) mustEmbedUnimplementedAgentServiceServer() {}
 func (UnimplementedAgentServiceServer) testEmbeddedByValue()                      {}
@@ -102,6 +129,13 @@ func _AgentService_Connect_Handler(srv interface{}, stream grpc.ServerStream) er
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AgentService_ConnectServer = grpc.BidiStreamingServer[AgentMessage, GatewayMessage]
 
+func _AgentService_ExecSession_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(AgentServiceServer).ExecSession(&grpc.GenericServerStream[ExecClientMessage, ExecServerMessage]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AgentService_ExecSessionServer = grpc.BidiStreamingServer[ExecClientMessage, ExecServerMessage]
+
 // AgentService_ServiceDesc is the grpc.ServiceDesc for AgentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -113,6 +147,12 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "Connect",
 			Handler:       _AgentService_Connect_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "ExecSession",
+			Handler:       _AgentService_ExecSession_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},

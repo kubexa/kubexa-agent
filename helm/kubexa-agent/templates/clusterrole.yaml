@@ -250,6 +250,19 @@ rules:
     verbs: ["update"]
   {{- end }}
 
+  {{- if .Values.rbac.exec }}
+  # rbac.exec grants exactly what a pod console needs and nothing the read
+  # block does not already say: pods get (resolve the default container)
+  # and pods/exec create. Gated on rbac.exec ALONE, never on exec.pod, for
+  # the reason rbac.write gives above.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  {{- end }}
+
   {{- with .Values.rbac.extraRules }}
   {{- toYaml . | nindent 2 }}
   {{- end }}
