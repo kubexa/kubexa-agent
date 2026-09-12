@@ -10,8 +10,9 @@ import (
 // inherits from query, collect or mutate, and every section defaults to off.
 type ExecConfig struct {
 	Pod PodExecConfig `yaml:"pod"`
-	// Node is phase C. The key is reserved here so a phase-C config does not
-	// fail strict loading on a phase-B agent; it is not read.
+	// Node is phase C. There is no field yet: a phase-C `exec.node` key on a
+	// phase-B agent surfaces as an advisory UnknownKeys warning at load, not
+	// an error, and is not read.
 }
 
 // PodExecConfig is the `exec.pod` section.
@@ -27,8 +28,9 @@ type PodExecConfig struct {
 	// MaxSessions caps concurrent sessions on this agent. Default 4, [1, 64].
 	MaxSessions int `yaml:"max_sessions,omitempty"`
 	// ResumeWindowSec is how long a session is kept alive with no attached
-	// stream, so a proxy cut resumes instead of killing the shell.
-	// Default 60, [0, 600]. 0 means a dropped stream ends the session.
+	// stream, so a proxy cut resumes instead of killing the shell. Unset or
+	// 0 means the default (60); a negative value means no resume (a dropped
+	// stream ends the session); at most 600. See ExecPodSettings.
 	ResumeWindowSec int `yaml:"resume_window_sec,omitempty"`
 }
 

@@ -1283,19 +1283,25 @@
               "type": [
                 "integer",
                 "null"
-              ]
+              ],
+              "minimum": 10,
+              "maximum": 86400
             },
             "maxSessions": {
               "type": [
                 "integer",
                 "null"
-              ]
+              ],
+              "minimum": 1,
+              "maximum": 64
             },
             "resumeWindowSec": {
               "type": [
                 "integer",
                 "null"
-              ]
+              ],
+              "minimum": -1,
+              "maximum": 600
             }
           }
         }
