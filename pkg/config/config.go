@@ -39,6 +39,7 @@ type Config struct {
 	Collect       CollectConfig       `yaml:"collect"`
 	Query         QueryConfig         `yaml:"query"`
 	Mutate        MutateConfig        `yaml:"mutate"`
+	Exec          ExecConfig          `yaml:"exec"`
 	Buffer        BufferConfig        `yaml:"buffer"`
 	Observability ObservabilityConfig `yaml:"observability"`
 	Log           LogConfig           `yaml:"log"`
@@ -637,6 +638,7 @@ func (c *Config) Validate() error {
 	violations = append(violations, c.Collect.Metrics.validate()...)
 	violations = append(violations, c.validateQuery()...)
 	violations = append(violations, c.validateMutate()...)
+	violations = append(violations, c.validateExec()...)
 
 	if len(violations) == 0 {
 		return nil

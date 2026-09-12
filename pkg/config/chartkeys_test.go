@@ -37,6 +37,7 @@ func rulePaths() map[string]reflect.Type {
 		"collect.metrics.customEndpoints": reflect.TypeOf(config.MetricEndpointConfig{}),
 		"query.rules":                     reflect.TypeOf(config.QueryRule{}),
 		"mutate.rules":                    reflect.TypeOf(config.MutateRule{}),
+		"exec.pod.rules":                  reflect.TypeOf(config.PodExecRule{}),
 	}
 }
 
@@ -138,6 +139,7 @@ var scalarPassthroughs = map[string]bool{
 	"collect.metrics.cadvisor.metricDenylist":          true,
 	"collect.metrics.kubeStateMetrics.metricAllowlist": true,
 	"collect.metrics.kubeStateMetrics.metricDenylist":  true,
+	"exec.pod.defaultShell":                            true,
 }
 
 var toYamlValue = regexp.MustCompile(`\.Values\.([A-Za-z0-9_.]+)`)
