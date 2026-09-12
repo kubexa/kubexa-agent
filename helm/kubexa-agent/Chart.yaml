@@ -2,6 +2,25 @@ apiVersion: v2
 name: kubexa-agent
 description: Kubexa agent — collects Kubernetes logs, state, and metrics and streams them to the Kubexa gateway.
 type: application
+# 0.8.0 moves the image to 0.8.0: the agent answers pod console sessions over
+# a stream of its own -- opening a shell in a running container, resizing it,
+# and resuming it across a proxy cut inside resume_window_sec. Two gates,
+# both OFF:
+#   - rbac.exec grants the ServiceAccount exactly what a console needs:
+#     pods get (to resolve the default container) and pods/exec create (to
+#     open the session). It is NOT derived from exec.pod, the same reasoning
+#     as rbac.write and rbac.readAll: the agent config can be mounted from a
+#     file this chart never sees, so a derived grant would render a narrow
+#     Role while the policy said yes.
+#   - exec.pod.enabled + exec.pod.rules is the owner's policy: which
+#     namespaces, pod names and containers a session may open, passed
+#     through verbatim (snake_case, the agent's keys). A rule with no fields
+#     matches everything -- unlike mutate.rules, there is no separate empty-
+#     grants-nothing convention here.
+# Off by default in both places: rbac.exec absent leaves every exec_open
+# RBAC_DENIED, and exec.pod.enabled: false refuses it before that, at the
+# agent's own policy layer.
+#
 # 0.7.9 moves the image to 0.7.6: the agent answers mutation requests --
 # patch, delete, restart, scale and create -- over the same stream it already
 # streams telemetry on. Two independent gates decide every one, and both ship
@@ -135,8 +154,8 @@ type: application
 # install order constraint against the gateway: an older gateway ignores the
 # new heartbeat field, and a newer gateway reads its ABSENCE as "this agent
 # does not report scrape health" rather than as "everything is fine".
-version: 0.7.9
-appVersion: "0.7.6"
+version: 0.8.0
+appVersion: "0.8.0"
 keywords:
   - kubexa
   - observability

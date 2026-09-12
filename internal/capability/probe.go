@@ -39,6 +39,18 @@ type Capability struct {
 	PolicyDelete bool
 	PolicyCreate bool
 	PolicyScale  bool
+
+	// CanExec is a SelfSubjectAccessReview verdict for the pods/exec
+	// subresource's "create" verb, like CanPatch/CanDelete/CanCreate above.
+	// It is probed only for the core-group "pods" entry, and only when the
+	// exec policy allows a console on at least one pod -- see probeExec --
+	// so every other entry (including "nodes", which is Phase C) leaves this
+	// at its zero value, false.
+	CanExec bool
+	// PolicyExec comes from the agent's own exec.pod configuration,
+	// mirroring PolicyPatch above. It is set only for the "pods" entry, for
+	// the same reason CanExec is.
+	PolicyExec bool
 }
 
 // MutatePolicySource reports the agent's configured mutate policy per
@@ -50,6 +62,16 @@ type Capability struct {
 // PolicySource's doc comment gives for internal/query/policy.
 type MutatePolicySource interface {
 	AllowsAnyWrite(group, version, resource string) (patch, delete, create, scale bool)
+}
+
+// ExecPolicySource reports whether the agent's pod console configuration
+// permits a session on any pod at all. It is a THIRD independent policy
+// source alongside PolicySource and MutatePolicySource above, for the same
+// reason MutatePolicySource's doc comment gives: live query, mutation, and
+// exec are each configured (or not) independently, and a primitive-only
+// method keeps this package independent of internal/exec/policy.
+type ExecPolicySource interface {
+	AllowsAnyPod() bool
 }
 
 const defaultProbeWorkers = 8
@@ -65,13 +87,16 @@ const defaultProbeWorkers = 8
 // are not symmetric — a wrong "allowed" surfaces as an error the user can
 // report, while a wrong "denied" makes the resource vanish.
 // mutatePolicy is nil when the mutate section is disabled, in which case no
-// write verb is ever probed -- see probeWrites.
+// write verb is ever probed -- see probeWrites. execPolicy is nil the same
+// way when exec.pod is disabled, in which case no exec verb is ever probed
+// -- see probeExec.
 func Probe(
 	ctx context.Context,
 	authz authzv1client.AuthorizationV1Interface,
 	gvrs []GVR,
 	workers int,
 	mutatePolicy MutatePolicySource,
+	execPolicy ExecPolicySource,
 ) []Capability {
 	if workers <= 0 {
 		workers = defaultProbeWorkers
@@ -98,7 +123,11 @@ func Probe(
 			// paths -- they must not also erase what was just probed here.
 			probeWrites(ctx, authz, g, mutatePolicy, &c)
 
-			canList, listErr := allowed(ctx, authz, g, "list")
+			// Exec is an independent fact from list/watch too, for the same
+			// reason probeWrites is called here rather than nested below.
+			probeExec(ctx, authz, g, execPolicy, &c)
+
+			canList, listErr := allowed(ctx, authz, g, "", "list")
 			if listErr != nil {
 				c.ProbeFailed = true
 				c.CanList = false
@@ -120,7 +149,7 @@ func Probe(
 				return
 			}
 
-			canWatch, watchErr := allowed(ctx, authz, g, "watch")
+			canWatch, watchErr := allowed(ctx, authz, g, "", "watch")
 			if watchErr != nil {
 				// The list answer is real, but reporting it alongside a
 				// defaulted canWatch=false would silently downgrade a
@@ -192,21 +221,65 @@ func probeWrites(
 	// conflating a write-probe error into that same flag would make a
 	// transient hiccup on "create" silently blank an otherwise-good
 	// list/watch answer for the same entry.
-	if v, err := allowed(ctx, authz, g, "patch"); err == nil {
+	if v, err := allowed(ctx, authz, g, "", "patch"); err == nil {
 		c.CanPatch = v
 	}
-	if v, err := allowed(ctx, authz, g, "delete"); err == nil {
+	if v, err := allowed(ctx, authz, g, "", "delete"); err == nil {
 		c.CanDelete = v
 	}
-	if v, err := allowed(ctx, authz, g, "create"); err == nil {
+	if v, err := allowed(ctx, authz, g, "", "create"); err == nil {
 		c.CanCreate = v
 	}
 }
 
+// probeExec fills c's exec can_exec/policy_exec fields. Exec is scoped to
+// the core-group "pods" entry only -- "nodes" is Phase C, and every other
+// GVR is left with CanExec/PolicyExec at their zero value, false, the same
+// answer an agent without this feature gives.
+//
+// policy_exec comes straight from the exec policy. can_exec is only probed
+// -- issuing one SelfSubjectAccessReview for the pods/exec subresource's
+// "create" verb -- when the policy allows a console on at least one pod,
+// mirroring probeWrites's own cost-bounding gate: an unconditional probe on
+// every GVR would spend an SSAR nothing needs, but here the set this can
+// ever apply to is exactly one entry, "pods", so the gate also keeps the
+// probe from firing when exec.pod is configured off.
+//
+// execPolicy is nil when exec.pod is disabled, in which case this entirely
+// skips, the same way probeWrites skips on a nil mutatePolicy.
+func probeExec(
+	ctx context.Context,
+	authz authzv1client.AuthorizationV1Interface,
+	g GVR,
+	execPolicy ExecPolicySource,
+	c *Capability,
+) {
+	if g.Group != "" || g.Resource != "pods" {
+		return
+	}
+	if execPolicy == nil {
+		return
+	}
+	c.PolicyExec = execPolicy.AllowsAnyPod()
+	if !c.PolicyExec {
+		return
+	}
+
+	// A failed SSAR here is left as an unprobed "false", for the same reason
+	// probeWrites's own comment gives for its write verbs.
+	if v, err := allowed(ctx, authz, g, "exec", "create"); err == nil {
+		c.CanExec = v
+	}
+}
+
+// subresource is empty for every call site except probeExec's: an empty
+// Subresource on ResourceAttributes means the top-level resource itself,
+// exactly matching every pre-existing call's behaviour.
 func allowed(
 	ctx context.Context,
 	authz authzv1client.AuthorizationV1Interface,
 	g GVR,
+	subresource string,
 	verb string,
 ) (bool, error) {
 	review := &authv1.SelfSubjectAccessReview{
@@ -214,11 +287,12 @@ func allowed(
 			ResourceAttributes: &authv1.ResourceAttributes{
 				// Empty namespace means "in every namespace", which matches how
 				// the agent reads: cluster-wide informers, not per-namespace.
-				Namespace: metav1.NamespaceAll,
-				Group:     g.Group,
-				Version:   g.Version,
-				Resource:  g.Resource,
-				Verb:      verb,
+				Namespace:   metav1.NamespaceAll,
+				Group:       g.Group,
+				Version:     g.Version,
+				Resource:    g.Resource,
+				Subresource: subresource,
+				Verb:        verb,
 			},
 		},
 	}

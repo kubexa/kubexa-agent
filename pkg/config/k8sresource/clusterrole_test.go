@@ -375,6 +375,95 @@ func writeBlock(t *testing.T) string {
 	return chart[start : start+end]
 }
 
+// execBlock returns the text of the {{- if .Values.rbac.exec }} ... {{- end }}
+// block in the ClusterRole template.
+func execBlock(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "..", "helm", "kubexa-agent", "templates", "clusterrole.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	chart := string(raw)
+
+	start := strings.Index(chart, "{{- if .Values.rbac.exec }}")
+	if start < 0 {
+		t.Fatal("no rbac.exec block in the ClusterRole")
+	}
+	end := strings.Index(chart[start:], "{{- end }}")
+	if end < 0 {
+		t.Fatal("the rbac.exec block is not closed")
+	}
+	return chart[start : start+end]
+}
+
+// rbac.exec must gate the pod-console rules on its own -- and on nothing
+// else. In particular it must NOT be derived from exec.pod (enabled or
+// rules): the agent config can be mounted from a file this chart never sees,
+// so a template that derived the grant from exec.pod would render a narrow
+// (or empty) Role while the policy said yes. Same reasoning as rbac.write
+// and rbac.readAll.
+func TestClusterRoleExecGateIsRbacExecOnly(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "helm", "kubexa-agent", "templates", "clusterrole.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	chart := string(raw)
+
+	idx := strings.Index(chart, `resources: ["pods/exec"]`)
+	if idx < 0 {
+		t.Fatal(`no pods/exec rule in the ClusterRole`)
+	}
+	// The {{- if }} immediately above the rule is the one that gates it. Only
+	// the directive LINE is checked, not the whole comment block that
+	// follows it -- that comment legitimately explains the gate in prose
+	// ("never on exec.pod, for the reason rbac.write gives above"), which
+	// would otherwise trip a naive substring check on the whole block.
+	head := chart[:idx]
+	gate := head[strings.LastIndex(head, "{{- if"):]
+	gateLine := gate
+	if nl := strings.Index(gate, "\n"); nl >= 0 {
+		gateLine = gate[:nl]
+	}
+	if !strings.Contains(gateLine, "rbac.exec") {
+		t.Errorf("the exec rule is not gated on rbac.exec; gate is %q", strings.TrimSpace(gateLine))
+	}
+	if strings.Contains(gateLine, "exec.pod") {
+		t.Errorf("the exec rule's gate must not be derived from exec.pod; gate is %q",
+			strings.TrimSpace(gateLine))
+	}
+}
+
+// The exec block must grant exactly the two rules a pod console needs: pods
+// get (to resolve the default container) and pods/exec create (to open the
+// session) -- nothing wider, and nothing the read block does not already
+// legitimize on its own.
+func TestClusterRoleExecGrantsOnlyPodsGetAndPodsExecCreate(t *testing.T) {
+	block := execBlock(t)
+
+	re := regexp.MustCompile(`(?s)apiGroups:\s*\[""\]\s*\n\s*resources:\s*\["([a-z/]+)"\]\s*\n\s*verbs:\s*\["([a-z]+)"\]`)
+	matches := re.FindAllStringSubmatch(block, -1)
+
+	got := map[string]string{}
+	for _, m := range matches {
+		got[m[1]] = m[2]
+	}
+
+	want := map[string]string{
+		"pods":      "get",
+		"pods/exec": "create",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("exec block grants %v, want exactly %v", got, want)
+	}
+	for resource, verb := range want {
+		if got[resource] != verb {
+			t.Errorf("exec block grants resource %q verb %q, want %q", resource, got[resource], verb)
+		}
+	}
+}
+
 // assertGatedOnParentMetricsFlag checks that the {{- if }} immediately above a
 // rule also consults collect.metrics.enabled, not just its own child block.
 func assertGatedOnParentMetricsFlag(t *testing.T, chart, rule string) {

@@ -614,3 +614,36 @@ func newQueryClientsFromRest(restCfg *rest.Config) (*QueryClients, error) {
 
 	return &QueryClients{Dynamic: dyn, RESTFor: restFor}, nil
 }
+
+// ExecClients is what a pods/exec session needs: a clientset to resolve the
+// Pod and build the exec URL, and the raw REST config the SPDY executor
+// dials with. Its own limiter, separate from queries and mutations, for the
+// same reason NewQueryClients gives: a console must never queue behind a
+// dashboard's poll.
+type ExecClients struct {
+	Clientset kubernetes.Interface
+	REST      *rest.Config
+}
+
+// NewExecClients builds the console clients. Zero qps/burst takes the same
+// budget as the main client while still getting a separate limiter.
+func NewExecClients(cfg *k8sconfig.Config, qps float32, burst int) (*ExecClients, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("k8s exec client: config is required")
+	}
+	restCfg, err := resolveRESTConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("k8s exec client: resolve rest config: %w", err)
+	}
+	if qps > 0 {
+		restCfg.QPS = qps
+	}
+	if burst > 0 {
+		restCfg.Burst = burst
+	}
+	cs, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("k8s exec client: clientset: %w", err)
+	}
+	return &ExecClients{Clientset: cs, REST: restCfg}, nil
+}

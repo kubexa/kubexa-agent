@@ -57,6 +57,13 @@ type MutationResponder interface {
 	Execute(ctx context.Context, m *agentv1.MutationRequest) *agentv1.MutationResult
 }
 
+// ExecResponder opens a console session on the gateway's request. Like
+// MutationResponder it is satisfied structurally by *exec.Transport; nil
+// refuses every exec_open silently (exec.pod.enabled false).
+type ExecResponder interface {
+	Open(ctx context.Context, open *agentv1.ExecOpen)
+}
+
 // ScrapeHealthSource supplies the scrape health a heartbeat reports. It is an
 // interface, not the metrics collector itself, so a build without metrics
 // collection enabled has nothing to satisfy and reports no scrape_targets at
@@ -132,6 +139,11 @@ type streamManager struct {
 	// when the mutate policy failed to compile while disabled (see
 	// cmd/agent/main.go for why that case is a warning, not a fatal error).
 	mutationResponder MutationResponder
+
+	// execResponder opens console sessions requested by the gateway. Set
+	// once at construction and read-only afterward. Nil is valid -- an
+	// exec_open is dropped when exec.pod.enabled is false.
+	execResponder ExecResponder
 
 	// scrapeHealth supplies per-kind scrape health for the heartbeat. Set
 	// once at construction and read-only afterward. Nil is valid — an agent
@@ -217,9 +229,10 @@ func (g *throttleGate) throttled() bool {
 // nil if this agent does not run demand-driven state collection. responder
 // answers live resource queries; pass nil to refuse them. mutationResponder
 // applies mutations; pass nil to refuse them (mutate.enabled is false, or its
-// policy failed to compile while disabled). scrapeHealth supplies the
-// heartbeat's per-kind scrape health; pass nil if this agent does not run
-// metrics collection.
+// policy failed to compile while disabled). execResponder opens console
+// sessions; pass nil to drop every exec_open (exec.pod.enabled is false).
+// scrapeHealth supplies the heartbeat's per-kind scrape health; pass nil if
+// this agent does not run metrics collection.
 func New(
 	cfg *config.Config,
 	q queue.Queue,
@@ -229,6 +242,7 @@ func New(
 	reconciler WatchReconciler,
 	responder QueryResponder,
 	mutationResponder MutationResponder,
+	execResponder ExecResponder,
 	rules *ingestrules.Store,
 	counters *ingestrules.Counters,
 	scrapeHealth ScrapeHealthSource,
@@ -255,6 +269,7 @@ func New(
 		reconciler:        reconciler,
 		responder:         responder,
 		mutationResponder: mutationResponder,
+		execResponder:     execResponder,
 		scrapeHealth:      scrapeHealth,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
 		sleep:             defaultSleeper,
@@ -602,8 +617,8 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 					State:   m.cfg.Collect.State.Enabled,
 					Metrics: m.cfg.Collect.Metrics.Enabled,
 					Mutate:  m.cfg.MutateEnabled(),
-					// ExecPod and ExecNode are reserved for phases B and C;
-					// left unset (false) here on purpose.
+					ExecPod: m.cfg.ExecPodEnabled(),
+					// ExecNode is reserved for phase C; left unset on purpose.
 				},
 			},
 		},
@@ -1089,6 +1104,13 @@ func (m *streamManager) handleGatewayMessage(ctx context.Context, msg *agentv1.G
 		m.handleResourceQuery(ctx, p.ResourceQuery)
 	case *agentv1.GatewayMessage_Mutation:
 		m.handleMutation(ctx, p.Mutation)
+	case *agentv1.GatewayMessage_ExecOpen:
+		// Open returns at once (the console runs on its own goroutines and
+		// dials ExecSession itself), so unlike the two cases above it needs
+		// no goroutine to keep the recv loop live.
+		if m.execResponder != nil && p.ExecOpen != nil {
+			m.execResponder.Open(ctx, p.ExecOpen)
+		}
 	default:
 	}
 }
