@@ -26,6 +26,16 @@ type Identity struct {
 // keeps a silent one from pinning a goroutine and a stream forever.
 const exitDrainTimeout = 5 * time.Second
 
+// heartbeatInterval paces an empty, seq-0 STDOUT frame on an attached
+// ExecSession stream. nginx's grpc_read_timeout (60s) and Cloudflare's idle
+// cut both end a silent stream, and HTTP/2 PINGs do not reset nginx's
+// per-stream timer, so a shell whose user is reading would otherwise be cut
+// every minute and resumed. The gateway sends the same frame the other way
+// (an empty seq-0 STDIN); both sides ignore seq 0 / empty on receipt -- it
+// is never a ring frame, never a stdin write (io.Pipe blocks even a
+// zero-length write until the process reads), never counted.
+const heartbeatInterval = 20 * time.Second
+
 // Transport turns an ExecOpen into a running session plus the stream that
 // carries its bytes, and keeps re-dialing that stream while the session is
 // inside its resume window.
@@ -34,6 +44,15 @@ type Transport struct {
 	dial  Dialer
 	ident Identity
 	log   *logger.Logger
+	// heartbeat overrides heartbeatInterval; zero means the const. Tests only.
+	heartbeat time.Duration
+}
+
+func (t *Transport) heartbeatEvery() time.Duration {
+	if t.heartbeat > 0 {
+		return t.heartbeat
+	}
+	return heartbeatInterval
 }
 
 func NewTransport(m *Manager, dial Dialer, ident Identity, log *logger.Logger) *Transport {
@@ -193,6 +212,9 @@ func (t *Transport) pump(stream agentv1.AgentService_ExecSessionClient, sess *Se
 			}
 			switch p := msg.GetPayload().(type) {
 			case *agentv1.ExecServerMessage_Stdin:
+				if p.Stdin.GetSeq() == 0 || len(p.Stdin.GetChunk()) == 0 {
+					continue // gateway heartbeat: not stdin, not a seq (see heartbeatInterval)
+				}
 				if stdinClosed {
 					continue
 				}
@@ -214,10 +236,19 @@ func (t *Transport) pump(stream agentv1.AgentService_ExecSessionClient, sess *Se
 		}
 	}()
 
+	// The heartbeat shares this goroutine with the output frames: one stream
+	// never has two concurrent senders. Stopped when the pump leaves.
+	beat := time.NewTicker(t.heartbeatEvery())
+	defer beat.Stop()
+
 	for {
 		select {
 		case f := <-out:
 			if err := sendData(stream, f); err != nil {
+				return false
+			}
+		case <-beat.C:
+			if err := sendData(stream, Frame{Channel: agentv1.ExecChannel_EXEC_CHANNEL_STDOUT}); err != nil {
 				return false
 			}
 		case <-sess.Done():
