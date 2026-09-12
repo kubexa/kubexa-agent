@@ -100,6 +100,15 @@ func (t *Transport) serve(id string, sess *Session, refusal *agentv1.ExecExit) {
 	sess.Detach()
 
 	backoff := time.Second
+	// exitDeadline is zero until the session's end is first seen here, on the
+	// failure path. A session that ends while the transport is between
+	// streams still owes the gateway its exit: the gateway keeps the session
+	// parked for its own resume window and accepts a re-attach, and pump's
+	// Done branch delivers the exit on the first accepted one. So once Done
+	// is closed the loop keeps re-dialing for the agent's resume window
+	// (never longer than the gateway's) instead of leaving the console to
+	// wait out agent_gone with the exit code lost.
+	var exitDeadline time.Time
 	for {
 		stream, cancel, err := t.attach(ctx, id, sess.LastStdinSeq())
 		if err == nil {
@@ -123,8 +132,9 @@ func (t *Transport) serve(id string, sess *Session, refusal *agentv1.ExecExit) {
 				if done {
 					return
 				}
-				// Stream dropped with the process still running: loop and
-				// re-dial until the session's own resume watchdog closes it.
+				// Stream dropped: loop and re-dial. With the process still
+				// running the session's own resume watchdog bounds this;
+				// with the process gone, exitDeadline does.
 				continue
 			}
 			cancel()
@@ -132,12 +142,25 @@ func (t *Transport) serve(id string, sess *Session, refusal *agentv1.ExecExit) {
 		// Dial, attach-send or ack-recv failed: the stream never carried a
 		// frame, so retry inside the resume window.
 		if t.sessionOver(sess) {
-			return
+			if exitDeadline.IsZero() {
+				exitDeadline = time.Now().Add(sess.spec.resumeWindow)
+			} else if time.Now().After(exitDeadline) {
+				t.log.Err(err).Warn("console exit not delivered; the gateway stayed unreachable for the resume window",
+					logger.F("session_id", id), logger.F("reason", sess.Exit().GetReason().String()))
+				return
+			}
 		}
 		t.log.Err(err).Warn("console attach failed; retrying inside the resume window",
 			logger.F("session_id", id))
-		if !sleepUnless(sess.Done(), backoff) {
-			return
+		if exitDeadline.IsZero() {
+			if !sleepUnless(sess.Done(), backoff) {
+				// The session ended during the wait: re-dial at once to
+				// deliver its exit, and start the bounded window now.
+				exitDeadline = time.Now().Add(sess.spec.resumeWindow)
+				continue
+			}
+		} else {
+			time.Sleep(backoff)
 		}
 		backoff = min(backoff*2, 10*time.Second)
 	}
@@ -252,9 +275,11 @@ func (t *Transport) pump(stream agentv1.AgentService_ExecSessionClient, sess *Se
 				return false
 			}
 		case <-sess.Done():
-			// Drain what is still queued, then the exit. A failure here is
-			// tolerated: the gateway's resume window will not re-attach a
-			// finished session, and it learns of the end by the stream close.
+			// Drain what is still queued, then the exit. A drain failure is
+			// tolerated (the frames stay in the ring for the replay), but
+			// the exit itself must reach the gateway: if its Send fails
+			// the stream is gone and only a re-dial can carry it, so this
+			// is reported as the STREAM dying, not the session ending.
 		drain:
 			for {
 				select {
@@ -264,7 +289,9 @@ func (t *Transport) pump(stream agentv1.AgentService_ExecSessionClient, sess *Se
 					break drain
 				}
 			}
-			_ = stream.Send(&agentv1.ExecClientMessage{Payload: &agentv1.ExecClientMessage_Exit{Exit: sess.Exit()}})
+			if err := stream.Send(&agentv1.ExecClientMessage{Payload: &agentv1.ExecClientMessage_Exit{Exit: sess.Exit()}}); err != nil {
+				return false
+			}
 			_ = stream.CloseSend()
 			// Let the gateway end the stream so the exit is on the wire
 			// before the caller cancels the attach context under it.
@@ -276,7 +303,10 @@ func (t *Transport) pump(stream agentv1.AgentService_ExecSessionClient, sess *Se
 				sess.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "gateway closed the stream")
 				return true
 			}
-			return t.sessionOver(sess)
+			// The stream died. Even when the session is over in the same
+			// select round the exit has not been sent on this stream, so
+			// the caller must re-dial and let the Done branch deliver it.
+			return false
 		}
 	}
 }

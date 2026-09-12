@@ -580,3 +580,133 @@ func TestTransportSendsHeartbeatWhileAttached(t *testing.T) {
 		}
 	}
 }
+
+// awaitClosed fails the test unless ch closes within 3 s.
+func awaitClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("%s did not happen", what)
+	}
+}
+
+// TestTransportDeliversExitWhenSessionEndsBetweenStreams: the stream is cut
+// (Cloudflare's 150 s metronome), the re-dial fails once, and the process
+// exits while the transport is waiting to try again. The gateway still
+// holds the session parked and accepts the next attach, so the exit must
+// arrive on it -- exactly once, with the code -- rather than the transport
+// giving up because the session is over and leaving the console to wait
+// out agent_gone with exit_code NULL.
+func TestTransportDeliversExitWhenSessionEndsBetweenStreams(t *testing.T) {
+	srv := &fakeExecServer{}
+	dial := startExecServer(t, srv)
+	var dials atomic.Int32
+	dialFailed := make(chan struct{})
+	flaky := func(ctx context.Context) (agentv1.AgentService_ExecSessionClient, error) {
+		if dials.Add(1) == 2 {
+			close(dialFailed)
+			return nil, errors.New("gateway unreachable")
+		}
+		return dial(ctx)
+	}
+	m, _ := newTestManager(t, devRule(), 4, webPod())
+	tr := NewTransport(m, flaky, Identity{ClusterID: "c1", TenantToken: "tok"}, nil)
+
+	sess, refusal := m.Open(context.Background(), open("dev", "web-1", ""))
+	if refusal != nil {
+		t.Fatalf("refused: %v", refusal)
+	}
+	go tr.serve("sid", sess, nil)
+
+	first := waitCall(t, srv)
+	pushStdin(first, 1, "one\n")
+	if d := nextData(t, first); d.GetSeq() != 1 {
+		t.Fatalf("frame 1 = %v", d)
+	}
+	close(first.cut)
+	waitEnded(t, first)
+	awaitClosed(t, dialFailed, "the second dial")
+
+	// Between streams, with the re-dial backing off: the process exits.
+	if err := sess.WriteStdin([]byte("exit 3\n")); err != nil {
+		t.Fatal(err)
+	}
+	awaitClosed(t, sess.Done(), "the session's end")
+
+	second := waitCall(t, srv)
+	if second.attach.GetResumeSeq() != 1 {
+		t.Fatalf("re-attach resume_seq = %d, want 1", second.attach.GetResumeSeq())
+	}
+	e := nextExit(t, second)
+	if e.GetCode() != 3 || e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_UNSPECIFIED {
+		t.Fatalf("exit = %v, want code 3", e)
+	}
+	waitEnded(t, second)
+	select {
+	case c := <-srv.calls:
+		t.Fatalf("transport dialled again after delivering the exit: %v", c.attach)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// brokenStream is an ExecSession stream for driving pump directly. Recv
+// blocks until the test feeds recvErr; Send fails with sendErr when set.
+// Only Send, Recv and CloseSend are ever called on it.
+type brokenStream struct {
+	grpc.ClientStream
+	recvErr chan error
+	sendErr error
+	sent    []*agentv1.ExecClientMessage
+}
+
+func (b *brokenStream) Send(m *agentv1.ExecClientMessage) error {
+	if b.sendErr != nil {
+		return b.sendErr
+	}
+	b.sent = append(b.sent, m)
+	return nil
+}
+func (b *brokenStream) Recv() (*agentv1.ExecServerMessage, error) { return nil, <-b.recvErr }
+func (b *brokenStream) CloseSend() error                          { return nil }
+
+func endedSession(t *testing.T) *Session {
+	t.Helper()
+	s, _ := startSession(t, time.Second)
+	s.Attach()
+	if err := s.WriteStdin([]byte("exit 3\n")); err != nil {
+		t.Fatal(err)
+	}
+	awaitClosed(t, s.Done(), "the session's end")
+	return s
+}
+
+// TestPumpReportsStreamLossWhenExitSendFails: the session is over and the
+// stream breaks under the exit frame itself. pump must answer "the stream
+// died" (false) so serve re-dials and the Done branch sends the exit again
+// on the next stream -- not "the session is over" (true), which drops it.
+func TestPumpReportsStreamLossWhenExitSendFails(t *testing.T) {
+	s := endedSession(t)
+	stream := &brokenStream{recvErr: make(chan error, 1), sendErr: status.Error(codes.Unavailable, "transport is closing")}
+	tr := NewTransport(nil, nil, Identity{}, nil)
+	if done := tr.pump(stream, s, 0); done {
+		t.Fatal("pump reported the session over although the exit never left: the gateway would wait out agent_gone")
+	}
+	stream.recvErr <- io.EOF // release the recv goroutine
+}
+
+// TestPumpReportsStreamLossWhenStreamDiesAsSessionEnds: the stream's error
+// and the session's end are ready in the same select round. Whichever
+// branch wins, the exit has not been delivered on this stream, so pump
+// must return false; before the fix the stream-error branch answered
+// "session over" whenever Done was already closed, and the redial that
+// would carry the exit never happened.
+func TestPumpReportsStreamLossWhenStreamDiesAsSessionEnds(t *testing.T) {
+	s := endedSession(t)
+	stream := &brokenStream{recvErr: make(chan error, 1), sendErr: status.Error(codes.Unavailable, "transport is closing")}
+	stream.recvErr <- status.Error(codes.Unavailable, "stream cut")
+	tr := NewTransport(nil, nil, Identity{}, nil)
+	if done := tr.pump(stream, s, 0); done {
+		t.Fatal("pump reported the session over on a dead stream that never carried the exit")
+	}
+}
