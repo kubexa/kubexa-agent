@@ -337,3 +337,29 @@ func TestSessionRunSeesFinishMidFlight(t *testing.T) {
 	}
 	s.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "") // finish, second half
 }
+
+// The transport Detaches before its first dial, so with resume_window_sec
+// at 0 ("no resume") the watchdog would end the session on its first tick,
+// before the first attach -- a fresh TLS+HTTP/2 dial -- can complete. Until
+// the first Attach the bound is firstAttachGrace; after it, the configured
+// window rules: a cut stream on a window-0 session ends it within a tick.
+func TestSessionWindowZeroWaitsForTheFirstAttach(t *testing.T) {
+	s, _ := startSession(t, 0)
+	s.Detach() // what serve does before the first dial
+	time.Sleep(1500 * time.Millisecond)
+	select {
+	case <-s.Done():
+		t.Fatalf("session ended before its first attach: %v", s.Exit())
+	default:
+	}
+	s.Attach()
+	s.Detach() // the stream is cut after the first attach: window 0 rules now
+	select {
+	case <-s.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("a window-0 session outlived the cut of its first stream")
+	}
+	if s.Exit().GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_RESUME_EXPIRED {
+		t.Fatalf("reason = %v, want RESUME_EXPIRED", s.Exit())
+	}
+}

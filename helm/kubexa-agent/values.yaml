@@ -401,7 +401,10 @@ exec:
     # Concurrent sessions on this agent. [1, 64]
     maxSessions: 4
     # How long a session stays alive with no attached stream so a proxy cut
-    # resumes rather than ends the shell. [0, 600]
+    # resumes rather than ends the shell, seconds. 0 means the default (60);
+    # a negative value means no resume (a dropped stream ends the shell);
+    # at most 600. The effective window is min(agent, gateway's 60 s), so a
+    # value above 60 changes nothing today.
     resumeWindowSec: 60
 
 # Byte counts are plain integers -- a Kubernetes quantity ("512Mi") is refused,
