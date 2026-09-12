@@ -384,3 +384,23 @@ func TestSessionMapsNotFoundUpgradeToNotFound(t *testing.T) {
 		t.Fatalf("exit = %v", e)
 	}
 }
+
+// A shell the image lacks is flattened by client-go into the same plain
+// error shape; it must stay INTERNAL (with the message), not become "pod
+// not found".
+func TestSessionKeepsMissingExecutableInternal(t *testing.T) {
+	s := newSession(sessionSpec{
+		id: "s1", tty: true, stdin: true, resumeWindow: time.Second, maxSession: time.Minute, ring: newRing(RingBytes),
+	})
+	msg := `exec: "bash": executable file not found in $PATH`
+	go s.run(context.Background(), &errExecutor{err: errors.New(msg)})
+	select {
+	case <-s.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not end")
+	}
+	e := s.Exit()
+	if e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL || e.GetMessage() != msg {
+		t.Fatalf("exit = %v", e)
+	}
+}

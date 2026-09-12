@@ -283,8 +283,11 @@ func (s *Session) run(ctx context.Context, ex remotecommand.Executor) {
 			return
 		}
 		// Likewise a 404: the pod was deleted between Open's Get and the
-		// upgrade, and the body carries `pods "x" not found`.
-		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "not found") {
+		// upgrade, and the body carries `pods "x" not found`. Match the API
+		// server's Status shape only -- client-go also flattens a missing
+		// shell (`exec: "bash": executable file not found in $PATH`) into a
+		// plain error, and that is not the pod being gone.
+		if strings.Contains(err.Error(), `pods "`) && strings.Contains(err.Error(), `" not found`) {
 			s.finish(refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_NOT_FOUND, err.Error()))
 			return
 		}
