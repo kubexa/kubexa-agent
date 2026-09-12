@@ -174,6 +174,7 @@ func (m *Manager) Open(ctx context.Context, open *agentv1.ExecOpen) (*Session, *
 	spec := sessionSpec{
 		id:           id,
 		tty:          open.GetTty(),
+		stdin:        open.GetStdin(),
 		resumeWindow: clampSeconds(open.GetResumeWindowSec(), m.opts.Settings.ResumeWindowSec),
 		maxSession:   clampSeconds(open.GetMaxSessionSec(), m.opts.Settings.MaxSessionSec),
 		ring:         newRing(RingBytes),
