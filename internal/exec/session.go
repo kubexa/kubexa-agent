@@ -24,6 +24,15 @@ const (
 	// outputQueue is how many live frames may wait for the transport before
 	// the process's stdout blocks. Backpressure, not a drop.
 	outputQueue = 256
+	// firstAttachGrace bounds the wait for the FIRST attach. The transport
+	// Detaches before its first dial so an unreachable gateway is bounded by
+	// the resume window -- but a window of 0 ("no resume") would then kill
+	// the session on the watchdog's first tick, before a fresh TLS+HTTP/2
+	// dial can complete. Until the first Attach the bound is
+	// max(resumeWindow, firstAttachGrace); 15 s is the gateway's own attach
+	// timeout (DefaultAttachTimeout), past which it has given up anyway.
+	// After the first attach the configured window rules.
+	firstAttachGrace = 15 * time.Second
 )
 
 type sessionSpec struct {
@@ -56,6 +65,8 @@ type Session struct {
 	mu         sync.Mutex
 	attached   bool
 	detachedAt time.Time
+	// everAttached flips on the first Attach; see firstAttachGrace.
+	everAttached bool
 	// out is the live channel for the current attachment. Detach and Replay
 	// retire it (close outGen, swap in an empty one) so a writer blocked on
 	// the old channel moves on and nothing queued there is ever read; the
@@ -129,6 +140,7 @@ func (s *Session) NoteStdinSeq(seq uint64) {
 func (s *Session) Attach() {
 	s.mu.Lock()
 	s.attached = true
+	s.everAttached = true
 	s.detachedAt = time.Time{}
 	s.mu.Unlock()
 }
@@ -218,8 +230,12 @@ func (s *Session) run(ctx context.Context, ex remotecommand.Executor) {
 				return
 			case <-t.C:
 				s.mu.Lock()
+				bound := s.spec.resumeWindow
+				if !s.everAttached {
+					bound = max(bound, firstAttachGrace)
+				}
 				expired := !s.attached && !s.detachedAt.IsZero() &&
-					time.Since(s.detachedAt) > s.spec.resumeWindow
+					time.Since(s.detachedAt) > bound
 				s.mu.Unlock()
 				if expired {
 					s.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_RESUME_EXPIRED,
