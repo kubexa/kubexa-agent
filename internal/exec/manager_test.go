@@ -9,7 +9,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 
@@ -165,5 +167,51 @@ func TestOpenBuildsExecURL(t *testing.T) {
 	if q.Get("container") != "app" || q.Get("command") != "/bin/sh" ||
 		q.Get("stdin") != "true" || q.Get("stdout") != "true" || q.Get("tty") != "true" || q.Has("stderr") {
 		t.Fatalf("query = %s", got.RawQuery)
+	}
+}
+
+// hangingPods is a clientset whose pod Get blocks until its ctx ends -- an
+// API server round trip into a TCP black hole.
+type hangingPods struct{ kubernetes.Interface }
+
+func (h hangingPods) CoreV1() corev1client.CoreV1Interface {
+	return hangingCoreV1{h.Interface.CoreV1()}
+}
+
+type hangingCoreV1 struct{ corev1client.CoreV1Interface }
+
+func (h hangingCoreV1) Pods(ns string) corev1client.PodInterface {
+	return hangingPodInterface{h.CoreV1Interface.Pods(ns)}
+}
+
+type hangingPodInterface struct{ corev1client.PodInterface }
+
+func (hangingPodInterface) Get(ctx context.Context, _ string, _ metav1.GetOptions) (*corev1.Pod, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// Open reserves the max_sessions slot before the pod lookup. A hung API
+// server must not pin that slot for TCP's own timeout: the Get is bounded,
+// the refusal says so, and the slot is free again when Open returns.
+func TestOpenBoundsThePodLookupAndReleasesTheSlot(t *testing.T) {
+	m, _ := newTestManager(t, []config.PodExecRule{{}}, 1, webPod())
+	m.opts.Clients.Clientset = hangingPods{m.opts.Clients.Clientset}
+	m.opts.podLookup = 200 * time.Millisecond
+
+	start := time.Now()
+	s, r := m.Open(context.Background(), open("dev", "web-1", "app"))
+	took := time.Since(start)
+	if s != nil || r.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL || r.GetMessage() != "pod lookup timed out" {
+		t.Fatalf("open = %v, %v; want an INTERNAL refusal saying the lookup timed out", s, r)
+	}
+	if took < 200*time.Millisecond || took > 2*time.Second {
+		t.Fatalf("Open returned after %v, want about the lookup timeout", took)
+	}
+	m.mu.Lock()
+	held := len(m.sessions)
+	m.mu.Unlock()
+	if held != 0 {
+		t.Fatalf("%d session slot(s) still held after the lookup timed out, want 0", held)
 	}
 }
