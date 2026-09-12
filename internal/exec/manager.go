@@ -27,6 +27,12 @@ import (
 
 const defaultContainerAnnotation = "kubectl.kubernetes.io/default-container"
 
+// podLookupTimeout bounds the pod Get in Open. Open has reserved a
+// max_sessions slot by then, and the gateway gives up on the attach at 15 s
+// anyway, so a hung API server round trip must not pin the slot for TCP's
+// own timeout. Same bound as the mutation executor's default.
+const podLookupTimeout = 10 * time.Second
+
 // Options configures a Manager.
 type Options struct {
 	Policy     *policy.Policy
@@ -37,6 +43,8 @@ type Options struct {
 
 	// newExecutor is the test seam; nil means remotecommand.NewSPDYExecutor.
 	newExecutor func(*rest.Config, *url.URL) (remotecommand.Executor, error)
+	// podLookup overrides podLookupTimeout; zero means the const. Tests only.
+	podLookup time.Duration
 }
 
 // Manager opens console sessions under the owner's policy and limits.
@@ -121,9 +129,14 @@ func (m *Manager) Open(ctx context.Context, open *agentv1.ExecOpen) (*Session, *
 	}
 
 	target := podTarget{Namespace: pod.GetNamespace(), Name: pod.GetName(), Container: pod.GetContainer()}
-	p, err := m.opts.Clients.Clientset.CoreV1().Pods(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
+	lookupCtx, lookupCancel := context.WithTimeout(ctx, m.podLookupTimeout())
+	p, err := m.opts.Clients.Clientset.CoreV1().Pods(target.Namespace).Get(lookupCtx, target.Name, metav1.GetOptions{})
+	lookupCancel()
 	if err != nil {
 		release()
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, "pod lookup timed out")
+		}
 		return nil, refuseFromAPIError(err)
 	}
 	target.Container, err = resolveContainer(p, target.Container)
@@ -186,6 +199,13 @@ func (m *Manager) Open(ctx context.Context, open *agentv1.ExecOpen) (*Session, *
 		logger.F("pod", target.Name), logger.F("container", target.Container),
 		logger.F("rule", d.RuleID))
 	return s, nil
+}
+
+func (m *Manager) podLookupTimeout() time.Duration {
+	if m.opts.podLookup > 0 {
+		return m.opts.podLookup
+	}
+	return podLookupTimeout
 }
 
 // clampSeconds takes the gateway's request but never more than the agent's
