@@ -414,3 +414,169 @@ func TestTransportSendsExitWhenStdinWriteFailsAtSessionEnd(t *testing.T) {
 		}
 	}
 }
+
+// sizeOnlyExecutor is a process blocked in `sleep`: it never reads stdin
+// and only consumes terminal resizes, reporting each to the test. It ends
+// when the size queue closes, which finish does.
+type sizeOnlyExecutor struct {
+	sizes chan remotecommand.TerminalSize
+}
+
+func (sizeOnlyExecutor) Stream(remotecommand.StreamOptions) error { panic("unused") }
+func (e sizeOnlyExecutor) StreamWithContext(_ context.Context, o remotecommand.StreamOptions) error {
+	for {
+		sz := o.TerminalSizeQueue.Next()
+		if sz == nil {
+			return nil
+		}
+		e.sizes <- *sz
+	}
+}
+
+// newManagerWith builds a Manager whose every session runs ex.
+func newManagerWith(t *testing.T, ex remotecommand.Executor) *Manager {
+	t.Helper()
+	c := &config.Config{}
+	on := true
+	c.Exec.Pod.Enabled = &on
+	c.Exec.Pod.Rules = devRule()
+	pol, err := policy.Compile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := New(Options{
+		Policy:   pol,
+		Clients:  k8s.ExecClients{Clientset: fake.NewSimpleClientset(webPod()), REST: &rest.Config{Host: "https://example"}},
+		Settings: c.ExecPodSettings(),
+		newExecutor: func(*rest.Config, *url.URL) (remotecommand.Executor, error) {
+			return ex, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func pushStdinFrame(c *execCall, seq uint64, chunk []byte) {
+	c.toAgent <- &agentv1.ExecServerMessage{Payload: &agentv1.ExecServerMessage_Stdin{Stdin: &agentv1.ExecData{
+		Channel: agentv1.ExecChannel_EXEC_CHANNEL_STDIN, Chunk: chunk, Seq: seq,
+	}}}
+}
+
+func isHeartbeat(m *agentv1.ExecClientMessage) bool {
+	d := m.GetData()
+	return d != nil && d.GetSeq() == 0
+}
+
+// TestTransportIgnoresGatewayHeartbeat: the gateway heartbeats an attached
+// stream with an empty, seq-0 STDIN frame every 20 s. It is not stdin: the
+// process may be blocked in `sleep` and never read, and io.Pipe blocks even
+// a zero-length write until the reader reads, so writing it would wedge the
+// recv goroutine -- every resize and close behind it -- for as long as the
+// process stays silent. It is not a seq either: resume_seq must never claim
+// a heartbeat reached the process. Proven by sending the heartbeat (and the
+// two half-forms: seq 0 with bytes, a seq with no bytes) ahead of a resize
+// to a process that never reads stdin, and requiring the resize to reach
+// the session anyway.
+func TestTransportIgnoresGatewayHeartbeat(t *testing.T) {
+	srv := &fakeExecServer{}
+	dial := startExecServer(t, srv)
+	ex := sizeOnlyExecutor{sizes: make(chan remotecommand.TerminalSize, 8)}
+	m := newManagerWith(t, ex)
+	tr := NewTransport(m, dial, Identity{ClusterID: "c1", TenantToken: "tok"}, nil)
+
+	sess, refusal := m.Open(context.Background(), open("dev", "web-1", ""))
+	if refusal != nil {
+		t.Fatalf("refused: %v", refusal)
+	}
+	go tr.serve("sid", sess, nil)
+
+	call := waitCall(t, srv)
+	pushStdinFrame(call, 0, nil)         // the heartbeat
+	pushStdinFrame(call, 0, []byte("x")) // bytes without a seq: not stdin either
+	pushStdinFrame(call, 7, nil)         // a seq without bytes: not counted
+	call.toAgent <- &agentv1.ExecServerMessage{Payload: &agentv1.ExecServerMessage_Resize{Resize: &agentv1.ExecResize{Cols: 120, Rows: 40}}}
+
+	select {
+	case sz := <-ex.sizes:
+		if sz.Width != 120 || sz.Height != 40 {
+			t.Fatalf("resize = %+v, want 120x40", sz)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("the resize never reached the session: the recv goroutine is wedged on the heartbeat's stdin write")
+	}
+	if got := sess.LastStdinSeq(); got != 0 {
+		t.Fatalf("LastStdinSeq = %d, want 0: a heartbeat or an empty frame must never count as applied stdin", got)
+	}
+
+	call.toAgent <- &agentv1.ExecServerMessage{Payload: &agentv1.ExecServerMessage_Close{Close: &agentv1.ExecClose{Reason: "done"}}}
+	if e := nextExit(t, call); e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED {
+		t.Fatalf("exit after close = %v, want CLOSED", e)
+	}
+	waitEnded(t, call)
+}
+
+// TestTransportSendsHeartbeatWhileAttached: an attached pump sends an
+// empty, seq-0 STDOUT frame every heartbeat interval so nginx's
+// grpc_read_timeout and Cloudflare's idle cut never see a silent stream.
+// The ticker belongs to one attachment: a re-dialled stream heartbeats
+// afresh, and the exit is the last frame a pump ever sends.
+func TestTransportSendsHeartbeatWhileAttached(t *testing.T) {
+	srv := &fakeExecServer{}
+	dial := startExecServer(t, srv)
+	m, _ := newTestManager(t, devRule(), 4, webPod())
+	tr := NewTransport(m, dial, Identity{ClusterID: "c1", TenantToken: "tok"}, nil)
+	tr.heartbeat = 50 * time.Millisecond
+
+	tr.Open(context.Background(), open("dev", "web-1", ""))
+
+	// awaitHeartbeats requires n heartbeat frames on c within 500 ms and
+	// checks the shape of each.
+	awaitHeartbeats := func(c *execCall, n int) {
+		t.Helper()
+		deadline := time.After(500 * time.Millisecond)
+		seen := 0
+		for seen < n {
+			select {
+			case msg := <-c.fromAgent:
+				if !isHeartbeat(msg) {
+					t.Fatalf("unexpected frame while the shell is silent: %v", msg)
+				}
+				d := msg.GetData()
+				if d.GetChannel() != agentv1.ExecChannel_EXEC_CHANNEL_STDOUT || len(d.GetChunk()) != 0 {
+					t.Fatalf("heartbeat = %v, want STDOUT, empty chunk, seq 0", d)
+				}
+				seen++
+			case <-deadline:
+				t.Fatalf("%d heartbeat frames within 500 ms, want at least %d", seen, n)
+			}
+		}
+	}
+
+	first := waitCall(t, srv)
+	awaitHeartbeats(first, 2)
+
+	// Cut the stream with the process still running: the redialled
+	// attachment gets a ticker of its own.
+	close(first.cut)
+	waitEnded(t, first)
+	second := waitCall(t, srv)
+	awaitHeartbeats(second, 1)
+
+	// The pump leaves on the session's end and its ticker with it: the exit
+	// is the final frame, nothing follows it up to the stream's end.
+	second.toAgent <- &agentv1.ExecServerMessage{Payload: &agentv1.ExecServerMessage_Close{Close: &agentv1.ExecClose{Reason: "done"}}}
+	if e := nextExit(t, second); e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED {
+		t.Fatalf("exit after close = %v, want CLOSED", e)
+	}
+	waitEnded(t, second)
+	for {
+		select {
+		case msg := <-second.fromAgent:
+			t.Fatalf("frame after the exit: %v", msg)
+		default:
+			return
+		}
+	}
+}
