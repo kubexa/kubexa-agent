@@ -242,9 +242,9 @@ func (t *Transport) pump(stream agentv1.AgentService_ExecSessionClient, sess *Se
 					continue
 				}
 				if err := sess.WriteStdin(p.Stdin.GetChunk()); err != nil {
-					// The session is over; keep consuming so the Done
-					// branch still sees the gateway end the stream, but
-					// write nothing more.
+					// The session is over, or was opened without stdin;
+					// keep consuming so the Done branch still sees the
+					// gateway end the stream, but write nothing more.
 					stdinClosed = true
 					continue
 				}

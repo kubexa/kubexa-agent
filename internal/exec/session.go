@@ -36,8 +36,13 @@ const (
 )
 
 type sessionSpec struct {
-	id           string
-	tty          bool
+	id  string
+	tty bool
+	// stdin false opens no stdin stream at all: the kubelet was told not to
+	// expect one (PodExecOptions.Stdin), and it counts streams, so opening
+	// one anyway could bind the wrong ones. WriteStdin then refuses, since a
+	// write into a pipe nobody reads would block the caller forever.
+	stdin        bool
 	resumeWindow time.Duration
 	maxSession   time.Duration
 	ring         *ring
@@ -166,6 +171,9 @@ func (s *Session) retireOutputLocked() {
 }
 
 func (s *Session) WriteStdin(b []byte) error {
+	if !s.spec.stdin {
+		return errors.New("stdin is not open on this session")
+	}
 	select {
 	case <-s.done:
 		return errors.New("session ended")
@@ -247,10 +255,12 @@ func (s *Session) run(ctx context.Context, ex remotecommand.Executor) {
 	}()
 
 	opts := remotecommand.StreamOptions{
-		Stdin:  s.stdinR,
 		Stdout: &chunkWriter{s: s, ch: agentv1.ExecChannel_EXEC_CHANNEL_STDOUT},
 		Stderr: &chunkWriter{s: s, ch: agentv1.ExecChannel_EXEC_CHANNEL_STDERR},
 		Tty:    s.spec.tty,
+	}
+	if s.spec.stdin {
+		opts.Stdin = s.stdinR
 	}
 	if s.spec.tty {
 		opts.TerminalSizeQueue = s.sizeQ
@@ -270,6 +280,12 @@ func (s *Session) run(ctx context.Context, ex remotecommand.Executor) {
 		// nothing on that path, so the text is all there is to go on.
 		if strings.Contains(err.Error(), "Forbidden") || strings.Contains(err.Error(), "forbidden") {
 			s.finish(refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_RBAC_DENIED, err.Error()))
+			return
+		}
+		// Likewise a 404: the pod was deleted between Open's Get and the
+		// upgrade, and the body carries `pods "x" not found`.
+		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "not found") {
+			s.finish(refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_NOT_FOUND, err.Error()))
 			return
 		}
 		var ce kexec.CodeExitError

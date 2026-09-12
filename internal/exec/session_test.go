@@ -59,6 +59,7 @@ func startSession(t *testing.T, resume time.Duration) (*Session, *fakeExecutor) 
 	s := newSession(sessionSpec{
 		id:           "s1",
 		tty:          true,
+		stdin:        true,
 		resumeWindow: resume,
 		maxSession:   time.Minute,
 		ring:         newRing(RingBytes),
@@ -361,5 +362,25 @@ func TestSessionWindowZeroWaitsForTheFirstAttach(t *testing.T) {
 	}
 	if s.Exit().GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_RESUME_EXPIRED {
 		t.Fatalf("reason = %v, want RESUME_EXPIRED", s.Exit())
+	}
+}
+
+// The pod deleted between Open's Get and the SPDY upgrade comes back the
+// same way the 403 does: a plain error carrying the server's `not found`
+// text. It is NOT_FOUND, not INTERNAL.
+func TestSessionMapsNotFoundUpgradeToNotFound(t *testing.T) {
+	s := newSession(sessionSpec{
+		id: "s1", tty: true, stdin: true, resumeWindow: time.Second, maxSession: time.Minute, ring: newRing(RingBytes),
+	})
+	msg := `unable to upgrade connection: pods "x" not found`
+	go s.run(context.Background(), &errExecutor{err: errors.New(msg)})
+	select {
+	case <-s.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not end")
+	}
+	e := s.Exit()
+	if e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_NOT_FOUND || e.GetMessage() != msg {
+		t.Fatalf("exit = %v", e)
 	}
 }

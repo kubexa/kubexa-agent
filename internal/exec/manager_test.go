@@ -215,3 +215,54 @@ func TestOpenBoundsThePodLookupAndReleasesTheSlot(t *testing.T) {
 		t.Fatalf("%d session slot(s) still held after the lookup timed out, want 0", held)
 	}
 }
+
+// optionsRecordingExecutor hands the test the StreamOptions it was started
+// with and then runs until the session ends.
+type optionsRecordingExecutor struct {
+	opts chan remotecommand.StreamOptions
+}
+
+func (optionsRecordingExecutor) Stream(remotecommand.StreamOptions) error { panic("unused") }
+func (e optionsRecordingExecutor) StreamWithContext(ctx context.Context, o remotecommand.StreamOptions) error {
+	e.opts <- o
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// ExecOpen.stdin false tells the kubelet (PodExecOptions.Stdin) not to
+// expect a stdin stream; the executor must then not open one, and a stdin
+// write must be refused rather than block forever in a pipe nobody reads.
+func TestOpenWithoutStdinOpensNoStdinStream(t *testing.T) {
+	m, _ := newTestManager(t, []config.PodExecRule{{}}, 4, webPod())
+	ex := optionsRecordingExecutor{opts: make(chan remotecommand.StreamOptions, 1)}
+	m.opts.newExecutor = func(*rest.Config, *url.URL) (remotecommand.Executor, error) { return ex, nil }
+	o := open("dev", "web-1", "app")
+	o.Stdin = false
+	s, r := m.Open(context.Background(), o)
+	if r != nil {
+		t.Fatal(r)
+	}
+	defer s.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "")
+
+	select {
+	case got := <-ex.opts:
+		if got.Stdin != nil {
+			t.Fatal("StreamOptions.Stdin is set on a session opened with stdin=false")
+		}
+		if got.Stdout == nil || got.Stderr == nil {
+			t.Fatal("stdout/stderr must still be streamed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the executor was never started")
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.WriteStdin([]byte("x")) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("WriteStdin succeeded on a session with no stdin stream")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WriteStdin blocked on a session with no stdin stream")
+	}
+}
