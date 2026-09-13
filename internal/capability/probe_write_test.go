@@ -79,7 +79,7 @@ func TestWriteVerbsAreProbedOnlyForPolicyNamedResources(t *testing.T) {
 	cs := countingAuthzClient(tally)
 	mp := fakeMutatePolicy{named: map[string]bool{"apps/v1/deployments": true}}
 
-	Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 4, mp, nil)
+	Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 4, mp, nil, nil, "")
 
 	for _, verb := range []string{"patch", "delete", "create"} {
 		if n := tally.get("secrets", "", verb); n != 0 {
@@ -133,7 +133,7 @@ func TestCatalogReportsExecForPodsOnly(t *testing.T) {
 	cs := countingAuthzClient(tally)
 	ep := fakeExecPolicy{allow: true}
 
-	got := byResource(Probe(context.Background(), cs.AuthorizationV1(), podAndDeploymentGVRs(), 4, nil, ep))
+	got := byResource(Probe(context.Background(), cs.AuthorizationV1(), podAndDeploymentGVRs(), 4, nil, ep, nil, ""))
 
 	pods := got["pods"]
 	if !pods.CanExec || !pods.PolicyExec {
@@ -161,7 +161,7 @@ func TestCatalogReportsExecForPodsOnly(t *testing.T) {
 		tally2 := &verbTally{}
 		cs2 := countingAuthzClient(tally2)
 
-		got2 := byResource(Probe(context.Background(), cs2.AuthorizationV1(), podAndDeploymentGVRs(), 4, nil, nil))
+		got2 := byResource(Probe(context.Background(), cs2.AuthorizationV1(), podAndDeploymentGVRs(), 4, nil, nil, nil, ""))
 
 		pods2 := got2["pods"]
 		if pods2.CanExec || pods2.PolicyExec {
@@ -185,7 +185,7 @@ func TestUnprobedEntriesReportFalse(t *testing.T) {
 	}, nil)
 	mp := fakeMutatePolicy{named: map[string]bool{"apps/v1/deployments": true}}
 
-	got := byResource(Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 4, mp, nil))
+	got := byResource(Probe(context.Background(), cs.AuthorizationV1(), gvrs(), 4, mp, nil, nil, ""))
 
 	s := got["secrets"]
 	if s.CanPatch || s.CanDelete || s.CanCreate {
