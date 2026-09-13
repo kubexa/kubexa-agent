@@ -270,10 +270,17 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		_ = q.Close()
 		return fmt.Errorf("exec policy: %w", err)
 	}
+	// The same ruling again, applied to exec.node: see compileNodeExecPolicy.
+	nodePolicy, err := compileNodeExecPolicy(cfg, log)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("exec node policy: %w", err)
+	}
 
-	execResponder, _, err := buildExecResponder(
+	execResponder, execOpts, err := buildExecResponder(
 		cfg,
 		execPolicy,
+		nodePolicy,
 		func() (*k8s.ExecClients, error) {
 			// Built only inside the enabled path, for the reason the mutate
 			// factory above gives: a disabled agent resolves no REST config
@@ -284,11 +291,18 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		stream.NewExecDialer(cfg, logger.New("exec-dial", logger.WithAgentID(cfg.Agent.AgentID))),
 		logger.New("exec", logger.WithAgentID(cfg.Agent.AgentID)),
 		mainReg,
+		func(ctx context.Context, cs kubernetes.Interface) (exec.OwnPod, error) {
+			return exec.ResolveOwnPod(ctx, cs, os.Getenv("POD_NAME"), os.Getenv("POD_NAMESPACE"))
+		},
 	)
 	if err != nil {
 		_ = q.Close()
 		return fmt.Errorf("exec transport: %w", err)
 	}
+	// capabilityNodeWiring derives what the reporter sees from execOpts (what
+	// buildExecResponder actually built), not from nodePolicy unconditionally
+	// -- see its own doc comment for why.
+	reporterNodePolicy, helperNamespace := capabilityNodeWiring(execOpts, nodePolicy)
 
 	// One rule store, shared. The stream manager is its only writer (it is the
 	// only component that sees the gateway's messages) and the log collector
@@ -300,7 +314,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	// heartbeat reports one number per reason.
 	ruleCounters := ingestrules.NewCounters()
 
-	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy, mutatePolicy, execPolicy, rulesStore, ruleCounters)
+	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy, mutatePolicy, execPolicy, reporterNodePolicy, helperNamespace, rulesStore, ruleCounters)
 	if err != nil {
 		_ = q.Close()
 		return fmt.Errorf("collectors: %w", err)
@@ -573,19 +587,38 @@ func compileExecPolicy(cfg *config.Config, log *logger.Logger) (*execpolicy.Poli
 	return nil, nil
 }
 
-// buildExecResponder wires exec.pod into an exec.Transport. Nil when the
-// section is disabled, so a disabled agent resolves no REST config and
-// opens no gRPC connection for a feature it will not answer. The policy is
-// compiled unconditionally (compileExecPolicy) for the reason
+// compileNodeExecPolicy applies compileExecPolicy's ruling to exec.node.
+func compileNodeExecPolicy(cfg *config.Config, log *logger.Logger) (*execpolicy.NodePolicy, error) {
+	p, err := execpolicy.CompileNode(cfg)
+	if err == nil {
+		return p, nil
+	}
+	if cfg.ExecNodeEnabled() {
+		return nil, err
+	}
+	log.Warn("exec.node policy has an invalid pattern; the node console stays disabled", logger.F("error", err.Error()))
+	return nil, nil
+}
+
+// buildExecResponder wires exec.pod and exec.node into an exec.Transport.
+// Nil when BOTH sections are disabled, so an agent that answers neither
+// resolves no REST config and opens no gRPC connection for a feature it
+// will not answer. The policies are compiled unconditionally
+// (compileExecPolicy, compileNodeExecPolicy) for the reason
 // compileMutatePolicy gives. Options is returned alongside for the reason
 // buildMutationResponder gives: the wiring is what a test must see.
+//
+// resolveOwnPod is a seam over exec.ResolveOwnPod: tests substitute a stub
+// so the wiring can be exercised without a real cluster.
 func buildExecResponder(
 	cfg *config.Config,
 	execPolicy *execpolicy.Policy,
+	nodePolicy *execpolicy.NodePolicy,
 	newClients func() (*k8s.ExecClients, error),
 	dial exec.Dialer,
 	log *logger.Logger,
 	reg prometheus.Registerer,
+	resolveOwnPod func(ctx context.Context, cs kubernetes.Interface) (exec.OwnPod, error),
 ) (stream.ExecResponder, exec.Options, error) {
 	opts := exec.Options{
 		Policy:     execPolicy,
@@ -593,7 +626,7 @@ func buildExecResponder(
 		Logger:     log,
 		Registerer: reg,
 	}
-	if !cfg.ExecPodEnabled() {
+	if !cfg.ExecPodEnabled() && !cfg.ExecNodeEnabled() {
 		return nil, opts, nil
 	}
 	clients, err := newClients()
@@ -601,13 +634,79 @@ func buildExecResponder(
 		return nil, opts, fmt.Errorf("exec clients: %w", err)
 	}
 	opts.Clients = *clients
+
+	// bootCtx bounds both the own-Pod identity Get below and the helper
+	// sweep after exec.New: a stuck API server must not hold up the rest of
+	// startup for either call, and resolving identity deserves no less of a
+	// bound than the sweep it gates. Declared here (rather than inside the
+	// ExecNodeEnabled branch) so the same context, and the same 30s budget,
+	// covers both call sites -- there is exactly one boot-time deadline for
+	// exec.node's setup, not one per call.
+	var bootCtx context.Context
+	if cfg.ExecNodeEnabled() {
+		var cancel context.CancelFunc
+		bootCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		ns := cfg.ExecNodeSettings()
+		no := &exec.NodeOptions{Policy: nodePolicy, Settings: ns}
+		own, err := resolveOwnPod(bootCtx, clients.Clientset)
+		switch {
+		case err != nil:
+			// No identity, no node console: an ownerless helper by accident
+			// is exactly what the spec forbids. exec_node stays false and
+			// the operator sees why.
+			log.Warn("node console disabled: the agent could not resolve its own Pod",
+				logger.F("error", err.Error()))
+			no = nil
+		case ns.Namespace == "" || ns.Namespace == own.Namespace:
+			no.Owner = &own
+			no.Namespace = own.Namespace
+		default:
+			log.Warn("exec.node.namespace differs from the agent's own namespace; helper Pods there will not be garbage-collected with the agent",
+				logger.F("namespace", ns.Namespace), logger.F("agent_namespace", own.Namespace))
+			no.Namespace = ns.Namespace
+		}
+		opts.Node = no
+	}
+
 	m, err := exec.New(opts)
 	if err != nil {
 		return nil, opts, err
 	}
+
+	if opts.Node != nil {
+		// Every helper is an orphan at boot: no session survives an agent
+		// restart. Best-effort, and bounded by the same bootCtx the identity
+		// resolution above used, so a stuck API server never holds up the
+		// rest of startup.
+		exec.SweepHelpers(bootCtx, opts.Clients.Clientset, opts.Node.Namespace, log)
+	}
+
 	return exec.NewTransport(m, dial, exec.Identity{
 		ClusterID: cfg.Agent.ClusterID, TenantToken: cfg.Agent.TenantToken,
 	}, log), opts, nil
+}
+
+// capabilityNodeWiring derives the capability reporter's node-exec inputs
+// from execOpts -- the exec.Options buildExecResponder actually built --
+// rather than forwarding nodePolicy unconditionally. execOpts.Node is nil
+// not only when exec.node is off, but also when it is ON and the agent
+// could not resolve its own Pod (see buildExecResponder's identity-failure
+// branch); in that second case the handshake's exec_node capability already
+// reports false (nodeConsoleReady reads exec.Manager.NodeReady, which is
+// gated the same way, through opts.Node), so the capability reporter must
+// see the same "not answering" fact. Forwarding nodePolicy unconditionally
+// here would let the "nodes" catalog entry answer policy_exec=true and issue
+// its two SSARs cluster-wide (helperNamespace empty, since it too must come
+// from execOpts.Node) while the handshake says exec_node=false -- the
+// catalog and the handshake would disagree about a console that is, in
+// fact, down.
+func capabilityNodeWiring(execOpts exec.Options, nodePolicy *execpolicy.NodePolicy) (*execpolicy.NodePolicy, string) {
+	if execOpts.Node == nil {
+		return nil, ""
+	}
+	return nodePolicy, execOpts.Node.Namespace
 }
 
 // buildCapabilityReporterOptions builds the Options capability.NewReporter is
@@ -625,6 +724,8 @@ func buildCapabilityReporterOptions(
 	queryPolicy *policy.Policy,
 	mutatePolicy *mutatepolicy.Policy,
 	execPolicy *execpolicy.Policy,
+	nodeExecPolicy *execpolicy.NodePolicy,
+	helperNamespace string,
 ) capability.Options {
 	return capability.Options{
 		Clientset: probeCS,
@@ -653,6 +754,27 @@ func buildCapabilityReporterOptions(
 		// a nil check on execPolicy here to "fix" this: it would just mask
 		// the same harmless typed-nil shape mutatePolicy above already has.
 		ExecPolicy: execPolicy,
+		// NodeExecPolicy is a FOURTH, independent policy source, mirroring
+		// ExecPolicy immediately above for exec.node instead of exec.pod: it
+		// must be wired here or the "nodes" entry's can_exec/policy_exec
+		// report false forever, whatever exec.node.nodes says. A disabled
+		// but valid exec.node section compiles to a NON-nil
+		// *execpolicy.NodePolicy whose AllowsAnyNode answers false (see
+		// compileNodeExecPolicy); nil arrives only from the invalid+disabled
+		// branch there, which is the same harmless typed-nil shape
+		// ExecPolicy's own comment describes -- either way AllowsAnyNode is
+		// nil-receiver-safe. The caller also passes nil here whenever
+		// exec.node ended up unable to answer at all -- identity resolution
+		// failed even though the section is enabled -- so this field agrees
+		// with HelperNamespace below and with the handshake's exec_node
+		// about whether the console is actually up, not just configured.
+		NodeExecPolicy: nodeExecPolicy,
+		// HelperNamespace scopes the "nodes" SSARs to where helper Pods are
+		// actually created. Empty whenever exec.node is not answering --
+		// disabled, invalid, or (see serve()) an own-Pod identity failure --
+		// in which case probeExec never issues them (nodeExecPolicy is nil
+		// in the same cases).
+		HelperNamespace: helperNamespace,
 	}
 }
 
@@ -665,6 +787,8 @@ func buildCollectors(
 	queryPolicy *policy.Policy,
 	mutatePolicy *mutatepolicy.Policy,
 	execPolicy *execpolicy.Policy,
+	nodeExecPolicy *execpolicy.NodePolicy,
+	helperNamespace string,
 	rules *ingestrules.Store,
 	counters *ingestrules.Counters,
 ) ([]Collector, error) {
@@ -721,7 +845,7 @@ func buildCollectors(
 			return nil, err
 		}
 		capReporter, err := capability.NewReporter(
-			buildCapabilityReporterOptions(cfg, probeCS, q, queryPolicy, mutatePolicy, execPolicy),
+			buildCapabilityReporterOptions(cfg, probeCS, q, queryPolicy, mutatePolicy, execPolicy, nodeExecPolicy, helperNamespace),
 		)
 		if err != nil {
 			return nil, err

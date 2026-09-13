@@ -1,0 +1,17 @@
+{{- if and .Values.rbac.create .Values.rbac.nodeShell }}
+# rbac.nodeShell: the node console's helper Pod is created, watched and
+# deleted in THIS namespace only. A Role, not a ClusterRole: the agent
+# never needs to create Pods anywhere else. Gated on rbac.nodeShell ALONE,
+# never on exec.node, for the reason rbac.write and rbac.exec give.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kubexa-agent.fullname" . }}-node-shell
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kubexa-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+{{- end }}
