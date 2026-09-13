@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -9,10 +10,8 @@ import (
 // open in this cluster. Like MutateConfig it is its own gate: nothing here
 // inherits from query, collect or mutate, and every section defaults to off.
 type ExecConfig struct {
-	Pod PodExecConfig `yaml:"pod"`
-	// Node is phase C. There is no field yet: a phase-C `exec.node` key on a
-	// phase-B agent surfaces as an advisory UnknownKeys warning at load, not
-	// an error, and is not read.
+	Pod  PodExecConfig  `yaml:"pod"`
+	Node NodeExecConfig `yaml:"node"`
 }
 
 // PodExecConfig is the `exec.pod` section.
@@ -57,6 +56,59 @@ const (
 	defaultExecMaxSessions     = 4
 	defaultExecResumeWindowSec = 60
 )
+
+// NodeExecConfig is the `exec.node` section: a shell on the node itself,
+// through a per-session privileged helper Pod the agent creates on that
+// node and enters with nsenter. Off unless Enabled is true.
+type NodeExecConfig struct {
+	// Enabled false refuses every node exec_open. Unset means FALSE.
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// Nodes lists node-name patterns (trailing "*" supported). Empty
+	// matches NOTHING and is a validation error when enabled: the operator
+	// writes ["*"] to mean every node.
+	Nodes []string `yaml:"nodes,omitempty"`
+	// Image is the helper Pod's image. REQUIRED when enabled; there is no
+	// default on purpose (see the design spec, §2.1): any image with
+	// `sleep` and `nsenter` works, and the operator names one this cluster
+	// can pull.
+	Image string `yaml:"image,omitempty"`
+	// Namespace is where helper Pods are created. Empty means the agent's
+	// own namespace (POD_NAMESPACE), where an ownerReference to the agent
+	// Pod is legal and garbage collection removes helpers with the agent.
+	// Set to anything else and the ownerReference is dropped.
+	Namespace string `yaml:"namespace,omitempty"`
+	// Shell is what nsenter runs inside the host namespaces. Default
+	// ["/bin/sh", "-l"].
+	Shell []string `yaml:"shell,omitempty"`
+	// MaxSessionSec is the hard stop for one session and, plus a minute,
+	// the helper Pod's activeDeadlineSeconds. Default 1800, [10, 86400].
+	MaxSessionSec int `yaml:"max_session_sec,omitempty"`
+	// MaxSessions caps concurrent NODE sessions (separate from exec.pod's
+	// cap). Default 1, [1, 16].
+	MaxSessions int `yaml:"max_sessions,omitempty"`
+	// HelperReadyTimeoutSec bounds the wait for the helper Pod to become
+	// Running, image pull included. Default 60, [5, 600].
+	HelperReadyTimeoutSec int `yaml:"helper_ready_timeout_sec,omitempty"`
+}
+
+// NodeExecSettings is NodeExecConfig with defaults applied. Callers read
+// this, never the raw struct.
+type NodeExecSettings struct {
+	Image                 string
+	Namespace             string
+	Shell                 []string
+	MaxSessionSec         int
+	MaxSessions           int
+	HelperReadyTimeoutSec int
+}
+
+const (
+	defaultNodeExecMaxSessionSec         = 1800
+	defaultNodeExecMaxSessions           = 1
+	defaultNodeExecHelperReadyTimeoutSec = 60
+)
+
+var dns1123Label = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
 // ExecPodEnabled reports whether any pod console is answered at all.
 func (c *Config) ExecPodEnabled() bool {
@@ -107,7 +159,97 @@ func (c *Config) ExecPodSettings() PodExecSettings {
 	return s
 }
 
-func (c *Config) validateExec() []string {
+// ExecNodeEnabled reports whether any node console is answered at all.
+func (c *Config) ExecNodeEnabled() bool {
+	if c == nil || c.Exec.Node.Enabled == nil {
+		return false
+	}
+	return *c.Exec.Node.Enabled
+}
+
+// ExecNodeRules returns the configured node-name patterns. No inheritance.
+func (c *Config) ExecNodeRules() []string {
+	if c == nil {
+		return nil
+	}
+	return c.Exec.Node.Nodes
+}
+
+// ExecNodeSettings applies defaults. It does not validate; Validate does.
+func (c *Config) ExecNodeSettings() NodeExecSettings {
+	s := NodeExecSettings{
+		Shell:                 []string{"/bin/sh", "-l"},
+		MaxSessionSec:         defaultNodeExecMaxSessionSec,
+		MaxSessions:           defaultNodeExecMaxSessions,
+		HelperReadyTimeoutSec: defaultNodeExecHelperReadyTimeoutSec,
+	}
+	if c == nil {
+		return s
+	}
+	n := c.Exec.Node
+	s.Image = strings.TrimSpace(n.Image)
+	s.Namespace = strings.TrimSpace(n.Namespace)
+	if len(n.Shell) > 0 {
+		s.Shell = append([]string(nil), n.Shell...)
+	}
+	if n.MaxSessionSec != 0 {
+		s.MaxSessionSec = n.MaxSessionSec
+	}
+	if n.MaxSessions != 0 {
+		s.MaxSessions = n.MaxSessions
+	}
+	if n.HelperReadyTimeoutSec != 0 {
+		s.HelperReadyTimeoutSec = n.HelperReadyTimeoutSec
+	}
+	return s
+}
+
+// ValidateNodeExecRules validates the node-name patterns in isolation and
+// does NOT consult Enabled, for the reason ValidatePodExecRules gives.
+func ValidateNodeExecRules(patterns []string) []string {
+	var errs []string
+	for _, p := range patterns {
+		if err := validatePattern(p); err != nil {
+			errs = append(errs, fmt.Sprintf("exec.node.nodes: %q: %v", p, err))
+		}
+	}
+	return errs
+}
+
+func (c *Config) validateExecNode() []string {
+	if c == nil || !c.ExecNodeEnabled() {
+		return nil
+	}
+	var errs []string
+	n := c.Exec.Node
+	if strings.TrimSpace(n.Image) == "" {
+		errs = append(errs, "exec.node.image is required when exec.node.enabled is true")
+	}
+	if len(n.Nodes) == 0 {
+		errs = append(errs, `exec.node.nodes must name at least one pattern (["*"] for every node)`)
+	}
+	errs = append(errs, ValidateNodeExecRules(n.Nodes)...)
+	if ns := strings.TrimSpace(n.Namespace); ns != "" && !dns1123Label.MatchString(ns) {
+		errs = append(errs, "exec.node.namespace must be a lowercase DNS-1123 label")
+	}
+	for i, arg := range n.Shell {
+		if strings.TrimSpace(arg) == "" {
+			errs = append(errs, fmt.Sprintf("exec.node.shell[%d] must not be empty", i))
+		}
+	}
+	if n.MaxSessionSec != 0 && (n.MaxSessionSec < 10 || n.MaxSessionSec > 86400) {
+		errs = append(errs, "exec.node.max_session_sec must be between 10 and 86400")
+	}
+	if n.MaxSessions < 0 || n.MaxSessions > 16 {
+		errs = append(errs, "exec.node.max_sessions must be between 1 and 16")
+	}
+	if n.HelperReadyTimeoutSec != 0 && (n.HelperReadyTimeoutSec < 5 || n.HelperReadyTimeoutSec > 600) {
+		errs = append(errs, "exec.node.helper_ready_timeout_sec must be between 5 and 600")
+	}
+	return errs
+}
+
+func (c *Config) validateExecPod() []string {
 	if c == nil || !c.ExecPodEnabled() {
 		return nil
 	}
@@ -129,6 +271,17 @@ func (c *Config) validateExec() []string {
 		errs = append(errs, "exec.pod.resume_window_sec must be at most 600")
 	}
 	return errs
+}
+
+func (c *Config) validateExec() []string {
+	if c == nil {
+		return nil
+	}
+	var errs []string
+	if c.ExecPodEnabled() {
+		errs = append(errs, c.validateExecPod()...)
+	}
+	return append(errs, c.validateExecNode()...)
 }
 
 // ValidatePodExecRules validates each rule in isolation and does NOT consult
