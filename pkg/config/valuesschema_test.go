@@ -448,6 +448,12 @@ func chartOnlyKeys() map[string]string {
 		// enabled, rules, defaultShell, maxSessionSec, maxSessions,
 		// resumeWindowSec -- are each paired and type-checked individually.
 		"exec.pod": "a nested block name (PodExecConfig), not a scalar; its own fields are each checked",
+		// Same shape as exec.pod immediately above: a nested block name
+		// (NodeExecConfig), not a scalar. Its own leaves -- enabled, nodes,
+		// image, namespace, shell, maxSessionSec, maxSessions,
+		// helperReadyTimeoutSec -- are each paired and type-checked
+		// individually via renderedPairs.
+		"exec.node": "a nested block name (NodeExecConfig), not a scalar; its own fields are each checked",
 	}
 }
 
