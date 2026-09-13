@@ -165,8 +165,9 @@ func handshakeExecNodeCap(t *testing.T, responder ExecResponder) bool {
 
 // handshakeExecPodCap builds a manager with exec.pod.enabled set to enabled,
 // runs it against a fake gateway that captures the handshake, and returns
-// the Caps.ExecPod value the agent advertised. ExecNode is asserted unset
-// alongside: phase C owns it.
+// the Caps.ExecPod value the agent advertised. ExecNode is asserted false
+// alongside: this manager's execResponder is nil (sm.execResponder is never
+// set here), so nodeConsoleReady has no NodeConsoleReporter to read.
 func handshakeExecPodCap(t *testing.T, enabled bool) bool {
 	t.Helper()
 
@@ -198,7 +199,7 @@ func handshakeExecPodCap(t *testing.T, enabled bool) bool {
 	select {
 	case caps := <-got:
 		if caps.GetExecNode() {
-			t.Fatal("Caps.ExecNode = true, want unset until phase C")
+			t.Fatal("Caps.ExecNode = true, want false with no responder")
 		}
 		return caps.GetExecPod()
 	case <-time.After(3 * time.Second):

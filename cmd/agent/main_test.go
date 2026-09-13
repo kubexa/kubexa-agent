@@ -621,5 +621,20 @@ func TestBuildExecResponderWiresNodeOptions(t *testing.T) {
 		if logged := buf.String(); !strings.Contains(logged, "node console disabled") {
 			t.Fatalf("log = %q, want a warning containing %q", logged, "node console disabled")
 		}
+
+		// The capability reporter must see the SAME "not answering" fact the
+		// handshake's exec_node just reported false for. nodePolicy here is
+		// a real, non-nil policy that DOES allow a node (Nodes: ["*"]), so a
+		// regression that forwards it unconditionally passes this by
+		// answering true -- exactly the catalog/handshake disagreement the
+		// fix closes.
+		gotPolicy, gotNamespace := capabilityNodeWiring(opts, nodePolicy)
+		if gotPolicy != nil && gotPolicy.AllowsAnyNode() {
+			t.Fatalf("capabilityNodeWiring policy.AllowsAnyNode() = true, want false (or a nil policy) "+
+				"when the agent could not resolve its own Pod, got %+v", gotPolicy)
+		}
+		if gotNamespace != "" {
+			t.Fatalf("capabilityNodeWiring namespace = %q, want \"\" when the agent could not resolve its own Pod", gotNamespace)
+		}
 	})
 }

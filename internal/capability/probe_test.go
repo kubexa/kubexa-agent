@@ -160,9 +160,6 @@ func TestProbeSkipsWatchWhenListIsDenied(t *testing.T) {
 	}
 }
 
-// A watch review that errors must not leave the resource looking merely
-// poll-only: that would silently downgrade a watchable type on a transient
-// API hiccup. Unknown is the honest state.
 // recordingAuthzWithAllow lets a test configure the Allowed verdict per
 // resource/subresource/verb key (matching verbTally's own convention in
 // probe_write_test.go) while also recording every ResourceAttributes the
@@ -312,6 +309,9 @@ func TestProbeExecNodesUsesTheHelperNamespace(t *testing.T) {
 	})
 }
 
+// A watch review that errors must not leave the resource looking merely
+// poll-only: that would silently downgrade a watchable type on a transient
+// API hiccup. Unknown is the honest state.
 func TestProbeMarksUnknownWhenOnlyTheWatchReviewFails(t *testing.T) {
 	cs := authzClient(
 		map[string]bool{"deployments:list": true},

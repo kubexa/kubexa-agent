@@ -57,12 +57,17 @@ type Options struct {
 	// NodeExecPolicy is a FOURTH, independent policy source alongside
 	// Policy, MutatePolicy and ExecPolicy above: the node console is
 	// configured (or not) independently of the pod console. A nil value
-	// here means exec.node is not configured. See NodeExecPolicySource's
-	// doc comment in probe.go.
+	// here means the caller is withholding the policy entirely (an
+	// invalid+disabled exec.node section, or the agent's own-Pod identity
+	// failed to resolve) -- a disabled-but-VALID exec.node section is a
+	// non-nil policy whose AllowsAnyNode already answers false, the same
+	// "not configured" answer by a different route. See NodeExecPolicySource
+	// and probeExec's own doc comments in probe.go.
 	NodeExecPolicy NodeExecPolicySource
 	// HelperNamespace is the namespace the node console's helper Pods are
-	// created in. It scopes the "nodes" SSARs probeExec issues; empty when
-	// exec.node is not configured.
+	// created in. It scopes the "nodes" SSARs probeExec issues; empty
+	// whenever exec.node is not actually answering, matching NodeExecPolicy
+	// above.
 	HelperNamespace string
 }
 

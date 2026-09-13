@@ -100,9 +100,15 @@ const defaultProbeWorkers = 8
 // mutatePolicy is nil when the mutate section is disabled, in which case no
 // write verb is ever probed -- see probeWrites. execPolicy is nil the same
 // way when exec.pod is disabled, in which case no exec verb is ever probed
-// -- see probeExec. nodeExecPolicy is nil the same way again when exec.node
-// is disabled; helperNamespace scopes the "nodes" entry's SSARs to where its
-// helper Pods are actually created, rather than metav1.NamespaceAll.
+// -- see probeExec. nodeExecPolicy nil is one of two ways probeExec ends up
+// never issuing the "nodes" SSARs -- the other is a non-nil policy whose
+// AllowsAnyNode answers false, which is what a disabled-but-valid exec.node
+// section actually compiles to (see compileNodeExecPolicy in
+// cmd/agent/main.go); nil itself only arrives from an invalid+disabled
+// section, or from the caller withholding the policy entirely (e.g. an
+// own-Pod identity failure -- see buildExecResponder). helperNamespace
+// scopes the "nodes" entry's SSARs to where its helper Pods are actually
+// created, rather than metav1.NamespaceAll.
 func Probe(
 	ctx context.Context,
 	authz authzv1client.AuthorizationV1Interface,
@@ -266,11 +272,17 @@ func probeWrites(
 // The core-group "nodes" entry is Phase C's node console: it is handled
 // first, as its own early-returning branch, because it answers a completely
 // different question (a helper Pod in helperNamespace, not the node itself)
-// with its own policy source, nodeExecPolicy. nodeExecPolicy nil means
-// exec.node is disabled, mirroring execPolicy nil above; a non-nil interface
-// wrapping a nil policy pointer is the acceptable typed-nil described on
-// NodePolicy.AllowsAnyNode -- it is nil-receiver-safe, so it simply answers
-// false here, same as an explicit "not configured".
+// with its own policy source, nodeExecPolicy. A nil nodeExecPolicy short-
+// circuits before any SSAR, mirroring execPolicy nil above, but production
+// does NOT use nil to mean "exec.node is disabled": compileNodeExecPolicy
+// (cmd/agent/main.go) compiles a disabled-but-valid section to a non-nil
+// *execpolicy.NodePolicy whose AllowsAnyNode answers false, which this
+// function also treats as "no SSAR" via the PolicyExec check just below --
+// a non-nil interface wrapping a nil policy pointer is the acceptable
+// typed-nil described on NodePolicy.AllowsAnyNode, which is nil-receiver-
+// safe. An actual nil interface here means either an invalid+disabled
+// section, or the caller deciding exec.node cannot answer at all (e.g. the
+// agent's own-Pod identity failed to resolve -- see buildExecResponder).
 func probeExec(
 	ctx context.Context,
 	authz authzv1client.AuthorizationV1Interface,
