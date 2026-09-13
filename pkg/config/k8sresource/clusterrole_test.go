@@ -386,7 +386,7 @@ func execBlock(t *testing.T) string {
 	}
 	chart := string(raw)
 
-	start := strings.Index(chart, "{{- if .Values.rbac.exec }}")
+	start := strings.Index(chart, "{{- if or .Values.rbac.exec .Values.rbac.nodeShell }}")
 	if start < 0 {
 		t.Fatal("no rbac.exec block in the ClusterRole")
 	}

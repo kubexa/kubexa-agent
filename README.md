@@ -72,6 +72,7 @@ Chart values map directly to `pkg/config.Config`. Key sections:
 | `collect.metrics.*` | `collect.metrics.*` | K8s metrics + custom endpoints |
 | `query.*` | `query.*` | Live, on-demand resource reads; omit to inherit `collect.state` |
 | `query.redactSecrets` | `query.redact_secrets` | Strips Secret `data`/`stringData` from live query responses; unset inherits `collect.state.redactSecrets` |
+| `exec.node.*` | `exec.node.*` | A shell on the node itself, through a privileged helper Pod the agent creates and enters with `nsenter`. Three gates, all off: `rbac.nodeShell`, `exec.node.enabled`, and the platform's own `cluster:node_console` admin permission. `image` has no default on purpose -- any image with `sleep` and `nsenter` works. |
 | `buffer.*` | `buffer.*` | Memory/disk queue |
 | `observability.*` | `observability.*` | Health and metrics ports |
 | `log.*` | `log.*` | Agent logger level/format |
@@ -84,6 +85,8 @@ Chart values map directly to `pkg/config.Config`. Key sections:
 | `rbac.create` | Whether the chart creates the ClusterRole/ClusterRoleBinding at all. Default `true`. |
 | `rbac.readAll` | Grants `get`/`list`/`watch` on every apiGroup and resource, CRDs included. Off by default, and deliberately NOT derived from `query.rules`/`collect.state.rules` — the agent's config can be supplied as a mounted file this chart never sees, in which case a derived template would find no rules and silently render the narrow role. Pair with a query/collect rule naming `resources: ["*"]`, or the API server refuses everything the enumerated rules do not name. |
 | `rbac.write` | Grants `patch`/`update`/`delete`/`create` and the `*/scale` subresource, enumerated over the same resource lists `readAll`'s neighboring read rules cover — never a wildcard, because `mutate.rules` rejects every wildcard resource form. Off by default, and deliberately NOT derived from `mutate.rules`, for the same mounted-config reason as `readAll`. `mutate.enabled` alone is not enough to let the agent write: this flag is the ServiceAccount side of the same decision. |
+| `rbac.exec` | Grants the ServiceAccount `pods` `get` (resolve the default container) and `pods/exec` `create`. Off by default, and deliberately NOT derived from `exec.pod`, for the same mounted-config reason as `readAll`/`write`. |
+| `rbac.nodeShell` | Grants the ServiceAccount a Role (not a ClusterRole — the helper Pod lives beside the agent) scoped to this release's namespace: `create`/`get`/`list`/`watch`/`delete` on `pods`, plus the same `pods/exec` `create` grant `rbac.exec` gives. NOT derived from `exec.node`, for the same reason as `rbac.exec`. A node console is root on the node: leave this `false` unless you mean it. |
 | `rbac.extraRules` | Extra `PolicyRule` entries appended to the generated ClusterRole verbatim. |
 
 ### Example: namespace-scoped log collection

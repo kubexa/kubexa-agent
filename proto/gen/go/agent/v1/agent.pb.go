@@ -399,6 +399,12 @@ const (
 	ExecExitReason_EXEC_EXIT_REASON_RESUME_EXPIRED    ExecExitReason = 6 // no re-attach inside resume_window_sec
 	ExecExitReason_EXEC_EXIT_REASON_CLOSED            ExecExitReason = 7 // the gateway sent ExecClose
 	ExecExitReason_EXEC_EXIT_REASON_INTERNAL          ExecExitReason = 8
+	// The node console's helper Pod could not be created, or never became
+	// Running: an RBAC refusal on pods create, a Pod Security / policy
+	// admission refusal, a quota, an image that cannot be pulled, or the
+	// ready timeout. message carries the API server's or kubelet's own
+	// text so the operator sees which. Phase C.
+	ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED ExecExitReason = 9
 )
 
 // Enum value maps for ExecExitReason.
@@ -413,6 +419,7 @@ var (
 		6: "EXEC_EXIT_REASON_RESUME_EXPIRED",
 		7: "EXEC_EXIT_REASON_CLOSED",
 		8: "EXEC_EXIT_REASON_INTERNAL",
+		9: "EXEC_EXIT_REASON_HELPER_REJECTED",
 	}
 	ExecExitReason_value = map[string]int32{
 		"EXEC_EXIT_REASON_UNSPECIFIED":       0,
@@ -424,6 +431,7 @@ var (
 		"EXEC_EXIT_REASON_RESUME_EXPIRED":    6,
 		"EXEC_EXIT_REASON_CLOSED":            7,
 		"EXEC_EXIT_REASON_INTERNAL":          8,
+		"EXEC_EXIT_REASON_HELPER_REJECTED":   9,
 	}
 )
 
@@ -773,7 +781,7 @@ type AgentCapabilities struct {
 	Metrics       bool                   `protobuf:"varint,3,opt,name=metrics,proto3" json:"metrics,omitempty"`
 	Mutate        bool                   `protobuf:"varint,4,opt,name=mutate,proto3" json:"mutate,omitempty"`
 	ExecPod       bool                   `protobuf:"varint,5,opt,name=exec_pod,json=execPod,proto3" json:"exec_pod,omitempty"`    // reserved for phase B; the agent sets it false here
-	ExecNode      bool                   `protobuf:"varint,6,opt,name=exec_node,json=execNode,proto3" json:"exec_node,omitempty"` // reserved for phase C; the agent sets it false here
+	ExecNode      bool                   `protobuf:"varint,6,opt,name=exec_node,json=execNode,proto3" json:"exec_node,omitempty"` // true when exec.node.enabled and the agent resolved its own Pod (see internal/exec/nodeshell.go)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3834,7 +3842,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x18EXEC_CHANNEL_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12EXEC_CHANNEL_STDIN\x10\x01\x12\x17\n" +
 	"\x13EXEC_CHANNEL_STDOUT\x10\x02\x12\x17\n" +
-	"\x13EXEC_CHANNEL_STDERR\x10\x03*\xc3\x02\n" +
+	"\x13EXEC_CHANNEL_STDERR\x10\x03*\xe9\x02\n" +
 	"\x0eExecExitReason\x12 \n" +
 	"\x1cEXEC_EXIT_REASON_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eEXEC_EXIT_REASON_POLICY_DENIED\x10\x01\x12 \n" +
@@ -3844,7 +3852,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x1cEXEC_EXIT_REASON_MAX_SESSION\x10\x05\x12#\n" +
 	"\x1fEXEC_EXIT_REASON_RESUME_EXPIRED\x10\x06\x12\x1b\n" +
 	"\x17EXEC_EXIT_REASON_CLOSED\x10\a\x12\x1d\n" +
-	"\x19EXEC_EXIT_REASON_INTERNAL\x10\b2\x9c\x01\n" +
+	"\x19EXEC_EXIT_REASON_INTERNAL\x10\b\x12$\n" +
+	" EXEC_EXIT_REASON_HELPER_REJECTED\x10\t2\x9c\x01\n" +
 	"\fAgentService\x12?\n" +
 	"\aConnect\x12\x16.agent.v1.AgentMessage\x1a\x18.agent.v1.GatewayMessage(\x010\x01\x12K\n" +
 	"\vExecSession\x12\x1b.agent.v1.ExecClientMessage\x1a\x1b.agent.v1.ExecServerMessage(\x010\x01B>Z<github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1;agentv1b\x06proto3"

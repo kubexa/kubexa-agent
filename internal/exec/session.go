@@ -62,6 +62,8 @@ type Session struct {
 	// target and ruleID are set by the Manager for the transport's log lines.
 	target podTarget
 	ruleID string
+	// node is set only for node sessions, for log lines.
+	node string
 
 	stdinR *io.PipeReader
 	stdinW *io.PipeWriter

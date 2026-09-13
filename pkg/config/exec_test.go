@@ -80,3 +80,82 @@ func TestExecPodDisabledSkipsBoundsAtLoad(t *testing.T) {
 		t.Fatalf("a disabled section must not fail load on its bounds: %v", err)
 	}
 }
+
+func TestExecNodeDefaultsAndAccessors(t *testing.T) {
+	var nilCfg *config.Config
+	if nilCfg.ExecNodeEnabled() {
+		t.Fatal("nil config must not enable the node console")
+	}
+	c := &config.Config{}
+	if c.ExecNodeEnabled() {
+		t.Fatal("unset enabled must be false")
+	}
+	s := c.ExecNodeSettings()
+	if s.MaxSessionSec != 1800 || s.MaxSessions != 1 || s.HelperReadyTimeoutSec != 60 {
+		t.Fatalf("defaults = %+v", s)
+	}
+	if len(s.Shell) != 2 || s.Shell[0] != "/bin/sh" || s.Shell[1] != "-l" {
+		t.Fatalf("default shell = %v", s.Shell)
+	}
+	on := true
+	c.Exec.Node = config.NodeExecConfig{Enabled: &on, Nodes: []string{"aks-*"}, Image: "busybox:1.36",
+		Namespace: "shells", Shell: []string{"/bin/bash"}, MaxSessionSec: 60, MaxSessions: 2, HelperReadyTimeoutSec: 5}
+	if !c.ExecNodeEnabled() {
+		t.Fatal("enabled")
+	}
+	if got := c.ExecNodeRules(); len(got) != 1 || got[0] != "aks-*" {
+		t.Fatalf("rules = %v", got)
+	}
+	s = c.ExecNodeSettings()
+	if s.Image != "busybox:1.36" || s.Namespace != "shells" || s.MaxSessionSec != 60 || s.MaxSessions != 2 ||
+		s.HelperReadyTimeoutSec != 5 || len(s.Shell) != 1 || s.Shell[0] != "/bin/bash" {
+		t.Fatalf("settings = %+v", s)
+	}
+}
+
+func TestExecNodeValidation(t *testing.T) {
+	on := true
+	cases := []struct {
+		name string
+		node config.NodeExecConfig
+		want string // substring of one violation; "" means valid
+	}{
+		{"disabled needs nothing", config.NodeExecConfig{}, ""},
+		{"enabled without image", config.NodeExecConfig{Enabled: &on, Nodes: []string{"*"}}, "exec.node.image is required"},
+		{"enabled without nodes", config.NodeExecConfig{Enabled: &on, Image: "busybox"}, "exec.node.nodes must name at least one pattern"},
+		{"bad pattern", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"a*b"}}, "exec.node.nodes"},
+		{"empty shell arg", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}, Shell: []string{" "}}, "exec.node.shell[0] must not be empty"},
+		{"max_session_sec low", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}, MaxSessionSec: 5}, "exec.node.max_session_sec"},
+		{"max_sessions high", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}, MaxSessions: 17}, "exec.node.max_sessions"},
+		{"ready timeout high", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}, HelperReadyTimeoutSec: 601}, "exec.node.helper_ready_timeout_sec"},
+		{"bad namespace", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}, Namespace: "Not_Valid"}, "exec.node.namespace"},
+		{"valid", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &config.Config{}
+			c.Exec.Node = tc.node
+			got := config.ValidateExecForTest(c)
+			if tc.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("unexpected violations: %v", got)
+				}
+				return
+			}
+			for _, v := range got {
+				if strings.Contains(v, tc.want) {
+					return
+				}
+			}
+			t.Fatalf("violations %v lack %q", got, tc.want)
+		})
+	}
+}
+
+// Rules are validated even when disabled, the ruling every other section
+// follows: a section switched on tomorrow was checked today.
+func TestValidateNodeExecRulesIgnoresEnabled(t *testing.T) {
+	if v := config.ValidateNodeExecRules([]string{"ok-*", "*bad"}); len(v) != 1 || !strings.Contains(v[0], "*bad") {
+		t.Fatalf("violations = %v", v)
+	}
+}

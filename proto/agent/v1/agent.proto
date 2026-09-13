@@ -63,7 +63,7 @@ message AgentCapabilities {
   bool metrics = 3;
   bool mutate    = 4;
   bool exec_pod  = 5;   // reserved for phase B; the agent sets it false here
-  bool exec_node = 6;   // reserved for phase C; the agent sets it false here
+  bool exec_node = 6;   // true when exec.node.enabled and the agent resolved its own Pod (see internal/exec/nodeshell.go)
 }
 
 message Heartbeat {
@@ -539,4 +539,10 @@ enum ExecExitReason {
   EXEC_EXIT_REASON_RESUME_EXPIRED    = 6;  // no re-attach inside resume_window_sec
   EXEC_EXIT_REASON_CLOSED            = 7;  // the gateway sent ExecClose
   EXEC_EXIT_REASON_INTERNAL          = 8;
+  // The node console's helper Pod could not be created, or never became
+  // Running: an RBAC refusal on pods create, a Pod Security / policy
+  // admission refusal, a quota, an image that cannot be pulled, or the
+  // ready timeout. message carries the API server's or kubelet's own
+  // text so the operator sees which. Phase C.
+  EXEC_EXIT_REASON_HELPER_REJECTED   = 9;
 }
