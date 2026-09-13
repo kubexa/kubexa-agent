@@ -299,14 +299,10 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		_ = q.Close()
 		return fmt.Errorf("exec transport: %w", err)
 	}
-	// HelperNamespace is only known once buildExecResponder has resolved the
-	// agent's own identity (or given up on it) -- see its own Node-wiring
-	// comment. Empty when exec.node ended up disabled, matching a nil
-	// nodePolicy in the capability options below.
-	var helperNamespace string
-	if execOpts.Node != nil {
-		helperNamespace = execOpts.Node.Namespace
-	}
+	// capabilityNodeWiring derives what the reporter sees from execOpts (what
+	// buildExecResponder actually built), not from nodePolicy unconditionally
+	// -- see its own doc comment for why.
+	reporterNodePolicy, helperNamespace := capabilityNodeWiring(execOpts, nodePolicy)
 
 	// One rule store, shared. The stream manager is its only writer (it is the
 	// only component that sees the gateway's messages) and the log collector
@@ -318,7 +314,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	// heartbeat reports one number per reason.
 	ruleCounters := ingestrules.NewCounters()
 
-	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy, mutatePolicy, execPolicy, nodePolicy, helperNamespace, rulesStore, ruleCounters)
+	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy, mutatePolicy, execPolicy, reporterNodePolicy, helperNamespace, rulesStore, ruleCounters)
 	if err != nil {
 		_ = q.Close()
 		return fmt.Errorf("collectors: %w", err)
@@ -639,10 +635,22 @@ func buildExecResponder(
 	}
 	opts.Clients = *clients
 
+	// bootCtx bounds both the own-Pod identity Get below and the helper
+	// sweep after exec.New: a stuck API server must not hold up the rest of
+	// startup for either call, and resolving identity deserves no less of a
+	// bound than the sweep it gates. Declared here (rather than inside the
+	// ExecNodeEnabled branch) so the same context, and the same 30s budget,
+	// covers both call sites -- there is exactly one boot-time deadline for
+	// exec.node's setup, not one per call.
+	var bootCtx context.Context
 	if cfg.ExecNodeEnabled() {
+		var cancel context.CancelFunc
+		bootCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
 		ns := cfg.ExecNodeSettings()
 		no := &exec.NodeOptions{Policy: nodePolicy, Settings: ns}
-		own, err := resolveOwnPod(context.Background(), clients.Clientset)
+		own, err := resolveOwnPod(bootCtx, clients.Clientset)
 		switch {
 		case err != nil:
 			// No identity, no node console: an ownerless helper by accident
@@ -669,16 +677,36 @@ func buildExecResponder(
 
 	if opts.Node != nil {
 		// Every helper is an orphan at boot: no session survives an agent
-		// restart. Best-effort and bounded so a stuck API server never
-		// holds up the rest of startup.
-		sweepCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		exec.SweepHelpers(sweepCtx, opts.Clients.Clientset, opts.Node.Namespace, log)
+		// restart. Best-effort, and bounded by the same bootCtx the identity
+		// resolution above used, so a stuck API server never holds up the
+		// rest of startup.
+		exec.SweepHelpers(bootCtx, opts.Clients.Clientset, opts.Node.Namespace, log)
 	}
 
 	return exec.NewTransport(m, dial, exec.Identity{
 		ClusterID: cfg.Agent.ClusterID, TenantToken: cfg.Agent.TenantToken,
 	}, log), opts, nil
+}
+
+// capabilityNodeWiring derives the capability reporter's node-exec inputs
+// from execOpts -- the exec.Options buildExecResponder actually built --
+// rather than forwarding nodePolicy unconditionally. execOpts.Node is nil
+// not only when exec.node is off, but also when it is ON and the agent
+// could not resolve its own Pod (see buildExecResponder's identity-failure
+// branch); in that second case the handshake's exec_node capability already
+// reports false (nodeConsoleReady reads exec.Manager.NodeReady, which is
+// gated the same way, through opts.Node), so the capability reporter must
+// see the same "not answering" fact. Forwarding nodePolicy unconditionally
+// here would let the "nodes" catalog entry answer policy_exec=true and issue
+// its two SSARs cluster-wide (helperNamespace empty, since it too must come
+// from execOpts.Node) while the handshake says exec_node=false -- the
+// catalog and the handshake would disagree about a console that is, in
+// fact, down.
+func capabilityNodeWiring(execOpts exec.Options, nodePolicy *execpolicy.NodePolicy) (*execpolicy.NodePolicy, string) {
+	if execOpts.Node == nil {
+		return nil, ""
+	}
+	return nodePolicy, execOpts.Node.Namespace
 }
 
 // buildCapabilityReporterOptions builds the Options capability.NewReporter is
@@ -729,15 +757,23 @@ func buildCapabilityReporterOptions(
 		// NodeExecPolicy is a FOURTH, independent policy source, mirroring
 		// ExecPolicy immediately above for exec.node instead of exec.pod: it
 		// must be wired here or the "nodes" entry's can_exec/policy_exec
-		// report false forever, whatever exec.node.nodes says. A disabled or
-		// invalid exec.node section compiles to a nil *execpolicy.NodePolicy
-		// (see compileNodeExecPolicy), which is the same harmless typed-nil
-		// shape ExecPolicy's own comment describes -- AllowsAnyNode is
-		// nil-receiver-safe.
+		// report false forever, whatever exec.node.nodes says. A disabled
+		// but valid exec.node section compiles to a NON-nil
+		// *execpolicy.NodePolicy whose AllowsAnyNode answers false (see
+		// compileNodeExecPolicy); nil arrives only from the invalid+disabled
+		// branch there, which is the same harmless typed-nil shape
+		// ExecPolicy's own comment describes -- either way AllowsAnyNode is
+		// nil-receiver-safe. The caller also passes nil here whenever
+		// exec.node ended up unable to answer at all -- identity resolution
+		// failed even though the section is enabled -- so this field agrees
+		// with HelperNamespace below and with the handshake's exec_node
+		// about whether the console is actually up, not just configured.
 		NodeExecPolicy: nodeExecPolicy,
 		// HelperNamespace scopes the "nodes" SSARs to where helper Pods are
-		// actually created. Empty when exec.node is not configured, in which
-		// case probeExec never issues them (nodeExecPolicy is also nil then).
+		// actually created. Empty whenever exec.node is not answering --
+		// disabled, invalid, or (see serve()) an own-Pod identity failure --
+		// in which case probeExec never issues them (nodeExecPolicy is nil
+		// in the same cases).
 		HelperNamespace: helperNamespace,
 	}
 }
