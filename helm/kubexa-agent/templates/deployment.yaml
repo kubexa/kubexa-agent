@@ -59,6 +59,17 @@ spec:
                 secretKeyRef:
                   name: {{ include "kubexa-agent.secretName" . }}
                   key: {{ .Values.secret.existingSecretKey }}
+            # Downward API: the agent's own Pod, so a node console's helper
+            # Pod can carry an ownerReference to it. Unconditional and inert
+            # when exec.node is off.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- $goMemLimit := include "kubexa-agent.goMemLimit" . }}
             {{- if and $goMemLimit (not (hasKey (.Values.env | default dict) "GOMEMLIMIT")) }}
             - name: GOMEMLIMIT
