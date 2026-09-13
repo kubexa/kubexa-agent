@@ -57,3 +57,15 @@ func TestExecServiceHasExecSession(t *testing.T) {
 		t.Fatal("AgentService.ExecSession must be a bidirectional stream")
 	}
 }
+
+// The backend maps the agent's exit reason by its enum NAME, so the name
+// and value are wire contract: renumbering or renaming breaks a release.
+func TestHelperRejectedReasonIsPinned(t *testing.T) {
+	const want = 9
+	if got := int32(agentv1.ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED); got != want {
+		t.Fatalf("HELPER_REJECTED = %d, want %d", got, want)
+	}
+	if s := agentv1.ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED.String(); s != "EXEC_EXIT_REASON_HELPER_REJECTED" {
+		t.Fatalf("name = %q", s)
+	}
+}
