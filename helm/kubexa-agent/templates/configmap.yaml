@@ -197,6 +197,21 @@ data:
         max_session_sec: {{ .Values.exec.pod.maxSessionSec }}
         max_sessions: {{ .Values.exec.pod.maxSessions }}
         resume_window_sec: {{ .Values.exec.pod.resumeWindowSec }}
+      node:
+        enabled: {{ .Values.exec.node.enabled }}
+        {{- with .Values.exec.node.nodes }}
+        nodes:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        image: {{ .Values.exec.node.image | quote }}
+        namespace: {{ .Values.exec.node.namespace | quote }}
+        {{- with .Values.exec.node.shell }}
+        shell:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        max_session_sec: {{ .Values.exec.node.maxSessionSec }}
+        max_sessions: {{ .Values.exec.node.maxSessions }}
+        helper_ready_timeout_sec: {{ .Values.exec.node.helperReadyTimeoutSec }}
 
     buffer:
       max_memory_bytes: {{ .Values.buffer.maxMemoryBytes }}
