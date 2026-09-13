@@ -427,3 +427,74 @@ func TestNodeReady(t *testing.T) {
 		t.Fatal("transport must report the manager's readiness")
 	}
 }
+
+// The pod cap and the node cap are separate sections' limits; a node
+// session must not consume a pod slot. Regression for a bug where openNode
+// inserted into the same m.sessions map the pod path counts against.
+func TestOpenPodMaxSessionsExcludesNodeSessions(t *testing.T) {
+	c := &config.Config{}
+	on := true
+	c.Exec.Pod.Enabled = &on
+	c.Exec.Pod.Rules = []config.PodExecRule{{}}
+	c.Exec.Pod.MaxSessions = 1
+	pol, err := policy.Compile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nc := &config.Config{}
+	nc.Exec.Node.Enabled = &on
+	nc.Exec.Node.Nodes = []string{"*"}
+	nc.Exec.Node.Image = "busybox:1.36"
+	nc.Exec.Node.MaxSessions = 1
+	nc.Exec.Node.HelperReadyTimeoutSec = 5
+	np, err := policy.CompileNode(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cs := fake.NewSimpleClientset(node("n1"), webPod())
+	cs.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		p := a.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+		p.Status.Phase = corev1.PodRunning
+		return false, nil, nil
+	})
+	fe := &fakeExecutor{started: make(chan struct{}, 8)}
+	m, err := New(Options{
+		Policy:   pol,
+		Clients:  k8s.ExecClients{Clientset: cs, REST: &rest.Config{Host: "https://example"}},
+		Settings: c.ExecPodSettings(),
+		Node: &NodeOptions{
+			Policy:    np,
+			Settings:  nc.ExecNodeSettings(),
+			Owner:     &OwnPod{Name: "kubexa-agent-1", Namespace: "kubexa", UID: "u1"},
+			Namespace: "kubexa",
+		},
+		newExecutor: func(*rest.Config, *url.URL) (remotecommand.Executor, error) { return fe, nil },
+		helperPoll:  time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A node session first -- it must not consume the pod slot.
+	ns, r := m.Open(context.Background(), nodeOpen("n1"))
+	if r != nil {
+		t.Fatal(r)
+	}
+	defer ns.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "")
+
+	// Pod cap is 1: exactly one pod session must still succeed...
+	ps, r := m.Open(context.Background(), open("dev", "web-1", "app"))
+	if r != nil {
+		t.Fatalf("pod session refused despite a free pod slot: %v", r)
+	}
+	defer ps.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "")
+
+	// ...and the next one refuses on the pod cap, not the node cap.
+	o := open("dev", "web-1", "app")
+	o.SessionId = "pod-2"
+	if _, r := m.Open(context.Background(), o); r == nil || r.Reason != agentv1.ExecExitReason_EXEC_EXIT_REASON_TOO_MANY_SESSIONS {
+		t.Fatalf("r = %v", r)
+	}
+}
