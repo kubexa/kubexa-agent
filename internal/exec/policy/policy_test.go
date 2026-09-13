@@ -90,3 +90,50 @@ func TestNilConfigCompiles(t *testing.T) {
 		t.Fatalf("nil config: err=%v", err)
 	}
 }
+
+func nodeCfg(enabled bool, nodes ...string) *config.Config {
+	c := &config.Config{}
+	c.Exec.Node.Enabled = &enabled
+	c.Exec.Node.Nodes = nodes
+	c.Exec.Node.Image = "busybox"
+	return c
+}
+
+func TestNodePolicyDecides(t *testing.T) {
+	p, err := policy.CompileNode(nodeCfg(true, "aks-*", "control-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := p.Decide("aks-pool-0"); !d.Allowed || d.RuleID != "exec.node.nodes[0]" {
+		t.Fatalf("aks-pool-0: %+v", d)
+	}
+	if d := p.Decide("control-1"); !d.Allowed || d.RuleID != "exec.node.nodes[1]" {
+		t.Fatalf("control-1: %+v", d)
+	}
+	if d := p.Decide("gke-x"); d.Allowed || d.Reason == "" {
+		t.Fatalf("gke-x: %+v", d)
+	}
+	if !p.AllowsAnyNode() {
+		t.Fatal("AllowsAnyNode")
+	}
+}
+
+func TestNodePolicyDisabledAndNil(t *testing.T) {
+	p, err := policy.CompileNode(nodeCfg(false, "*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := p.Decide("any"); d.Allowed || d.Reason != "node console is disabled in this agent's configuration" {
+		t.Fatalf("disabled: %+v", d)
+	}
+	var nilP *policy.NodePolicy
+	if nilP.Decide("any").Allowed || nilP.AllowsAnyNode() {
+		t.Fatal("nil policy must deny")
+	}
+}
+
+func TestNodePolicyValidatesEvenWhenDisabled(t *testing.T) {
+	if _, err := policy.CompileNode(nodeCfg(false, "a*b")); err == nil {
+		t.Fatal("expected a compile error for a mid-string wildcard")
+	}
+}
