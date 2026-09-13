@@ -122,3 +122,46 @@ func matchesPattern(value string, patterns []string) bool {
 	}
 	return false
 }
+
+// NodePolicy decides whether a node console may open on a node. It lives
+// beside Policy rather than in its own package: there is no inverted
+// default to keep apart (both sections mean "no rule, no shell"), and
+// matchesPattern is exactly what it needs.
+type NodePolicy struct {
+	enabled  bool
+	patterns []string
+}
+
+// CompileNode builds a NodePolicy. Patterns are validated UNCONDITIONALLY,
+// before enabled is read, for the reason Compile gives.
+func CompileNode(root *pkgconfig.Config) (*NodePolicy, error) {
+	if root == nil {
+		return &NodePolicy{}, nil
+	}
+	patterns := root.ExecNodeRules()
+	if v := pkgconfig.ValidateNodeExecRules(patterns); len(v) > 0 {
+		return nil, fmt.Errorf("exec.node rules: %s", strings.Join(v, "; "))
+	}
+	return &NodePolicy{enabled: root.ExecNodeEnabled(), patterns: trimAll(patterns)}, nil
+}
+
+// Decide evaluates one node name. The first matching pattern decides and
+// names the rule as exec.node.nodes[i]. An empty pattern list matches
+// nothing: unlike a pod rule's fields, "no nodes" is not "all nodes" (see
+// NodeExecConfig.Nodes).
+func (p *NodePolicy) Decide(node string) Decision {
+	if p == nil || !p.enabled {
+		return Decision{Reason: "node console is disabled in this agent's configuration"}
+	}
+	for i, pat := range p.patterns {
+		if matchesPattern(node, []string{pat}) {
+			return Decision{Allowed: true, RuleID: fmt.Sprintf("exec.node.nodes[%d]", i)}
+		}
+	}
+	return Decision{Reason: fmt.Sprintf("node %q matches no exec.node.nodes pattern", node)}
+}
+
+// AllowsAnyNode reports whether at least one node could be entered.
+func (p *NodePolicy) AllowsAnyNode() bool {
+	return p != nil && p.enabled && len(p.patterns) > 0
+}
