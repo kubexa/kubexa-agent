@@ -91,6 +91,78 @@ func TestHandshakeAdvertisesExecPodFromConfig(t *testing.T) {
 	})
 }
 
+// nodeReadyResponder wraps an ExecResponder and additionally answers
+// NodeConsoleReady, so the handshake can be tested against a responder that
+// implements NodeConsoleReporter and one that does not.
+type nodeReadyResponder struct {
+	ExecResponder
+	ready bool
+}
+
+func (n nodeReadyResponder) NodeConsoleReady() bool { return n.ready }
+
+// TestHandshakeAdvertisesExecNodeFromTheResponder pins that ExecNode in the
+// handshake is read from the ExecResponder via NodeConsoleReporter, not from
+// config: a responder that answers NodeConsoleReady(true) advertises
+// ExecNode true, and a plain responder without that method advertises false.
+func TestHandshakeAdvertisesExecNodeFromTheResponder(t *testing.T) {
+	t.Parallel()
+
+	t.Run("responder ready", func(t *testing.T) {
+		t.Parallel()
+		if got := handshakeExecNodeCap(t, nodeReadyResponder{ready: true}); !got {
+			t.Fatal("Caps.ExecNode = false, want true when the responder's NodeConsoleReady() is true")
+		}
+	})
+
+	t.Run("plain responder", func(t *testing.T) {
+		t.Parallel()
+		if got := handshakeExecNodeCap(t, &recordingExecResponder{opened: make(chan *agentv1.ExecOpen, 1)}); got {
+			t.Fatal("Caps.ExecNode = true, want false when the responder does not implement NodeConsoleReporter")
+		}
+	})
+}
+
+// handshakeExecNodeCap builds a manager exactly as handshakeExecPodCap does,
+// but with the given exec responder wired in directly, and returns the
+// Caps.ExecNode value the agent advertised.
+func handshakeExecNodeCap(t *testing.T, responder ExecResponder) bool {
+	t.Helper()
+
+	got := make(chan *agentv1.AgentCapabilities, 1)
+	srv := &mockGateway{
+		onConnect: func(stream grpc.BidiStreamingServer[agentv1.AgentMessage, agentv1.GatewayMessage]) error {
+			msg, err := stream.Recv()
+			if err != nil {
+				return err
+			}
+			got <- msg.GetHandshake().GetCaps()
+			return stream.Send(&agentv1.GatewayMessage{
+				Payload: &agentv1.GatewayMessage_Handshake{
+					Handshake: &agentv1.HandshakeResponse{Accepted: true, SessionId: "sess-exec-node-caps"},
+				},
+			})
+		},
+	}
+	_, lis := startBufGRPCServer(t, srv)
+
+	cfg := testConfig()
+	sm, _ := newTestManager(t, cfg, newTestQueue(t), lis)
+	sm.execResponder = responder
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() { _ = sm.Run(ctx) }()
+
+	select {
+	case caps := <-got:
+		return caps.GetExecNode()
+	case <-time.After(3 * time.Second):
+		t.Fatal("handshake was never observed by the fake gateway")
+		return false
+	}
+}
+
 // handshakeExecPodCap builds a manager with exec.pod.enabled set to enabled,
 // runs it against a fake gateway that captures the handshake, and returns
 // the Caps.ExecPod value the agent advertised. ExecNode is asserted unset

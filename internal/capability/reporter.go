@@ -54,6 +54,16 @@ type Options struct {
 	// configured, exactly as a nil MutatePolicy means mutation is not
 	// configured. See ExecPolicySource's doc comment in probe.go.
 	ExecPolicy ExecPolicySource
+	// NodeExecPolicy is a FOURTH, independent policy source alongside
+	// Policy, MutatePolicy and ExecPolicy above: the node console is
+	// configured (or not) independently of the pod console. A nil value
+	// here means exec.node is not configured. See NodeExecPolicySource's
+	// doc comment in probe.go.
+	NodeExecPolicy NodeExecPolicySource
+	// HelperNamespace is the namespace the node console's helper Pods are
+	// created in. It scopes the "nodes" SSARs probeExec issues; empty when
+	// exec.node is not configured.
+	HelperNamespace string
 }
 
 // PolicySource reports the agent's configured live-query policy per resource.
@@ -91,6 +101,8 @@ type Reporter struct {
 	policy            PolicySource
 	mutatePolicy      MutatePolicySource
 	execPolicy        ExecPolicySource
+	nodeExecPolicy    NodeExecPolicySource
+	helperNamespace   string
 
 	state sweepState
 
@@ -144,6 +156,8 @@ func NewReporter(opts Options) (*Reporter, error) {
 		policy:            opts.Policy,
 		mutatePolicy:      opts.MutatePolicy,
 		execPolicy:        opts.ExecPolicy,
+		nodeExecPolicy:    opts.NodeExecPolicy,
+		helperNamespace:   opts.HelperNamespace,
 	}
 	if r.discoveryInterval <= 0 {
 		r.discoveryInterval = defaultDiscoveryInterval
@@ -233,7 +247,7 @@ func (r *Reporter) refresh(ctx context.Context) {
 		return
 	}
 
-	capabilities := Probe(ctx, r.cs.AuthorizationV1(), gvrs, r.workers, r.mutatePolicy, r.execPolicy)
+	capabilities := Probe(ctx, r.cs.AuthorizationV1(), gvrs, r.workers, r.mutatePolicy, r.execPolicy, r.nodeExecPolicy, r.helperNamespace)
 	if ctx.Err() != nil {
 		return
 	}

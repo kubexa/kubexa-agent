@@ -74,6 +74,17 @@ type ExecPolicySource interface {
 	AllowsAnyPod() bool
 }
 
+// NodeExecPolicySource reports whether the agent's node console
+// configuration permits a session on any node at all. It is a FOURTH
+// independent policy source alongside PolicySource, MutatePolicySource and
+// ExecPolicySource above, for the same reason: live query, mutation, the pod
+// console, and the node console are each configured (or not) independently,
+// and a primitive-only method keeps this package independent of
+// internal/exec/policy.
+type NodeExecPolicySource interface {
+	AllowsAnyNode() bool
+}
+
 const defaultProbeWorkers = 8
 
 // Probe asks the API server, for each GVR, whether this agent may list and
@@ -89,7 +100,9 @@ const defaultProbeWorkers = 8
 // mutatePolicy is nil when the mutate section is disabled, in which case no
 // write verb is ever probed -- see probeWrites. execPolicy is nil the same
 // way when exec.pod is disabled, in which case no exec verb is ever probed
-// -- see probeExec.
+// -- see probeExec. nodeExecPolicy is nil the same way again when exec.node
+// is disabled; helperNamespace scopes the "nodes" entry's SSARs to where its
+// helper Pods are actually created, rather than metav1.NamespaceAll.
 func Probe(
 	ctx context.Context,
 	authz authzv1client.AuthorizationV1Interface,
@@ -97,6 +110,8 @@ func Probe(
 	workers int,
 	mutatePolicy MutatePolicySource,
 	execPolicy ExecPolicySource,
+	nodeExecPolicy NodeExecPolicySource,
+	helperNamespace string,
 ) []Capability {
 	if workers <= 0 {
 		workers = defaultProbeWorkers
@@ -125,7 +140,7 @@ func Probe(
 
 			// Exec is an independent fact from list/watch too, for the same
 			// reason probeWrites is called here rather than nested below.
-			probeExec(ctx, authz, g, execPolicy, &c)
+			probeExec(ctx, authz, g, execPolicy, nodeExecPolicy, helperNamespace, &c)
 
 			canList, listErr := allowed(ctx, authz, g, "", "list")
 			if listErr != nil {
@@ -247,13 +262,42 @@ func probeWrites(
 //
 // execPolicy is nil when exec.pod is disabled, in which case this entirely
 // skips, the same way probeWrites skips on a nil mutatePolicy.
+//
+// The core-group "nodes" entry is Phase C's node console: it is handled
+// first, as its own early-returning branch, because it answers a completely
+// different question (a helper Pod in helperNamespace, not the node itself)
+// with its own policy source, nodeExecPolicy. nodeExecPolicy nil means
+// exec.node is disabled, mirroring execPolicy nil above; a non-nil interface
+// wrapping a nil policy pointer is the acceptable typed-nil described on
+// NodePolicy.AllowsAnyNode -- it is nil-receiver-safe, so it simply answers
+// false here, same as an explicit "not configured".
 func probeExec(
 	ctx context.Context,
 	authz authzv1client.AuthorizationV1Interface,
 	g GVR,
 	execPolicy ExecPolicySource,
+	nodeExecPolicy NodeExecPolicySource,
+	helperNamespace string,
 	c *Capability,
 ) {
+	if g.Group == "" && g.Resource == "nodes" {
+		if nodeExecPolicy == nil {
+			return
+		}
+		c.PolicyExec = nodeExecPolicy.AllowsAnyNode()
+		if !c.PolicyExec {
+			return
+		}
+		// Two verdicts ANDed: the helper Pod must be creatable in its
+		// namespace AND pods/exec there must be allowed. Either missing
+		// makes the console fail after a click; false here hides it first.
+		create, err1 := allowedIn(ctx, authz, helperNamespace, GVR{Resource: "pods"}, "", "create")
+		execOK, err2 := allowedIn(ctx, authz, helperNamespace, GVR{Resource: "pods"}, "exec", "create")
+		if err1 == nil && err2 == nil {
+			c.CanExec = create && execOK
+		}
+		return
+	}
 	if g.Group != "" || g.Resource != "pods" {
 		return
 	}
@@ -274,7 +318,10 @@ func probeExec(
 
 // subresource is empty for every call site except probeExec's: an empty
 // Subresource on ResourceAttributes means the top-level resource itself,
-// exactly matching every pre-existing call's behaviour.
+// exactly matching every pre-existing call's behaviour. allowed asks
+// cluster-wide, matching how the agent reads (cluster-wide informers, not
+// per-namespace); allowedIn is the namespaced variant probeExec's "nodes"
+// branch uses to scope the SSAR to the helper namespace instead.
 func allowed(
 	ctx context.Context,
 	authz authzv1client.AuthorizationV1Interface,
@@ -282,12 +329,21 @@ func allowed(
 	subresource string,
 	verb string,
 ) (bool, error) {
+	return allowedIn(ctx, authz, metav1.NamespaceAll, g, subresource, verb)
+}
+
+func allowedIn(
+	ctx context.Context,
+	authz authzv1client.AuthorizationV1Interface,
+	namespace string,
+	g GVR,
+	subresource string,
+	verb string,
+) (bool, error) {
 	review := &authv1.SelfSubjectAccessReview{
 		Spec: authv1.SelfSubjectAccessReviewSpec{
 			ResourceAttributes: &authv1.ResourceAttributes{
-				// Empty namespace means "in every namespace", which matches how
-				// the agent reads: cluster-wide informers, not per-namespace.
-				Namespace:   metav1.NamespaceAll,
+				Namespace:   namespace,
 				Group:       g.Group,
 				Version:     g.Version,
 				Resource:    g.Resource,
