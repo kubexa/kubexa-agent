@@ -27,3 +27,13 @@ OCI install (GHCR):
     --create-namespace \
     --set gateway.host=gateway.example.com \
     --set secret.tenantToken=<token>
+{{- if .Values.rbac.nodeShell }}
+
+NODE CONSOLE (rbac.nodeShell=true): a node console is a root shell on the
+node. Before enabling exec.node in the agent config:
+  * the namespace the helper Pods use ({{ .Values.exec.node.namespace | default .Release.Namespace }})
+    must not carry pod-security.kubernetes.io/enforce=baseline or =restricted;
+    check with: kubectl get ns {{ .Values.exec.node.namespace | default .Release.Namespace }} --show-labels
+  * exec.node.image must be an image every node can pull that has `sleep`
+    and `nsenter` on its PATH (busybox does).
+{{- end }}

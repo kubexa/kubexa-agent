@@ -39,6 +39,13 @@
           ],
           "description": "Grants the ServiceAccount pods get and pods/exec create. NOT derived from exec.pod -- see the comment beside rbac.exec in values.yaml."
         },
+        "nodeShell": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Grants the ServiceAccount create/get/list/watch/delete on pods in the release namespace and pods/exec create. NOT derived from exec.node -- see the comment beside rbac.nodeShell in values.yaml."
+        },
         "extraRules": {
           "type": [
             "array",
@@ -1301,6 +1308,95 @@
                 "null"
               ],
               "minimum": -1,
+              "maximum": 600
+            }
+          }
+        },
+        "node": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "nodes": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "null",
+                  "number",
+                  "string"
+                ],
+                "pattern": "^[^*]*\\*?$"
+              }
+            },
+            "image": {
+              "type": [
+                "boolean",
+                "integer",
+                "null",
+                "number",
+                "string"
+              ]
+            },
+            "namespace": {
+              "type": [
+                "boolean",
+                "integer",
+                "null",
+                "number",
+                "string"
+              ],
+              "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
+            },
+            "shell": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "null",
+                  "number",
+                  "string"
+                ]
+              }
+            },
+            "maxSessionSec": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 10,
+              "maximum": 86400
+            },
+            "maxSessions": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 16
+            },
+            "helperReadyTimeoutSec": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 5,
               "maximum": 600
             }
           }

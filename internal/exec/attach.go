@@ -62,6 +62,9 @@ func NewTransport(m *Manager, dial Dialer, ident Identity, log *logger.Logger) *
 	return &Transport{m: m, dial: dial, ident: ident, log: log}
 }
 
+// NodeConsoleReady is what the handshake's exec_node capability reads.
+func (t *Transport) NodeConsoleReady() bool { return t.m.NodeReady() }
+
 // Open satisfies stream.ExecResponder. It returns immediately; the session
 // runs on its own goroutines -- Manager.Open included, since it looks the
 // pod up on the API server and the caller is the Connect recv loop, which

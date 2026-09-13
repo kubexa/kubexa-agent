@@ -1,0 +1,17 @@
+{{- if and .Values.rbac.create .Values.rbac.nodeShell }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kubexa-agent.fullname" . }}-node-shell
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kubexa-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kubexa-agent.fullname" . }}-node-shell
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kubexa-agent.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

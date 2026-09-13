@@ -9,9 +9,11 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 
+	"github.com/kubexa/kubexa-agent/internal/exec"
 	execpolicy "github.com/kubexa/kubexa-agent/internal/exec/policy"
 	"github.com/kubexa/kubexa-agent/internal/k8s"
 	"github.com/kubexa/kubexa-agent/internal/logger"
@@ -274,6 +276,22 @@ func compiledExecPolicy(t *testing.T) *execpolicy.Policy {
 	return p
 }
 
+// compiledNodeExecPolicy compiles a valid, non-nil node exec policy, mirroring
+// compiledExecPolicy's shape for exec.node instead of exec.pod.
+func compiledNodeExecPolicy(t *testing.T) *execpolicy.NodePolicy {
+	t.Helper()
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Exec.Node.Enabled = &enabled
+	cfg.Exec.Node.Image = "busybox"
+	cfg.Exec.Node.Nodes = []string{"*"}
+	p, err := execpolicy.CompileNode(cfg)
+	if err != nil {
+		t.Fatalf("execpolicy.CompileNode: %v", err)
+	}
+	return p
+}
+
 // TestBuildCapabilityReporterOptionsWiresBothPolicies pins the wiring gap
 // Task 6 shipped without: nothing previously asserted that a mutate policy
 // reaches capability.Options at all, so an omitted MutatePolicy line left
@@ -295,8 +313,9 @@ func TestBuildCapabilityReporterOptionsWiresBothPolicies(t *testing.T) {
 	queryPolicy := compiledQueryPolicy(t)
 	mutatePolicy := compiledMutatePolicy(t)
 	execPolicy := compiledExecPolicy(t)
+	nodeExecPolicy := compiledNodeExecPolicy(t)
 
-	opts := buildCapabilityReporterOptions(cfg, nil, nil, queryPolicy, mutatePolicy, execPolicy)
+	opts := buildCapabilityReporterOptions(cfg, nil, nil, queryPolicy, mutatePolicy, execPolicy, nodeExecPolicy, "kubexa")
 
 	if opts.Policy != queryPolicy {
 		t.Fatalf("opts.Policy = %p, want the exact queryPolicy passed in (%p)", opts.Policy, queryPolicy)
@@ -306,6 +325,12 @@ func TestBuildCapabilityReporterOptionsWiresBothPolicies(t *testing.T) {
 	}
 	if opts.ExecPolicy != execPolicy {
 		t.Fatalf("opts.ExecPolicy = %p, want the exact execPolicy passed in (%p)", opts.ExecPolicy, execPolicy)
+	}
+	if opts.NodeExecPolicy != nodeExecPolicy {
+		t.Fatalf("opts.NodeExecPolicy = %p, want the exact nodeExecPolicy passed in (%p)", opts.NodeExecPolicy, nodeExecPolicy)
+	}
+	if opts.HelperNamespace != "kubexa" {
+		t.Fatalf("opts.HelperNamespace = %q, want %q", opts.HelperNamespace, "kubexa")
 	}
 }
 
@@ -324,6 +349,13 @@ func fakeExecClientsFactory() func() (*k8s.ExecClients, error) {
 // once an exec_open arrives.
 func nilExecDialer(context.Context) (agentv1.AgentService_ExecSessionClient, error) {
 	return nil, errors.New("not dialled in tests")
+}
+
+// nilResolveOwnPod is never called by tests whose exec.node is disabled --
+// buildExecResponder only calls resolveOwnPod inside the ExecNodeEnabled
+// branch.
+func nilResolveOwnPod(context.Context, kubernetes.Interface) (exec.OwnPod, error) {
+	return exec.OwnPod{}, errors.New("not resolved in tests")
 }
 
 // TestCompileExecPolicyWarnsAndContinuesWhenDisabled pins the ruling
@@ -366,6 +398,45 @@ func TestCompileExecPolicyWarnsAndContinuesWhenDisabled(t *testing.T) {
 	})
 }
 
+// TestCompileNodeExecPolicyWarnsAndContinuesWhenDisabled mirrors
+// TestCompileExecPolicyWarnsAndContinuesWhenDisabled for exec.node instead
+// of exec.pod.
+func TestCompileNodeExecPolicyWarnsAndContinuesWhenDisabled(t *testing.T) {
+	bad := []string{"de*v"}
+
+	t.Run("disabled", func(t *testing.T) {
+		disabled := false
+		cfg := &config.Config{}
+		cfg.Exec.Node.Enabled = &disabled
+		cfg.Exec.Node.Nodes = bad
+		var buf bytes.Buffer
+		p, err := compileNodeExecPolicy(cfg, logger.New("test", logger.WithWriter(&buf)))
+		if err != nil {
+			t.Fatalf("compileNodeExecPolicy() error = %v, want nil for a disabled section", err)
+		}
+		if p != nil {
+			t.Fatalf("compileNodeExecPolicy() policy = %+v, want nil -- the console must stay disabled", p)
+		}
+		if logged := buf.String(); !strings.Contains(logged, "exec.node") || !strings.Contains(strings.ToLower(logged), "warn") {
+			t.Fatalf("warning log = %q, want a warn line naming exec.node", logged)
+		}
+	})
+
+	t.Run("enabled", func(t *testing.T) {
+		enabled := true
+		cfg := &config.Config{}
+		cfg.Exec.Node.Enabled = &enabled
+		cfg.Exec.Node.Nodes = bad
+		p, err := compileNodeExecPolicy(cfg, logger.New("test"))
+		if err == nil {
+			t.Fatal("compileNodeExecPolicy() error = nil, want an error for an invalid pattern with exec.node enabled")
+		}
+		if p != nil {
+			t.Fatalf("compileNodeExecPolicy() policy = %+v, want nil alongside a fatal error", p)
+		}
+	})
+}
+
 // TestBuildExecResponderIsNilWhenDisabled mirrors
 // TestBuildMutationResponderNilResponderWhenDisabled and its factory
 // counterpart: a disabled agent gets a nil responder (so the dispatcher
@@ -380,7 +451,7 @@ func TestBuildExecResponderIsNilWhenDisabled(t *testing.T) {
 		calls++
 		return fakeExecClientsFactory()()
 	}
-	responder, opts, err := buildExecResponder(cfg, nil, factory, nilExecDialer, logger.New("test"), nil)
+	responder, opts, err := buildExecResponder(cfg, nil, nil, factory, nilExecDialer, logger.New("test"), nil, nilResolveOwnPod)
 	if err != nil {
 		t.Fatalf("buildExecResponder: %v", err)
 	}
@@ -417,7 +488,7 @@ func TestBuildExecResponderWiresPolicyAndSettings(t *testing.T) {
 		calls++
 		return fakeExecClientsFactory()()
 	}
-	responder, opts, err := buildExecResponder(cfg, execPolicy, factory, nilExecDialer, logger.New("test"), nil)
+	responder, opts, err := buildExecResponder(cfg, execPolicy, nil, factory, nilExecDialer, logger.New("test"), nil, nilResolveOwnPod)
 	if err != nil {
 		t.Fatalf("buildExecResponder: %v", err)
 	}
@@ -436,4 +507,134 @@ func TestBuildExecResponderWiresPolicyAndSettings(t *testing.T) {
 	if opts.Clients.Clientset == nil || opts.Clients.REST == nil {
 		t.Fatalf("opts.Clients = %+v, want the factory's clients", opts.Clients)
 	}
+}
+
+// TestBuildExecResponderWiresNodeOptions pins the Node wiring the way
+// TestBuildExecResponderWiresPolicyAndSettings pins the pod console's own:
+// the own-Pod identity lands on Node.Owner and Node.Namespace, an operator
+// override to a namespace other than the agent's own drops the owner (an
+// ownerReference cannot cross namespaces), and a failure to resolve the
+// agent's own identity disables the node console alone -- the pod console
+// (if configured) is unaffected -- with a warning naming why.
+func TestBuildExecResponderWiresNodeOptions(t *testing.T) {
+	newCfg := func() *config.Config {
+		enabled := true
+		disabled := false
+		cfg := &config.Config{}
+		cfg.Exec.Node.Enabled = &enabled
+		cfg.Exec.Node.Image = "busybox"
+		cfg.Exec.Node.Nodes = []string{"*"}
+		cfg.Exec.Pod.Enabled = &disabled
+		return cfg
+	}
+	compilePolicies := func(t *testing.T, cfg *config.Config) (*execpolicy.Policy, *execpolicy.NodePolicy) {
+		t.Helper()
+		execPolicy, err := execpolicy.Compile(cfg)
+		if err != nil {
+			t.Fatalf("execpolicy.Compile: %v", err)
+		}
+		nodePolicy, err := execpolicy.CompileNode(cfg)
+		if err != nil {
+			t.Fatalf("execpolicy.CompileNode: %v", err)
+		}
+		return execPolicy, nodePolicy
+	}
+
+	t.Run("own Pod identity", func(t *testing.T) {
+		cfg := newCfg()
+		execPolicy, nodePolicy := compilePolicies(t, cfg)
+		factory := func() (*k8s.ExecClients, error) { return fakeExecClientsFactory()() }
+		resolve := func(context.Context, kubernetes.Interface) (exec.OwnPod, error) {
+			return exec.OwnPod{Name: "a", Namespace: "kubexa", UID: "u"}, nil
+		}
+
+		responder, opts, err := buildExecResponder(cfg, execPolicy, nodePolicy, factory, nilExecDialer, logger.New("test"), nil, resolve)
+		if err != nil {
+			t.Fatalf("buildExecResponder: %v", err)
+		}
+		if responder == nil {
+			t.Fatal("responder = nil, want a transport when exec.node.enabled is true")
+		}
+		if opts.Node == nil {
+			t.Fatal("opts.Node = nil, want a NodeOptions when exec.node.enabled is true")
+		}
+		if opts.Node.Namespace != "kubexa" {
+			t.Fatalf("opts.Node.Namespace = %q, want %q (the own Pod's namespace)", opts.Node.Namespace, "kubexa")
+		}
+		if opts.Node.Owner == nil || opts.Node.Owner.UID != "u" {
+			t.Fatalf("opts.Node.Owner = %+v, want a non-nil owner with UID %q", opts.Node.Owner, "u")
+		}
+		if opts.Node.Settings.Image != "busybox" {
+			t.Fatalf("opts.Node.Settings.Image = %q, want %q", opts.Node.Settings.Image, "busybox")
+		}
+	})
+
+	t.Run("override namespace drops the owner", func(t *testing.T) {
+		cfg := newCfg()
+		cfg.Exec.Node.Namespace = "shells"
+		execPolicy, nodePolicy := compilePolicies(t, cfg)
+		factory := func() (*k8s.ExecClients, error) { return fakeExecClientsFactory()() }
+		resolve := func(context.Context, kubernetes.Interface) (exec.OwnPod, error) {
+			return exec.OwnPod{Name: "a", Namespace: "kubexa", UID: "u"}, nil
+		}
+
+		_, opts, err := buildExecResponder(cfg, execPolicy, nodePolicy, factory, nilExecDialer, logger.New("test"), nil, resolve)
+		if err != nil {
+			t.Fatalf("buildExecResponder: %v", err)
+		}
+		if opts.Node == nil {
+			t.Fatal("opts.Node = nil, want a NodeOptions when exec.node.enabled is true")
+		}
+		if opts.Node.Namespace != "shells" {
+			t.Fatalf("opts.Node.Namespace = %q, want the configured override %q", opts.Node.Namespace, "shells")
+		}
+		if opts.Node.Owner != nil {
+			t.Fatalf("opts.Node.Owner = %+v, want nil: an ownerReference cannot cross namespaces", opts.Node.Owner)
+		}
+	})
+
+	t.Run("identity failure disables only the node console", func(t *testing.T) {
+		cfg := newCfg()
+		execPolicy, nodePolicy := compilePolicies(t, cfg)
+		factory := func() (*k8s.ExecClients, error) { return fakeExecClientsFactory()() }
+		resolve := func(context.Context, kubernetes.Interface) (exec.OwnPod, error) {
+			return exec.OwnPod{}, errors.New("POD_NAME and POD_NAMESPACE are not set")
+		}
+
+		var buf bytes.Buffer
+		responder, opts, err := buildExecResponder(
+			cfg, execPolicy, nodePolicy, factory, nilExecDialer, logger.New("test", logger.WithWriter(&buf)), nil, resolve,
+		)
+		if err != nil {
+			t.Fatalf("buildExecResponder: %v", err)
+		}
+		// exec.pod may be on independently of exec.node's identity failure --
+		// here it happens to be off too, but the responder still builds
+		// because opts.Policy (the pod policy) and opts.Clients are both
+		// present; only opts.Node is affected.
+		if responder == nil {
+			t.Fatal("responder = nil, want a transport still built despite the node identity failure")
+		}
+		if opts.Node != nil {
+			t.Fatalf("opts.Node = %+v, want nil when the agent could not resolve its own Pod", opts.Node)
+		}
+		if logged := buf.String(); !strings.Contains(logged, "node console disabled") {
+			t.Fatalf("log = %q, want a warning containing %q", logged, "node console disabled")
+		}
+
+		// The capability reporter must see the SAME "not answering" fact the
+		// handshake's exec_node just reported false for. nodePolicy here is
+		// a real, non-nil policy that DOES allow a node (Nodes: ["*"]), so a
+		// regression that forwards it unconditionally passes this by
+		// answering true -- exactly the catalog/handshake disagreement the
+		// fix closes.
+		gotPolicy, gotNamespace := capabilityNodeWiring(opts, nodePolicy)
+		if gotPolicy != nil && gotPolicy.AllowsAnyNode() {
+			t.Fatalf("capabilityNodeWiring policy.AllowsAnyNode() = true, want false (or a nil policy) "+
+				"when the agent could not resolve its own Pod, got %+v", gotPolicy)
+		}
+		if gotNamespace != "" {
+			t.Fatalf("capabilityNodeWiring namespace = %q, want \"\" when the agent could not resolve its own Pod", gotNamespace)
+		}
+	})
 }

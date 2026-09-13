@@ -38,6 +38,13 @@ rbac:
   # from exec.pod.rules, for the reason rbac.write and rbac.readAll give:
   # the agent config can be mounted from a file this chart never sees.
   exec: false
+  # nodeShell grants what a NODE console needs: create/get/list/watch/delete
+  # on pods in THIS release's namespace (a Role, not a ClusterRole -- the
+  # helper Pod lives beside the agent), plus pods/exec create. NOT derived
+  # from exec.node, for the reason rbac.exec gives. A node console is root
+  # on the node: leave this false unless you mean it. If exec.node.namespace
+  # names another namespace, write that Role yourself.
+  nodeShell: false
   # Extra ClusterRole rules appended to the generated role.
   extraRules: []
   # The generated ClusterRole grants read access to the resource block below
@@ -406,6 +413,35 @@ exec:
     # at most 600. The effective window is min(agent, gateway's 60 s), so a
     # value above 60 changes nothing today.
     resumeWindowSec: 60
+
+  # A shell on the node itself, through a privileged helper Pod the agent
+  # creates on that node and enters with nsenter. Three gates, all off:
+  # rbac.nodeShell above, this enabled flag, and the platform's own
+  # cluster:node_console permission at admin level on the cluster.
+  #
+  # The namespace the helpers are created in (this release's namespace by
+  # default) must NOT be labelled pod-security.kubernetes.io/enforce=baseline
+  # or restricted; the helper is privileged and would be refused. The
+  # chart labels nothing; see NOTES.
+  node:
+    enabled: false
+    # Node-name patterns, trailing "*" supported. Empty matches NOTHING.
+    nodes: ["*"]
+    # REQUIRED when enabled. Any image with `sleep` and `nsenter` works
+    # (busybox has both); name one this cluster's nodes can pull. No
+    # default on purpose.
+    image: ""
+    # Empty = this release's namespace (helpers are garbage-collected with
+    # the agent). Anything else drops that layer.
+    namespace: ""
+    # What nsenter runs inside the host namespaces.
+    shell: ["/bin/sh", "-l"]
+    # [10, 86400]; also the helper's activeDeadlineSeconds (+60).
+    maxSessionSec: 1800
+    # Concurrent node sessions, separate from exec.pod.maxSessions. [1, 16]
+    maxSessions: 1
+    # Wait for the helper to become Running, image pull included. [5, 600]
+    helperReadyTimeoutSec: 60
 
 # Byte counts are plain integers -- a Kubernetes quantity ("512Mi") is refused,
 # because the agent's loader reads these as numbers, not as quantities.

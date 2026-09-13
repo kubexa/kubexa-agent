@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -140,6 +141,8 @@ var scalarPassthroughs = map[string]bool{
 	"collect.metrics.kubeStateMetrics.metricAllowlist": true,
 	"collect.metrics.kubeStateMetrics.metricDenylist":  true,
 	"exec.pod.defaultShell":                            true,
+	"exec.node.nodes":                                  true,
+	"exec.node.shell":                                  true,
 }
 
 var toYamlValue = regexp.MustCompile(`\.Values\.([A-Za-z0-9_.]+)`)
@@ -335,5 +338,55 @@ func TestReadmeSetPathsUseAgentKeys(t *testing.T) {
 			t.Errorf("README: --set %s[N].%s -- %s does not bind %q, so the rule installs "+
 				"without it", m[1], m[2], ruleType.Name(), m[2])
 		}
+	}
+}
+
+// requireHelm finds the helm binary or skips the test. `make helm-lint` only
+// validates the default values, so nothing else covers what a rendered
+// template with --set actually contains.
+func requireHelm(t *testing.T) string {
+	t.Helper()
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm not installed: rendered-template assertions go unchecked")
+	}
+	return helm
+}
+
+// helmTemplate runs `helm template` against this chart with the given extra
+// args and returns the rendered manifests, failing the test on a non-zero
+// exit.
+func helmTemplate(t *testing.T, helm string, args ...string) string {
+	t.Helper()
+	full := append([]string{"template", "x", filepath.Join("..", "..", "helm", "kubexa-agent")}, args...)
+	out, err := exec.Command(helm, full...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template %v: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
+
+// The node console's Role/RoleBinding are gated on rbac.nodeShell ALONE
+// (never on exec.node), and the pods/exec ClusterRole grant must fire for
+// EITHER rbac.exec or rbac.nodeShell -- a node console also execs into a
+// (helper) Pod. The downward-API Pod identity env is unconditional: a node
+// console's helper Pod needs it to carry an ownerReference back to the agent
+// Pod regardless of whether the feature is on.
+func TestNodeShellRendersRoleAndExecGrant(t *testing.T) {
+	helm := requireHelm(t)
+	out := helmTemplate(t, helm, "--set", "rbac.nodeShell=true", "--namespace", "kubexa")
+	for _, want := range []string{
+		"kind: Role\n", "kind: RoleBinding\n", `resources: ["pods/exec"]`, "name: POD_NAME", "name: POD_NAMESPACE",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rendered output lacks %q", want)
+		}
+	}
+	off := helmTemplate(t, helm, "--namespace", "kubexa")
+	if strings.Contains(off, "kind: Role\n") {
+		t.Fatal("rbac.nodeShell=false must render no Role")
+	}
+	if !strings.Contains(off, "name: POD_NAME") {
+		t.Fatal("the downward API env is unconditional")
 	}
 }

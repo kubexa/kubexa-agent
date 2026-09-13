@@ -64,6 +64,19 @@ type ExecResponder interface {
 	Open(ctx context.Context, open *agentv1.ExecOpen)
 }
 
+// NodeConsoleReporter is implemented by an ExecResponder that can answer
+// node targets. Read through a type assertion rather than a New
+// parameter: the pod console's responder already reaches the handshake,
+// and the node console is a property of that same responder.
+type NodeConsoleReporter interface{ NodeConsoleReady() bool }
+
+func nodeConsoleReady(r ExecResponder) bool {
+	if n, ok := r.(NodeConsoleReporter); ok {
+		return n.NodeConsoleReady()
+	}
+	return false
+}
+
 // ScrapeHealthSource supplies the scrape health a heartbeat reports. It is an
 // interface, not the metrics collector itself, so a build without metrics
 // collection enabled has nothing to satisfy and reports no scrape_targets at
@@ -613,12 +626,12 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 				ClusterId:              m.cfg.Agent.ClusterID,
 				TenantToken:            m.cfg.Agent.TenantToken,
 				Caps: &agentv1.AgentCapabilities{
-					Logs:    m.cfg.Collect.Logs.Enabled,
-					State:   m.cfg.Collect.State.Enabled,
-					Metrics: m.cfg.Collect.Metrics.Enabled,
-					Mutate:  m.cfg.MutateEnabled(),
-					ExecPod: m.cfg.ExecPodEnabled(),
-					// ExecNode is reserved for phase C; left unset on purpose.
+					Logs:     m.cfg.Collect.Logs.Enabled,
+					State:    m.cfg.Collect.State.Enabled,
+					Metrics:  m.cfg.Collect.Metrics.Enabled,
+					Mutate:   m.cfg.MutateEnabled(),
+					ExecPod:  m.cfg.ExecPodEnabled(),
+					ExecNode: nodeConsoleReady(m.execResponder),
 				},
 			},
 		},

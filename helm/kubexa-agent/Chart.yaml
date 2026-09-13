@@ -2,6 +2,29 @@ apiVersion: v2
 name: kubexa-agent
 description: Kubexa agent — collects Kubernetes logs, state, and metrics and streams them to the Kubexa gateway.
 type: application
+# 0.9.0 moves the image to 0.9.0: node console through a privileged helper
+# Pod. Three gates, all OFF: rbac.nodeShell, exec.node.enabled, and the
+# platform permission.
+#   - rbac.nodeShell grants the ServiceAccount a Role (not a ClusterRole --
+#     the helper Pod lives beside the agent) scoped to THIS release's
+#     namespace: create/get/list/watch/delete on pods. It also widens the
+#     existing pods/exec ClusterRole grant, now gated on
+#     `rbac.exec OR rbac.nodeShell`, since a node console execs into the
+#     helper Pod it creates. NOT derived from exec.node, the same reasoning
+#     as rbac.exec, rbac.write and rbac.readAll: the agent config can be
+#     mounted from a file this chart never sees.
+#   - exec.node.enabled + exec.node.nodes/image/namespace/shell/
+#     maxSessionSec/maxSessions/helperReadyTimeoutSec is the owner's policy:
+#     which nodes, what image, and the session limits. image has no default
+#     on purpose -- any image with `sleep` and `nsenter` works, and the
+#     operator names one this cluster's nodes can pull.
+#   - the platform's own cluster:node_console permission at admin level is
+#     checked outside this chart entirely.
+# Also new: POD_NAME/POD_NAMESPACE via the downward API, unconditional, so
+# the helper Pod can carry an ownerReference back to the agent Pod (helpers
+# are garbage-collected with the agent when exec.node.namespace is empty).
+# Inert when exec.node is off.
+#
 # 0.8.0 moves the image to 0.8.0: the agent answers pod console sessions over
 # a stream of its own -- opening a shell in a running container, resizing it,
 # and resuming it across a proxy cut inside resume_window_sec. Two gates,
@@ -154,8 +177,8 @@ type: application
 # install order constraint against the gateway: an older gateway ignores the
 # new heartbeat field, and a newer gateway reads its ABSENCE as "this agent
 # does not report scrape health" rather than as "everything is fine".
-version: 0.8.0
-appVersion: "0.8.0"
+version: 0.9.0
+appVersion: "0.9.0"
 keywords:
   - kubexa
   - observability
