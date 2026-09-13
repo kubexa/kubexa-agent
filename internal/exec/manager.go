@@ -138,7 +138,10 @@ func (m *Manager) Open(ctx context.Context, open *agentv1.ExecOpen) (*Session, *
 		m.mu.Unlock()
 		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, "duplicate session id")
 	}
-	if len(m.sessions) >= m.opts.Settings.MaxSessions {
+	// Node sessions share m.sessions (resume needs them there) but have
+	// their own cap (m.nodeSessions against Node.Settings.MaxSessions), so
+	// they must not count against the pod cap.
+	if len(m.sessions)-m.nodeSessions >= m.opts.Settings.MaxSessions {
 		m.mu.Unlock()
 		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_TOO_MANY_SESSIONS,
 			fmt.Sprintf("exec.pod.max_sessions (%d) reached", m.opts.Settings.MaxSessions))
@@ -427,12 +430,12 @@ func (m *Manager) openNode(ctx context.Context, open *agentv1.ExecOpen, target *
 		defer cleanup()
 		s.run(ctx, ex)
 		m.log.Info("console session ended",
-			logger.F("session_id", id), logger.F("target_kind", "node"), logger.F("node", nodeName),
+			logger.F("session_id", id), logger.F("target_kind", "node"), logger.F("node", s.node),
 			logger.F("helper_pod", helper.Name),
 			logger.F("reason", s.Exit().GetReason().String()), logger.F("code", s.Exit().GetCode()))
 	}()
 	m.log.Info("console session opened",
-		logger.F("session_id", id), logger.F("target_kind", "node"), logger.F("node", nodeName),
+		logger.F("session_id", id), logger.F("target_kind", "node"), logger.F("node", s.node),
 		logger.F("helper_pod", helper.Name), logger.F("rule", d.RuleID))
 	return s, nil
 }
