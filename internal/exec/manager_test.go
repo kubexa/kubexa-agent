@@ -2,17 +2,22 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/kubexa/kubexa-agent/internal/exec/policy"
@@ -264,5 +269,161 @@ func TestOpenWithoutStdinOpensNoStdinStream(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("WriteStdin blocked on a session with no stdin stream")
+	}
+}
+
+func newNodeTestManager(t *testing.T, patterns []string, maxSessions int, objs ...runtimeObject) (*Manager, *fakeExecutor, *fake.Clientset) {
+	t.Helper()
+	c := &config.Config{}
+	on := true
+	c.Exec.Node.Enabled = &on
+	c.Exec.Node.Nodes = patterns
+	c.Exec.Node.Image = "busybox:1.36"
+	c.Exec.Node.MaxSessions = maxSessions
+	c.Exec.Node.HelperReadyTimeoutSec = 5
+	np, err := policy.CompileNode(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp, _ := policy.Compile(&config.Config{})
+	cs := fake.NewSimpleClientset(objs...)
+	// The fake clientset never runs a kubelet: flip every created helper
+	// to Running so awaitHelperRunning returns.
+	cs.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		p := a.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+		p.Status.Phase = corev1.PodRunning
+		return false, nil, nil
+	})
+	fe := &fakeExecutor{started: make(chan struct{}, 8)}
+	m, err := New(Options{
+		Policy:   pp,
+		Clients:  k8s.ExecClients{Clientset: cs, REST: &rest.Config{Host: "https://example"}},
+		Settings: (&config.Config{}).ExecPodSettings(),
+		Node: &NodeOptions{
+			Policy:    np,
+			Settings:  c.ExecNodeSettings(),
+			Owner:     &OwnPod{Name: "kubexa-agent-1", Namespace: "kubexa", UID: "u1"},
+			Namespace: "kubexa",
+		},
+		newExecutor: func(*rest.Config, *url.URL) (remotecommand.Executor, error) { return fe, nil },
+		helperPoll:  time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m, fe, cs
+}
+
+func nodeOpen(node string) *agentv1.ExecOpen {
+	return &agentv1.ExecOpen{SessionId: "nsid", Tty: true, Stdin: true, ResumeWindowSec: 60, MaxSessionSec: 600,
+		Target: &agentv1.ExecTarget{Target: &agentv1.ExecTarget_Node{Node: &agentv1.NodeTarget{Name: node}}}}
+}
+
+func node(name string) *corev1.Node { return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}} }
+
+func TestOpenNodeCreatesHelperAndExecsNsenter(t *testing.T) {
+	m, _, cs := newNodeTestManager(t, []string{"*"}, 1, node("n1"))
+	var got *url.URL
+	m.opts.newExecutor = func(_ *rest.Config, u *url.URL) (remotecommand.Executor, error) {
+		got = u
+		return &fakeExecutor{started: make(chan struct{})}, nil
+	}
+	s, r := m.Open(context.Background(), nodeOpen("n1"))
+	if r != nil {
+		t.Fatal(r)
+	}
+	name := helperName("nsid")
+	if got.Path != "/api/v1/namespaces/kubexa/pods/"+name+"/exec" {
+		t.Fatalf("url = %s", got)
+	}
+	q := got.Query()
+	if q.Get("container") != "shell" || q.Get("tty") != "true" {
+		t.Fatalf("query = %s", got.RawQuery)
+	}
+	cmd := q["command"]
+	want := []string{"nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "/bin/sh", "-l"}
+	if strings.Join(cmd, " ") != strings.Join(want, " ") {
+		t.Fatalf("command = %v", cmd)
+	}
+	if _, err := cs.CoreV1().Pods("kubexa").Get(context.Background(), name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("helper missing: %v", err)
+	}
+	// Ending the session deletes the helper.
+	s.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := cs.CoreV1().Pods("kubexa").Get(context.Background(), name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("helper pod not deleted after the session ended")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestOpenNodeRefusals(t *testing.T) {
+	t.Run("unknown node", func(t *testing.T) {
+		m, _, _ := newNodeTestManager(t, []string{"*"}, 1)
+		_, r := m.Open(context.Background(), nodeOpen("ghost"))
+		if r == nil || r.Reason != agentv1.ExecExitReason_EXEC_EXIT_REASON_NOT_FOUND {
+			t.Fatalf("r = %v", r)
+		}
+	})
+	t.Run("policy", func(t *testing.T) {
+		m, _, _ := newNodeTestManager(t, []string{"aks-*"}, 1, node("gke-1"))
+		_, r := m.Open(context.Background(), nodeOpen("gke-1"))
+		if r == nil || r.Reason != agentv1.ExecExitReason_EXEC_EXIT_REASON_POLICY_DENIED {
+			t.Fatalf("r = %v", r)
+		}
+	})
+	t.Run("helper rejected deletes nothing left behind", func(t *testing.T) {
+		m, _, cs := newNodeTestManager(t, []string{"*"}, 1, node("n1"))
+		cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "x", errors.New(`violates PodSecurity "restricted:latest"`))
+		})
+		_, r := m.Open(context.Background(), nodeOpen("n1"))
+		if r == nil || r.Reason != agentv1.ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED || !strings.Contains(r.Message, "PodSecurity") {
+			t.Fatalf("r = %v", r)
+		}
+		if m.nodeSessions != 0 {
+			t.Fatal("the node slot must be released on refusal")
+		}
+	})
+	t.Run("node console off", func(t *testing.T) {
+		m, _ := newTestManager(t, []config.PodExecRule{{}}, 4, webPod()) // pod-only manager
+		_, r := m.Open(context.Background(), nodeOpen("n1"))
+		if r == nil || r.Reason != agentv1.ExecExitReason_EXEC_EXIT_REASON_POLICY_DENIED {
+			t.Fatalf("r = %v", r)
+		}
+	})
+	t.Run("max sessions is per kind", func(t *testing.T) {
+		m, _, _ := newNodeTestManager(t, []string{"*"}, 1, node("n1"))
+		s, r := m.Open(context.Background(), nodeOpen("n1"))
+		if r != nil {
+			t.Fatal(r)
+		}
+		defer s.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "")
+		o := nodeOpen("n1")
+		o.SessionId = "nsid-2"
+		_, r = m.Open(context.Background(), o)
+		if r == nil || r.Reason != agentv1.ExecExitReason_EXEC_EXIT_REASON_TOO_MANY_SESSIONS || !strings.Contains(r.Message, "exec.node.max_sessions") {
+			t.Fatalf("r = %v", r)
+		}
+	})
+}
+
+func TestNodeReady(t *testing.T) {
+	m, _, _ := newNodeTestManager(t, []string{"*"}, 1)
+	if !m.NodeReady() {
+		t.Fatal("ready")
+	}
+	pm, _ := newTestManager(t, nil, 4)
+	if pm.NodeReady() {
+		t.Fatal("a pod-only manager is not node-ready")
+	}
+	tr := NewTransport(m, nil, Identity{}, nil)
+	if !tr.NodeConsoleReady() {
+		t.Fatal("transport must report the manager's readiness")
 	}
 }

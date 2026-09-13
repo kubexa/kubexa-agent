@@ -41,10 +41,32 @@ type Options struct {
 	Logger     *logger.Logger
 	Registerer prometheus.Registerer
 
+	// Node is the node console's wiring; nil means exec.node is off and a
+	// node target is refused as policy-denied.
+	Node *NodeOptions
+
 	// newExecutor is the test seam; nil means remotecommand.NewSPDYExecutor.
 	newExecutor func(*rest.Config, *url.URL) (remotecommand.Executor, error)
 	// podLookup overrides podLookupTimeout; zero means the const. Tests only.
 	podLookup time.Duration
+	// helperPoll overrides helperPollInterval; zero means the const. Tests only.
+	helperPoll time.Duration
+}
+
+// NodeOptions is what the node console needs beyond the pod console's
+// clients: its own policy and limits, where helpers go and, when that is
+// the agent's own namespace, the agent Pod to own them.
+type NodeOptions struct {
+	Policy   *policy.NodePolicy
+	Settings config.NodeExecSettings
+	// Owner is the agent's own Pod; nil when Settings.Namespace names a
+	// namespace other than the agent's (an ownerReference cannot cross
+	// namespaces), in which case only the deadline, the delete on end and
+	// the boot sweep remove helpers.
+	Owner *OwnPod
+	// Namespace is where helpers are created: Settings.Namespace if set,
+	// else Owner.Namespace.
+	Namespace string
 }
 
 // Manager opens console sessions under the owner's policy and limits.
@@ -56,8 +78,9 @@ type Manager struct {
 	// whose RESTClient() a fake clientset returns as nil.
 	execREST rest.Interface
 
-	mu       sync.Mutex
-	sessions map[string]*Session
+	mu           sync.Mutex
+	sessions     map[string]*Session
+	nodeSessions int
 }
 
 // New builds a Manager. A nil Policy or Clientset is a wiring error.
@@ -98,9 +121,12 @@ type podTarget struct{ Namespace, Name, Container string }
 // would otherwise be refused by any containers: allowlist -- see
 // policy.Decide.
 func (m *Manager) Open(ctx context.Context, open *agentv1.ExecOpen) (*Session, *agentv1.ExecExit) {
+	if n := open.GetTarget().GetNode(); n != nil {
+		return m.openNode(ctx, open, n)
+	}
 	pod := open.GetTarget().GetPod()
 	if pod == nil {
-		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, "phase B answers pod targets only")
+		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, "exec_open carries no target")
 	}
 	id := strings.TrimSpace(open.GetSessionId())
 	if id == "" {
@@ -191,12 +217,12 @@ func (m *Manager) Open(ctx context.Context, open *agentv1.ExecOpen) (*Session, *
 		defer release()
 		s.run(ctx, ex)
 		m.log.Info("console session ended",
-			logger.F("session_id", id), logger.F("namespace", target.Namespace),
+			logger.F("session_id", id), logger.F("target_kind", "pod"), logger.F("namespace", target.Namespace),
 			logger.F("pod", target.Name), logger.F("container", target.Container),
 			logger.F("reason", s.Exit().GetReason().String()), logger.F("code", s.Exit().GetCode()))
 	}()
 	m.log.Info("console session opened",
-		logger.F("session_id", id), logger.F("namespace", target.Namespace),
+		logger.F("session_id", id), logger.F("target_kind", "pod"), logger.F("namespace", target.Namespace),
 		logger.F("pod", target.Name), logger.F("container", target.Container),
 		logger.F("rule", d.RuleID))
 	return s, nil
@@ -207,6 +233,20 @@ func (m *Manager) podLookupTimeout() time.Duration {
 		return m.opts.podLookup
 	}
 	return podLookupTimeout
+}
+
+// NodeReady reports whether this agent answers node targets: the section
+// is wired and at least one node pattern is configured. The handshake's
+// exec_node capability reads it (through Transport.NodeConsoleReady).
+func (m *Manager) NodeReady() bool {
+	return m != nil && m.opts.Node != nil && m.opts.Node.Policy.AllowsAnyNode()
+}
+
+func (m *Manager) helperPollInterval() time.Duration {
+	if m.opts.helperPoll > 0 {
+		return m.opts.helperPoll
+	}
+	return helperPollInterval
 }
 
 // clampSeconds takes the gateway's request but never more than the agent's
@@ -256,4 +296,151 @@ func refuseFromAPIError(err error) *agentv1.ExecExit {
 	default:
 		return refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, err.Error())
 	}
+}
+
+// nsenterArgs enters PID 1's mount, UTS, IPC, network and PID namespaces
+// -- the host's -- and runs the configured shell there. "-t 1" is why the
+// helper needs hostPID.
+var nsenterArgs = []string{"nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--"}
+
+// openNode is Open for a node target: node lookup, policy, helper Pod,
+// then the same pods/exec session as a pod console, against the helper.
+// The gateway's command is ignored: the apiserver refuses a non-empty one
+// before it gets here, and what runs on a node is the operator's
+// exec.node.shell, never a client's argv.
+//
+// Every failure after the helper exists deletes it before the refusal is
+// returned, and the session's own end deletes it too; no path leaves a
+// privileged Pod behind for the deadline or the sweep to find.
+func (m *Manager) openNode(ctx context.Context, open *agentv1.ExecOpen, target *agentv1.NodeTarget) (*Session, *agentv1.ExecExit) {
+	no := m.opts.Node
+	if no == nil || !no.Policy.AllowsAnyNode() {
+		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_POLICY_DENIED,
+			"node console is disabled in this agent's configuration")
+	}
+	id := strings.TrimSpace(open.GetSessionId())
+	if id == "" {
+		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, "session_id is required")
+	}
+	nodeName := strings.TrimSpace(target.GetName())
+	if nodeName == "" {
+		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, "node name is required")
+	}
+
+	m.mu.Lock()
+	if _, dup := m.sessions[id]; dup {
+		m.mu.Unlock()
+		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, "duplicate session id")
+	}
+	if m.nodeSessions >= no.Settings.MaxSessions {
+		m.mu.Unlock()
+		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_TOO_MANY_SESSIONS,
+			fmt.Sprintf("exec.node.max_sessions (%d) reached", no.Settings.MaxSessions))
+	}
+	m.nodeSessions++
+	m.sessions[id] = &Session{}
+	m.mu.Unlock()
+
+	release := func() {
+		m.mu.Lock()
+		delete(m.sessions, id)
+		m.nodeSessions--
+		m.mu.Unlock()
+	}
+
+	lookupCtx, lookupCancel := context.WithTimeout(ctx, m.podLookupTimeout())
+	_, err := m.opts.Clients.Clientset.CoreV1().Nodes().Get(lookupCtx, nodeName, metav1.GetOptions{})
+	lookupCancel()
+	if err != nil {
+		release()
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, "node lookup timed out")
+		}
+		return nil, refuseFromAPIError(err)
+	}
+	d := no.Policy.Decide(nodeName)
+	if !d.Allowed {
+		release()
+		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_POLICY_DENIED, d.Reason)
+	}
+
+	maxSession := clampSeconds(open.GetMaxSessionSec(), no.Settings.MaxSessionSec)
+	spec := helperSpec{sessionID: id, node: nodeName, namespace: no.Namespace, image: no.Settings.Image,
+		owner: no.Owner, maxSession: maxSession}
+	cs := m.opts.Clients.Clientset
+	helper, err := createHelper(ctx, cs, spec)
+	if err != nil {
+		release()
+		return nil, refuseFromHelperError(err)
+	}
+	cleanup := func() {
+		dctx, cancel := context.WithTimeout(context.Background(), helperDeleteTimeout)
+		defer cancel()
+		if err := deleteHelper(dctx, cs, helper.Namespace, helper.Name); err != nil {
+			m.log.Err(err).Warn("node shell helper delete failed; activeDeadlineSeconds or the sweep will remove it",
+				logger.F("session_id", id), logger.F("pod", helper.Name))
+		}
+	}
+	readyTimeout := time.Duration(no.Settings.HelperReadyTimeoutSec) * time.Second
+	if err := awaitHelperRunning(ctx, cs, helper.Namespace, helper.Name, readyTimeout, m.helperPollInterval()); err != nil {
+		cleanup()
+		release()
+		return nil, refuseFromHelperError(err)
+	}
+
+	command := append(append([]string(nil), nsenterArgs...), no.Settings.Shell...)
+	req := m.execREST.Post().
+		Resource("pods").Namespace(helper.Namespace).Name(helper.Name).SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: helperContainer,
+			Command:   command,
+			Stdin:     open.GetStdin(),
+			Stdout:    true,
+			Stderr:    !open.GetTty(),
+			TTY:       open.GetTty(),
+		}, scheme.ParameterCodec)
+	ex, err := m.opts.newExecutor(m.opts.Clients.REST, req.URL())
+	if err != nil {
+		cleanup()
+		release()
+		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, err.Error())
+	}
+
+	s := newSession(sessionSpec{
+		id:           id,
+		tty:          open.GetTty(),
+		stdin:        open.GetStdin(),
+		resumeWindow: clampSeconds(open.GetResumeWindowSec(), m.opts.Settings.ResumeWindowSec),
+		maxSession:   maxSession,
+		ring:         newRing(RingBytes),
+	})
+	s.target = podTarget{Namespace: helper.Namespace, Name: helper.Name, Container: helperContainer}
+	s.node = nodeName
+	s.ruleID = d.RuleID
+
+	m.mu.Lock()
+	m.sessions[id] = s
+	m.mu.Unlock()
+
+	go func() {
+		defer release()
+		defer cleanup()
+		s.run(ctx, ex)
+		m.log.Info("console session ended",
+			logger.F("session_id", id), logger.F("target_kind", "node"), logger.F("node", nodeName),
+			logger.F("helper_pod", helper.Name),
+			logger.F("reason", s.Exit().GetReason().String()), logger.F("code", s.Exit().GetCode()))
+	}()
+	m.log.Info("console session opened",
+		logger.F("session_id", id), logger.F("target_kind", "node"), logger.F("node", nodeName),
+		logger.F("helper_pod", helper.Name), logger.F("rule", d.RuleID))
+	return s, nil
+}
+
+func refuseFromHelperError(err error) *agentv1.ExecExit {
+	var he *helperError
+	if errors.As(err, &he) {
+		return refuse(he.Reason, he.Msg)
+	}
+	return refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, err.Error())
 }
