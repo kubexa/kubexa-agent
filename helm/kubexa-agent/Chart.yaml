@@ -189,8 +189,24 @@ type: application
 # install order constraint against the gateway: an older gateway ignores the
 # new heartbeat field, and a newer gateway reads its ABSENCE as "this agent
 # does not report scrape health" rather than as "everything is fine".
-version: 0.9.1
-appVersion: "0.9.1"
+# 0.9.2 moves the image to 0.9.2: a node console attaches to the gateway
+# BEFORE its helper Pod is created and waited for. The helper wait now
+# runs inside the session, under its max_session clock and resume window,
+# so an image pull no longer burns the gateway's attach deadline and a
+# browser that leaves mid-pull ends the session through Close or the
+# resume window (helper deleted either way). Two lines appear in the
+# terminal while it waits ("kubexa: starting node shell helper on <node>
+# (<image>)..." then "kubexa: helper ready, entering host namespaces").
+# Also: the kubexa.dev/node label fits Pod validation for node names over
+# 63 characters; the boot sweep lists exec.node.namespace AND the release
+# namespace; exec.node with an invalid exec.pod.rules entry fails boot
+# naming the section. Pairs with apiserver/agentserver charts on image
+# 0.5.42, which drop their 615/620 s node deadlines back to 15/20 s --
+# install THIS chart first: an older agent on a 0.5.42 gateway ends every
+# uncached node open as attach_timeout.
+#
+version: 0.9.2
+appVersion: "0.9.2"
 keywords:
   - kubexa
   - observability
