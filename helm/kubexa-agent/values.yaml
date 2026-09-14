@@ -40,8 +40,10 @@ rbac:
   exec: false
   # nodeShell grants what a NODE console needs: create/get/list/watch/delete
   # on pods in THIS release's namespace (a Role, not a ClusterRole -- the
-  # helper Pod lives beside the agent), plus pods/exec create. NOT derived
-  # from exec.node, for the reason rbac.exec gives. A node console is root
+  # helper Pod lives beside the agent), plus pods/exec create and nodes get
+  # in the ClusterRole (the agent confirms the node exists before it creates
+  # a privileged Pod on it; a Node is cluster-scoped, so no Role can grant
+  # that). NOT derived from exec.node, for the reason rbac.exec gives. A node console is root
   # on the node: leave this false unless you mean it. If exec.node.namespace
   # names another namespace, write that Role yourself.
   nodeShell: false
