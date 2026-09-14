@@ -48,6 +48,20 @@ type sessionSpec struct {
 	ring         *ring
 }
 
+// prepareFunc produces the executor a session streams on. It runs inside
+// run, under the session's max-session context and with the resume-window
+// watchdog already ticking, so a prepare that waits on the cluster (a node
+// console's helper Pod) is bounded and cancellable exactly like the stream
+// after it. A refusal ends the session with that ExecExit; a nil, nil
+// return is a programming error and ends it INTERNAL.
+type prepareFunc func(ctx context.Context) (remotecommand.Executor, *agentv1.ExecExit)
+
+// readyExecutor is the prepare of a session whose executor already exists
+// (every pod console): nothing to wait for.
+func readyExecutor(ex remotecommand.Executor) prepareFunc {
+	return func(context.Context) (remotecommand.Executor, *agentv1.ExecExit) { return ex, nil }
+}
+
 // Session is one running console. The transport (attach.go) Attaches to
 // consume Output, Detaches when its stream drops, and the session keeps
 // running for resumeWindow with nobody attached.
@@ -210,8 +224,9 @@ func (s *Session) finish(e *agentv1.ExecExit) {
 }
 
 // run drives the remote process and returns when it ends. It owns the
-// resume-window and max-session timers.
-func (s *Session) run(ctx context.Context, ex remotecommand.Executor) {
+// resume-window and max-session timers, and runs prepare under both before
+// it streams.
+func (s *Session) run(ctx context.Context, prepare prepareFunc) {
 	ctx, cancel := context.WithTimeout(ctx, s.spec.maxSession)
 	defer cancel()
 
@@ -255,6 +270,27 @@ func (s *Session) run(ctx context.Context, ex remotecommand.Executor) {
 			}
 		}
 	}()
+
+	ex, refusal := prepare(ctx)
+	if refusal != nil {
+		// Close or a watchdog may have ended the session while prepare was
+		// waiting; finish is once-only, so their reason wins and this
+		// refusal is dropped. The max-session deadline has no Close of its
+		// own, so it is named here, the same way the stream branch below
+		// names it.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			s.finish(&agentv1.ExecExit{Code: -1,
+				Reason: agentv1.ExecExitReason_EXEC_EXIT_REASON_MAX_SESSION, Message: "max_session_sec reached"})
+			return
+		}
+		s.finish(refusal)
+		return
+	}
+	if ex == nil {
+		s.finish(&agentv1.ExecExit{Code: -1,
+			Reason: agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, Message: "prepare returned no executor"})
+		return
+	}
 
 	opts := remotecommand.StreamOptions{
 		Stdout: &chunkWriter{s: s, ch: agentv1.ExecChannel_EXEC_CHANNEL_STDOUT},
@@ -302,6 +338,15 @@ func (s *Session) run(ctx context.Context, ex remotecommand.Executor) {
 		s.finish(&agentv1.ExecExit{Code: -1,
 			Reason: agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, Message: err.Error()})
 	}
+}
+
+// note writes one line of the agent's own into the session's output, on
+// STDERR, through the same ring-and-live path process output takes: it
+// gets a seq, it is replayed on resume, and it is never mistaken for a
+// heartbeat (those are empty, seq 0). Used for the node console's helper
+// progress, which happens before any process exists.
+func (s *Session) note(text string) {
+	_, _ = (&chunkWriter{s: s, ch: agentv1.ExecChannel_EXEC_CHANNEL_STDERR}).Write([]byte(text))
 }
 
 // chunkWriter turns process output into ring frames and, while attached,

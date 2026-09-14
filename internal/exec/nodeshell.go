@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -100,6 +101,21 @@ func helperName(sessionID string) string {
 	return helperNamePrefix + hex.EncodeToString(sum[:])[:8]
 }
 
+// nodeLabelValue is the kubexa.dev/node label for a node name. A label
+// value is capped at 63 characters by Pod validation while a node name may
+// run to 253, so a long name becomes its first 55 characters, a dash and
+// seven hex digits of FNV-32a over the full name -- still selectable, still
+// distinct for names that share a prefix. spec.nodeName carries the full
+// name regardless; the label is a convenience selector only.
+func nodeLabelValue(node string) string {
+	if len(node) <= 63 {
+		return node
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(node))
+	return node[:55] + "-" + fmt.Sprintf("%08x", h.Sum32())[:7]
+}
+
 func helperPod(s helperSpec) *corev1.Pod {
 	deadline := int64((s.maxSession + helperDeadlineSlack) / time.Second)
 	privileged := true
@@ -114,7 +130,7 @@ func helperPod(s helperSpec) *corev1.Pod {
 				"app.kubernetes.io/name":       HelperLabelName,
 				"app.kubernetes.io/managed-by": "kubexa-agent",
 				helperSessionLabel:             s.sessionID,
-				helperNodeLabel:                s.node,
+				helperNodeLabel:                nodeLabelValue(s.node),
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -213,30 +229,43 @@ func deleteHelper(ctx context.Context, cs kubernetes.Interface, namespace, name 
 	return err
 }
 
-// SweepHelpers deletes every helper Pod in the namespace. It runs at boot,
-// when every helper is an orphan by definition: no session survives an
-// agent restart. Best-effort -- a list error is logged and boot goes on.
-// Returns how many it deleted.
-func SweepHelpers(ctx context.Context, cs kubernetes.Interface, namespace string, log *logger.Logger) int {
+// SweepHelpers deletes every helper Pod in each of the namespaces. It runs
+// at boot, when every helper is an orphan by definition: no session
+// survives an agent restart. The caller passes the configured
+// exec.node.namespace AND the agent's own namespace: a switch from the
+// release namespace to a custom one leaves nothing behind, but helpers in
+// any OTHER namespace (one configured before a change, custom to custom or
+// custom back to the release namespace) are not swept and end on
+// activeDeadlineSeconds. Duplicates and empty entries are skipped.
+// Best-effort -- a list error is logged and boot goes on. Returns how many
+// it deleted.
+func SweepHelpers(ctx context.Context, cs kubernetes.Interface, namespaces []string, log *logger.Logger) int {
 	if log == nil {
 		log = logger.New("exec")
 	}
-	list, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=" + HelperLabelName,
-	})
-	if err != nil {
-		log.Err(err).Warn("node shell sweep: list helpers", logger.F("namespace", namespace))
-		return 0
-	}
 	n := 0
-	for _, p := range list.Items {
-		if err := deleteHelper(ctx, cs, namespace, p.Name); err != nil {
-			log.Err(err).Warn("node shell sweep: delete", logger.F("pod", p.Name))
+	seen := map[string]bool{}
+	for _, namespace := range namespaces {
+		if namespace == "" || seen[namespace] {
 			continue
 		}
-		n++
-		log.Info("node shell sweep: removed orphan helper",
-			logger.F("pod", p.Name), logger.F("session_id", p.Labels[helperSessionLabel]))
+		seen[namespace] = true
+		list, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: "app.kubernetes.io/name=" + HelperLabelName,
+		})
+		if err != nil {
+			log.Err(err).Warn("node shell sweep: list helpers", logger.F("namespace", namespace))
+			continue
+		}
+		for _, p := range list.Items {
+			if err := deleteHelper(ctx, cs, namespace, p.Name); err != nil {
+				log.Err(err).Warn("node shell sweep: delete", logger.F("pod", p.Name), logger.F("namespace", namespace))
+				continue
+			}
+			n++
+			log.Info("node shell sweep: removed orphan helper",
+				logger.F("pod", p.Name), logger.F("namespace", namespace), logger.F("session_id", p.Labels[helperSessionLabel]))
+		}
 	}
 	return n
 }

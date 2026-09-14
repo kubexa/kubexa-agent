@@ -16,8 +16,12 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/remotecommand"
 	kexec "k8s.io/client-go/util/exec"
 
@@ -323,6 +327,41 @@ func TestTransportSendsRefusalAsExit(t *testing.T) {
 	e := nextExit(t, call)
 	if e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_POLICY_DENIED {
 		t.Fatalf("exit = %v, want POLICY_DENIED", e)
+	}
+	waitEnded(t, call)
+}
+
+// A node open attaches BEFORE the helper is Running: the gateway's ack
+// lands, then heartbeats/status lines, then -- when the wait fails -- the
+// HELPER_REJECTED exit on the SAME stream. Before this change the agent
+// attached only after the wait and the gateway's attach timeout ran out
+// during an image pull.
+func TestTransportAttachesNodeSessionBeforeTheHelperWait(t *testing.T) {
+	srv := &fakeExecServer{}
+	dial := startExecServer(t, srv)
+	m, _, cs := newNodeTestManager(t, []string{"*"}, 1, node("n1"))
+	m.opts.Node.Settings.HelperReadyTimeoutSec = 1
+	cs.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		g := a.(k8stesting.GetAction)
+		return true, &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: g.GetName(), Namespace: g.GetNamespace()},
+			Status:     corev1.PodStatus{Phase: corev1.PodPending},
+		}, nil
+	})
+	tr := NewTransport(m, dial, Identity{ClusterID: "c1", TenantToken: "tok"}, nil)
+	start := time.Now()
+	tr.Open(context.Background(), nodeOpen("n1"))
+	call := waitCall(t, srv)
+	if took := time.Since(start); took > 900*time.Millisecond {
+		t.Fatalf("attach after %s; must precede the 1 s helper wait", took)
+	}
+	d := nextData(t, call)
+	if d.GetChannel() != agentv1.ExecChannel_EXEC_CHANNEL_STDERR || !strings.HasPrefix(string(d.GetChunk()), "kubexa: starting node shell helper") {
+		t.Fatalf("first frame = %v, want the starting status line", d)
+	}
+	e := nextExit(t, call)
+	if e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED || !strings.Contains(e.GetMessage(), "not running after") {
+		t.Fatalf("exit = %v", e)
 	}
 	waitEnded(t, call)
 }
