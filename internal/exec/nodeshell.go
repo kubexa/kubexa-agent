@@ -229,30 +229,42 @@ func deleteHelper(ctx context.Context, cs kubernetes.Interface, namespace, name 
 	return err
 }
 
-// SweepHelpers deletes every helper Pod in the namespace. It runs at boot,
-// when every helper is an orphan by definition: no session survives an
-// agent restart. Best-effort -- a list error is logged and boot goes on.
-// Returns how many it deleted.
-func SweepHelpers(ctx context.Context, cs kubernetes.Interface, namespace string, log *logger.Logger) int {
+// SweepHelpers deletes every helper Pod in each of the namespaces. It runs
+// at boot, when every helper is an orphan by definition: no session
+// survives an agent restart. The caller passes the configured
+// exec.node.namespace AND the agent's own namespace, so a namespace change
+// between two restarts does not strand the previous one -- only a namespace
+// configured two restarts ago and since abandoned is out of reach, and its
+// helpers end on activeDeadlineSeconds. Duplicates and empty entries are
+// skipped. Best-effort -- a list error is logged and boot goes on. Returns
+// how many it deleted.
+func SweepHelpers(ctx context.Context, cs kubernetes.Interface, namespaces []string, log *logger.Logger) int {
 	if log == nil {
 		log = logger.New("exec")
 	}
-	list, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=" + HelperLabelName,
-	})
-	if err != nil {
-		log.Err(err).Warn("node shell sweep: list helpers", logger.F("namespace", namespace))
-		return 0
-	}
 	n := 0
-	for _, p := range list.Items {
-		if err := deleteHelper(ctx, cs, namespace, p.Name); err != nil {
-			log.Err(err).Warn("node shell sweep: delete", logger.F("pod", p.Name))
+	seen := map[string]bool{}
+	for _, namespace := range namespaces {
+		if namespace == "" || seen[namespace] {
 			continue
 		}
-		n++
-		log.Info("node shell sweep: removed orphan helper",
-			logger.F("pod", p.Name), logger.F("session_id", p.Labels[helperSessionLabel]))
+		seen[namespace] = true
+		list, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: "app.kubernetes.io/name=" + HelperLabelName,
+		})
+		if err != nil {
+			log.Err(err).Warn("node shell sweep: list helpers", logger.F("namespace", namespace))
+			continue
+		}
+		for _, p := range list.Items {
+			if err := deleteHelper(ctx, cs, namespace, p.Name); err != nil {
+				log.Err(err).Warn("node shell sweep: delete", logger.F("pod", p.Name), logger.F("namespace", namespace))
+				continue
+			}
+			n++
+			log.Info("node shell sweep: removed orphan helper",
+				logger.F("pod", p.Name), logger.F("namespace", namespace), logger.F("session_id", p.Labels[helperSessionLabel]))
+		}
 	}
 	return n
 }
