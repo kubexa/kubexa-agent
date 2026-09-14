@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -323,15 +324,24 @@ func node(name string) *corev1.Node { return &corev1.Node{ObjectMeta: metav1.Obj
 
 func TestOpenNodeCreatesHelperAndExecsNsenter(t *testing.T) {
 	m, _, cs := newNodeTestManager(t, []string{"*"}, 1, node("n1"))
-	var got *url.URL
+	// The executor is built inside prepare, on the session goroutine.
+	var gotURL atomic.Pointer[url.URL]
 	m.opts.newExecutor = func(_ *rest.Config, u *url.URL) (remotecommand.Executor, error) {
-		got = u
+		gotURL.Store(u)
 		return &fakeExecutor{started: make(chan struct{})}, nil
 	}
 	s, r := m.Open(context.Background(), nodeOpen("n1"))
 	if r != nil {
 		t.Fatal(r)
 	}
+	deadline0 := time.Now().Add(2 * time.Second)
+	for gotURL.Load() == nil {
+		if time.Now().After(deadline0) {
+			t.Fatal("the executor was never built: prepare did not run")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	got := gotURL.Load()
 	name := helperName("nsid")
 	if got.Path != "/api/v1/namespaces/kubexa/pods/"+name+"/exec" {
 		t.Fatalf("url = %s", got)
@@ -377,18 +387,20 @@ func TestOpenNodeRefusals(t *testing.T) {
 			t.Fatalf("r = %v", r)
 		}
 	})
-	t.Run("helper rejected deletes nothing left behind", func(t *testing.T) {
+	t.Run("helper rejected ends the session, not the open", func(t *testing.T) {
 		m, _, cs := newNodeTestManager(t, []string{"*"}, 1, node("n1"))
 		cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "x", errors.New(`violates PodSecurity "restricted:latest"`))
 		})
-		_, r := m.Open(context.Background(), nodeOpen("n1"))
-		if r == nil || r.Reason != agentv1.ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED || !strings.Contains(r.Message, "PodSecurity") {
-			t.Fatalf("r = %v", r)
+		s, r := m.Open(context.Background(), nodeOpen("n1"))
+		if r != nil {
+			t.Fatalf("Open refused synchronously: %v; a helper refusal is decided inside the session now", r)
 		}
-		if m.nodeSessions != 0 {
-			t.Fatal("the node slot must be released on refusal")
+		e := awaitExit(t, s)
+		if e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED || !strings.Contains(e.GetMessage(), "PodSecurity") {
+			t.Fatalf("exit = %v", e)
 		}
+		awaitReleased(t, m)
 	})
 	t.Run("node console off", func(t *testing.T) {
 		m, _ := newTestManager(t, []config.PodExecRule{{}}, 4, webPod()) // pod-only manager
@@ -413,6 +425,37 @@ func TestOpenNodeRefusals(t *testing.T) {
 	})
 }
 
+// awaitExit waits for the session to end and returns its exit. Used where
+// a refusal is decided inside prepare (after Open returned the session).
+func awaitExit(t *testing.T, s *Session) *agentv1.ExecExit {
+	t.Helper()
+	select {
+	case <-s.Done():
+		return s.Exit()
+	case <-time.After(3 * time.Second):
+		t.Fatal("the session never ended")
+		return nil
+	}
+}
+
+// awaitReleased waits for the manager to drop the session and its node slot.
+func awaitReleased(t *testing.T, m *Manager) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		m.mu.Lock()
+		n, ns := len(m.sessions), m.nodeSessions
+		m.mu.Unlock()
+		if n == 0 && ns == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("nodeSessions = %d, sessions = %d; want both 0", ns, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // helperDeleted reports whether the fake clientset recorded a delete of
 // the named helper Pod. Read through the action log rather than a Get: the
 // tests below install reactors on "get" that answer for the helper.
@@ -424,6 +467,19 @@ func helperDeleted(cs *fake.Clientset, name string) bool {
 		}
 	}
 	return false
+}
+
+// awaitHelperDeleted polls helperDeleted: with the single deferred delete
+// on the session goroutine, the delete lands after Done is closed.
+func awaitHelperDeleted(t *testing.T, cs *fake.Clientset, name, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !helperDeleted(cs, name) {
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // Two failure paths AFTER the helper exists must each delete it and give
@@ -443,33 +499,105 @@ func TestOpenNodeFailureAfterHelperCleansUp(t *testing.T) {
 				Status:     corev1.PodStatus{Phase: corev1.PodPending},
 			}, nil
 		})
-		_, r := m.Open(context.Background(), nodeOpen("n1"))
-		if r == nil || r.Reason != agentv1.ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED || !strings.Contains(r.Message, "not running after") {
-			t.Fatalf("r = %v", r)
+		s, r := m.Open(context.Background(), nodeOpen("n1"))
+		if r != nil {
+			t.Fatal(r)
 		}
-		if !helperDeleted(cs, helperName("nsid")) {
-			t.Fatal("the helper was not deleted after the ready wait expired")
+		e := awaitExit(t, s)
+		if e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED || !strings.Contains(e.GetMessage(), "not running after") {
+			t.Fatalf("exit = %v", e)
 		}
-		if m.nodeSessions != 0 || len(m.sessions) != 0 {
-			t.Fatalf("nodeSessions = %d, sessions = %d; want both 0", m.nodeSessions, len(m.sessions))
-		}
+		awaitHelperDeleted(t, cs, helperName("nsid"), "the helper was not deleted after the ready wait expired")
+		awaitReleased(t, m)
 	})
 	t.Run("executor construction fails", func(t *testing.T) {
 		m, _, cs := newNodeTestManager(t, []string{"*"}, 1, node("n1"))
 		m.opts.newExecutor = func(*rest.Config, *url.URL) (remotecommand.Executor, error) {
 			return nil, errors.New("spdy: no transport")
 		}
-		_, r := m.Open(context.Background(), nodeOpen("n1"))
-		if r == nil || r.Reason != agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL || !strings.Contains(r.Message, "spdy") {
-			t.Fatalf("r = %v", r)
+		s, r := m.Open(context.Background(), nodeOpen("n1"))
+		if r != nil {
+			t.Fatal(r)
 		}
-		if !helperDeleted(cs, helperName("nsid")) {
-			t.Fatal("the helper was not deleted after the executor failed to build")
+		e := awaitExit(t, s)
+		if e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL || !strings.Contains(e.GetMessage(), "spdy") {
+			t.Fatalf("exit = %v", e)
 		}
-		if m.nodeSessions != 0 || len(m.sessions) != 0 {
-			t.Fatalf("nodeSessions = %d, sessions = %d; want both 0", m.nodeSessions, len(m.sessions))
-		}
+		awaitHelperDeleted(t, cs, helperName("nsid"), "the helper was not deleted after the executor failed to build")
+		awaitReleased(t, m)
 	})
+}
+
+// The whole point of the change: Open returns while the helper is still
+// Pending, and the session -- attachable, closable -- carries the wait.
+func TestOpenNodeReturnsBeforeTheHelperIsRunning(t *testing.T) {
+	m, _, cs := newNodeTestManager(t, []string{"*"}, 1, node("n1"))
+	m.opts.Node.Settings.HelperReadyTimeoutSec = 5
+	cs.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		g := a.(k8stesting.GetAction)
+		return true, &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: g.GetName(), Namespace: g.GetNamespace()},
+			Status:     corev1.PodStatus{Phase: corev1.PodPending},
+		}, nil
+	})
+	start := time.Now()
+	s, r := m.Open(context.Background(), nodeOpen("n1"))
+	if r != nil {
+		t.Fatal(r)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("Open took %s; it must return before the helper wait", took)
+	}
+	select {
+	case <-s.Done():
+		t.Fatalf("session ended at once: %v", s.Exit())
+	default:
+	}
+	// The first status line lands in the ring as soon as prepare starts on
+	// the session goroutine -- and nothing else does while the helper is
+	// Pending.
+	var frames []Frame
+	deadline1 := time.Now().Add(2 * time.Second)
+	for frames, _ = s.Replay(0); len(frames) == 0; frames, _ = s.Replay(0) {
+		if time.Now().After(deadline1) {
+			t.Fatal("the starting status line never reached the ring")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(frames) != 1 || frames[0].Channel != agentv1.ExecChannel_EXEC_CHANNEL_STDERR ||
+		string(frames[0].Chunk) != "kubexa: starting node shell helper on n1 (busybox:1.36)...\r\n" {
+		t.Fatalf("frames = %+v", frames)
+	}
+	// Closing mid-wait ends it CLOSED and deletes the helper.
+	s.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "gateway closed the stream")
+	e := awaitExit(t, s)
+	if e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED {
+		t.Fatalf("exit = %v, want CLOSED", e)
+	}
+	awaitHelperDeleted(t, cs, helperName("nsid"), "the helper was not deleted after Close mid-wait")
+	awaitReleased(t, m)
+}
+
+func TestOpenNodeWritesBothStatusLines(t *testing.T) {
+	m, fe, _ := newNodeTestManager(t, []string{"*"}, 1, node("n1"))
+	s, r := m.Open(context.Background(), nodeOpen("n1"))
+	if r != nil {
+		t.Fatal(r)
+	}
+	defer s.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "")
+	select {
+	case <-fe.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the stream never started")
+	}
+	frames, _ := s.Replay(0)
+	if len(frames) < 2 {
+		t.Fatalf("frames = %d, want the two status lines", len(frames))
+	}
+	if string(frames[0].Chunk) != "kubexa: starting node shell helper on n1 (busybox:1.36)...\r\n" ||
+		string(frames[1].Chunk) != "kubexa: helper ready, entering host namespaces\r\n" {
+		t.Fatalf("lines = %q, %q", frames[0].Chunk, frames[1].Chunk)
+	}
 }
 
 func TestNodeReady(t *testing.T) {
