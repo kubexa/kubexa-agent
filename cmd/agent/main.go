@@ -635,6 +635,16 @@ func buildExecResponder(
 	}
 	opts.Clients = *clients
 
+	// exec.node shares exec.pod's Manager (its resume window comes from
+	// exec.pod.resume_window_sec and its clients are the same), so a nil
+	// pod policy -- compileExecPolicy's "disabled but invalid" outcome --
+	// cannot carry a node console. Name the section to fix rather than
+	// letting exec.New answer "policy is required".
+	if execPolicy == nil && cfg.ExecNodeEnabled() {
+		_, cause := execpolicy.Compile(cfg)
+		return nil, opts, fmt.Errorf("exec.node is enabled but exec.pod has an invalid rule (a node console shares exec.pod's resume_window_sec and clients); fix or remove exec.pod.rules: %w", cause)
+	}
+
 	// bootCtx bounds both the own-Pod identity Get below and the helper
 	// sweep after exec.New: a stuck API server must not hold up the rest of
 	// startup for either call, and resolving identity deserves no less of a
@@ -643,6 +653,7 @@ func buildExecResponder(
 	// covers both call sites -- there is exactly one boot-time deadline for
 	// exec.node's setup, not one per call.
 	var bootCtx context.Context
+	var ownNamespace string
 	if cfg.ExecNodeEnabled() {
 		var cancel context.CancelFunc
 		bootCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
@@ -662,10 +673,12 @@ func buildExecResponder(
 		case ns.Namespace == "" || ns.Namespace == own.Namespace:
 			no.Owner = &own
 			no.Namespace = own.Namespace
+			ownNamespace = own.Namespace
 		default:
 			log.Warn("exec.node.namespace differs from the agent's own namespace; helper Pods there will not be garbage-collected with the agent",
 				logger.F("namespace", ns.Namespace), logger.F("agent_namespace", own.Namespace))
 			no.Namespace = ns.Namespace
+			ownNamespace = own.Namespace
 		}
 		opts.Node = no
 	}
@@ -679,10 +692,12 @@ func buildExecResponder(
 		// Every helper is an orphan at boot: no session survives an agent
 		// restart. Best-effort, and bounded by the same bootCtx the identity
 		// resolution above used, so a stuck API server never holds up the
-		// rest of startup.
-		removed := exec.SweepHelpers(bootCtx, opts.Clients.Clientset, opts.Node.Namespace, log)
+		// rest of startup. Both the configured namespace and the agent's own
+		// are swept -- SweepHelpers dedupes and skips the empty one.
+		namespaces := []string{opts.Node.Namespace, ownNamespace}
+		removed := exec.SweepHelpers(bootCtx, opts.Clients.Clientset, namespaces, log)
 		log.Info("node shell sweep complete",
-			logger.F("removed", removed), logger.F("namespace", opts.Node.Namespace))
+			logger.F("removed", removed), logger.F("namespaces", strings.Join(namespaces, ",")))
 	}
 
 	return exec.NewTransport(m, dial, exec.Identity{
