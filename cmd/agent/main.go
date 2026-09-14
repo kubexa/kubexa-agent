@@ -680,7 +680,9 @@ func buildExecResponder(
 		// restart. Best-effort, and bounded by the same bootCtx the identity
 		// resolution above used, so a stuck API server never holds up the
 		// rest of startup.
-		exec.SweepHelpers(bootCtx, opts.Clients.Clientset, opts.Node.Namespace, log)
+		removed := exec.SweepHelpers(bootCtx, opts.Clients.Clientset, opts.Node.Namespace, log)
+		log.Info("node shell sweep complete",
+			logger.F("removed", removed), logger.F("namespace", opts.Node.Namespace))
 	}
 
 	return exec.NewTransport(m, dial, exec.Identity{

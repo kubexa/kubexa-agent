@@ -390,3 +390,89 @@ func TestNodeShellRendersRoleAndExecGrant(t *testing.T) {
 		t.Fatal("the downward API env is unconditional")
 	}
 }
+
+// clusterRoleRules extracts the ClusterRole document from a rendered chart
+// and parses its rules, so a test can ask "which verbs on nodes?" instead
+// of substring-matching a YAML list that other rules also render.
+func clusterRoleRules(t *testing.T, rendered string) []struct {
+	APIGroups []string `yaml:"apiGroups"`
+	Resources []string `yaml:"resources"`
+	Verbs     []string `yaml:"verbs"`
+} {
+	t.Helper()
+	for _, doc := range strings.Split(rendered, "\n---") {
+		if !strings.Contains(doc, "kind: ClusterRole\n") {
+			continue
+		}
+		var cr struct {
+			Rules []struct {
+				APIGroups []string `yaml:"apiGroups"`
+				Resources []string `yaml:"resources"`
+				Verbs     []string `yaml:"verbs"`
+			} `yaml:"rules"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &cr); err != nil {
+			t.Fatalf("parse ClusterRole: %v", err)
+		}
+		return cr.Rules
+	}
+	t.Fatal("no ClusterRole in the rendered output")
+	return nil
+}
+
+// grantsCoreGet reports whether any core-group rule grants `get` on the
+// named resource.
+func grantsCoreGet(t *testing.T, rendered, resource string) bool {
+	t.Helper()
+	for _, r := range clusterRoleRules(t, rendered) {
+		core := false
+		for _, g := range r.APIGroups {
+			if g == "" || g == "*" {
+				core = true
+			}
+		}
+		if !core {
+			continue
+		}
+		for _, res := range r.Resources {
+			if res != resource && res != "*" {
+				continue
+			}
+			for _, v := range r.Verbs {
+				if v == "get" || v == "*" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// openNode confirms the node exists (nodes get) before it creates a
+// privileged Pod on it. That read used to be granted only by the
+// state/query block or by cAdvisor scraping, so an install with
+// rbac.nodeShell on and every read feature off answered Forbidden there,
+// which refuseFromAPIError maps to RBAC_DENIED and the UI then explains as
+// a missing pods/exec grant. nodeShell alone must grant it -- in the
+// ClusterRole, since a Node is cluster-scoped and a Role cannot name it.
+func TestNodeShellAloneGrantsNodesGet(t *testing.T) {
+	helm := requireHelm(t)
+	readsOff := []string{
+		"--set", "collect.state.enabled=false",
+		"--set", "query.enabled=false",
+		"--set", "collect.metrics.enabled=false",
+		"--set", "collect.metrics.cadvisor.enabled=false",
+		"--set", "rbac.readAll=false",
+		"--namespace", "kubexa",
+	}
+
+	on := helmTemplate(t, helm, append([]string{"--set", "rbac.nodeShell=true"}, readsOff...)...)
+	if !grantsCoreGet(t, on, "nodes") {
+		t.Fatal("rbac.nodeShell=true with every read feature off must still grant nodes get: openNode's lookup runs before the helper is created")
+	}
+
+	off := helmTemplate(t, helm, append([]string{"--set", "rbac.nodeShell=false", "--set", "rbac.exec=true"}, readsOff...)...)
+	if grantsCoreGet(t, off, "nodes") {
+		t.Fatal("with every read feature off and rbac.nodeShell=false, nothing should grant nodes get (rbac.exec is a pod console and must not)")
+	}
+}

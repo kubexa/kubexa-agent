@@ -127,7 +127,9 @@ func podAndDeploymentGVRs() []GVR {
 // TestCatalogReportsExecForPodsOnly pins the third independent policy
 // source: exec's can_exec/policy_exec, mirroring the CanPatch/PolicyPatch
 // pattern above but gated on the core-group "pods" resource specifically,
-// never on any other GVR (nodes are Phase C).
+// never on any other GVR. The core-group "nodes" resource is the one other
+// entry that reports exec, through the separate node policy (nodeExecPolicy
+// argument, nil here) -- see TestProbeExecNodesUsesTheHelperNamespace.
 func TestCatalogReportsExecForPodsOnly(t *testing.T) {
 	tally := &verbTally{}
 	cs := countingAuthzClient(tally)
