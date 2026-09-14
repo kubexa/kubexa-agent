@@ -182,21 +182,40 @@ func TestNodeLabelValueFitsPodValidation(t *testing.T) {
 	}
 }
 
-func TestSweepHelpersDeletesEveryLabelledPod(t *testing.T) {
-	mk := func(name string, labelled bool) *corev1.Pod {
-		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "kubexa", Name: name}}
+func TestSweepHelpersDeletesEveryLabelledPodInEveryNamespace(t *testing.T) {
+	mk := func(ns, name string, labelled bool) *corev1.Pod {
+		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
 		if labelled {
 			p.Labels = map[string]string{"app.kubernetes.io/name": HelperLabelName}
 		}
 		return p
 	}
-	cs := fake.NewSimpleClientset(mk("kubexa-node-shell-a", true), mk("kubexa-node-shell-b", true), mk("kubexa-agent-x", false))
-	if n := SweepHelpers(context.Background(), cs, "kubexa", nil); n != 2 {
+	cs := fake.NewSimpleClientset(
+		mk("kubexa", "kubexa-node-shell-a", true), mk("kubexa", "kubexa-agent-x", false),
+		mk("shells", "kubexa-node-shell-b", true), mk("shells", "other", false),
+		mk("elsewhere", "kubexa-node-shell-c", true),
+	)
+	// The configured namespace and the agent's own; a duplicate and an
+	// empty entry are skipped, "elsewhere" is never listed.
+	if n := SweepHelpers(context.Background(), cs, []string{"shells", "kubexa", "kubexa", ""}, nil); n != 2 {
 		t.Fatalf("swept %d, want 2", n)
 	}
-	left, _ := cs.CoreV1().Pods("kubexa").List(context.Background(), metav1.ListOptions{})
-	if len(left.Items) != 1 || left.Items[0].Name != "kubexa-agent-x" {
-		t.Fatalf("left = %+v", left.Items)
+	// Only two lists were issued. Checked here, before the verification
+	// loop below issues List calls of its own that would inflate the count.
+	lists := 0
+	for _, a := range cs.Actions() {
+		if a.GetVerb() == "list" && a.GetResource().Resource == "pods" {
+			lists++
+		}
+	}
+	if lists != 2 {
+		t.Fatalf("lists = %d, want 2 (one per distinct namespace)", lists)
+	}
+	for ns, want := range map[string]int{"kubexa": 1, "shells": 1, "elsewhere": 1} {
+		left, _ := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
+		if len(left.Items) != want {
+			t.Fatalf("%s: left %d, want %d", ns, len(left.Items), want)
+		}
 	}
 }
 

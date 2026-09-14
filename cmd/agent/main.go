@@ -643,6 +643,7 @@ func buildExecResponder(
 	// covers both call sites -- there is exactly one boot-time deadline for
 	// exec.node's setup, not one per call.
 	var bootCtx context.Context
+	var ownNamespace string
 	if cfg.ExecNodeEnabled() {
 		var cancel context.CancelFunc
 		bootCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
@@ -662,10 +663,12 @@ func buildExecResponder(
 		case ns.Namespace == "" || ns.Namespace == own.Namespace:
 			no.Owner = &own
 			no.Namespace = own.Namespace
+			ownNamespace = own.Namespace
 		default:
 			log.Warn("exec.node.namespace differs from the agent's own namespace; helper Pods there will not be garbage-collected with the agent",
 				logger.F("namespace", ns.Namespace), logger.F("agent_namespace", own.Namespace))
 			no.Namespace = ns.Namespace
+			ownNamespace = own.Namespace
 		}
 		opts.Node = no
 	}
@@ -679,10 +682,12 @@ func buildExecResponder(
 		// Every helper is an orphan at boot: no session survives an agent
 		// restart. Best-effort, and bounded by the same bootCtx the identity
 		// resolution above used, so a stuck API server never holds up the
-		// rest of startup.
-		removed := exec.SweepHelpers(bootCtx, opts.Clients.Clientset, opts.Node.Namespace, log)
+		// rest of startup. Both the configured namespace and the agent's own
+		// are swept -- SweepHelpers dedupes and skips the empty one.
+		namespaces := []string{opts.Node.Namespace, ownNamespace}
+		removed := exec.SweepHelpers(bootCtx, opts.Clients.Clientset, namespaces, log)
 		log.Info("node shell sweep complete",
-			logger.F("removed", removed), logger.F("namespace", opts.Node.Namespace))
+			logger.F("removed", removed), logger.F("namespaces", strings.Join(namespaces, ",")))
 	}
 
 	return exec.NewTransport(m, dial, exec.Identity{
