@@ -635,6 +635,16 @@ func buildExecResponder(
 	}
 	opts.Clients = *clients
 
+	// exec.node shares exec.pod's Manager (its resume window comes from
+	// exec.pod.resume_window_sec and its clients are the same), so a nil
+	// pod policy -- compileExecPolicy's "disabled but invalid" outcome --
+	// cannot carry a node console. Name the section to fix rather than
+	// letting exec.New answer "policy is required".
+	if execPolicy == nil && cfg.ExecNodeEnabled() {
+		_, cause := execpolicy.Compile(cfg)
+		return nil, opts, fmt.Errorf("exec.node is enabled but exec.pod has an invalid rule (a node console shares exec.pod's resume_window_sec and clients); fix or remove exec.pod.rules: %w", cause)
+	}
+
 	// bootCtx bounds both the own-Pod identity Get below and the helper
 	// sweep after exec.New: a stuck API server must not hold up the rest of
 	// startup for either call, and resolving identity deserves no less of a
