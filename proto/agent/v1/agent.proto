@@ -62,7 +62,7 @@ message AgentCapabilities {
   bool state   = 2;
   bool metrics = 3;
   bool mutate    = 4;
-  bool exec_pod  = 5;   // reserved for phase B; the agent sets it false here
+  bool exec_pod  = 5;   // set from config: exec.pod.enabled (see internal/stream/manager.go)
   bool exec_node = 6;   // true when exec.node.enabled and the agent resolved its own Pod (see internal/exec/nodeshell.go)
 }
 

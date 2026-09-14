@@ -262,6 +262,16 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]
+  {{- if .Values.rbac.nodeShell }}
+  # A node console also reads the Node: openNode confirms it exists before
+  # it creates a privileged Pod on it. A Role cannot grant a cluster-scoped
+  # resource, so this lives here rather than in the nodeShell Role -- and
+  # it must not depend on the state/query or cAdvisor blocks above, which
+  # are the only other places nodes get comes from.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+  {{- end }}
   {{- end }}
 
   {{- with .Values.rbac.extraRules }}
