@@ -64,7 +64,7 @@ func startSession(t *testing.T, resume time.Duration) (*Session, *fakeExecutor) 
 		maxSession:   time.Minute,
 		ring:         newRing(RingBytes),
 	})
-	go s.run(context.Background(), fe)
+	go s.run(context.Background(), readyExecutor(fe))
 	<-fe.started
 	return s, fe
 }
@@ -170,7 +170,7 @@ func TestSessionMapsForbiddenUpgradeToRBACDenied(t *testing.T) {
 		id: "s1", tty: true, resumeWindow: time.Second, maxSession: time.Minute, ring: newRing(RingBytes),
 	})
 	msg := `pods "x" is forbidden: cannot create resource "pods/exec"`
-	go s.run(context.Background(), &errExecutor{err: errors.New(msg)})
+	go s.run(context.Background(), readyExecutor(&errExecutor{err: errors.New(msg)}))
 	select {
 	case <-s.Done():
 	case <-time.After(2 * time.Second):
@@ -303,7 +303,7 @@ func TestSessionCloseBeforeRunNeverDials(t *testing.T) {
 	})
 	s.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "gone before start")
 	rec := &recordingExecutor{called: make(chan struct{})}
-	s.run(context.Background(), rec) // synchronous: returns without streaming
+	s.run(context.Background(), readyExecutor(rec)) // synchronous: returns without streaming
 	select {
 	case <-rec.called:
 		t.Fatal("run dialled after Close")
@@ -326,7 +326,7 @@ func TestSessionRunSeesFinishMidFlight(t *testing.T) {
 	s.mu.Unlock()
 	rec := &recordingExecutor{called: make(chan struct{})}
 	ran := make(chan struct{})
-	go func() { defer close(ran); s.run(context.Background(), rec) }()
+	go func() { defer close(ran); s.run(context.Background(), readyExecutor(rec)) }()
 	select {
 	case <-ran:
 	case <-rec.called:
@@ -373,7 +373,7 @@ func TestSessionMapsNotFoundUpgradeToNotFound(t *testing.T) {
 		id: "s1", tty: true, stdin: true, resumeWindow: time.Second, maxSession: time.Minute, ring: newRing(RingBytes),
 	})
 	msg := `unable to upgrade connection: pods "x" not found`
-	go s.run(context.Background(), &errExecutor{err: errors.New(msg)})
+	go s.run(context.Background(), readyExecutor(&errExecutor{err: errors.New(msg)}))
 	select {
 	case <-s.Done():
 	case <-time.After(2 * time.Second):
@@ -393,7 +393,7 @@ func TestSessionKeepsMissingExecutableInternal(t *testing.T) {
 		id: "s1", tty: true, stdin: true, resumeWindow: time.Second, maxSession: time.Minute, ring: newRing(RingBytes),
 	})
 	msg := `exec: "bash": executable file not found in $PATH`
-	go s.run(context.Background(), &errExecutor{err: errors.New(msg)})
+	go s.run(context.Background(), readyExecutor(&errExecutor{err: errors.New(msg)}))
 	select {
 	case <-s.Done():
 	case <-time.After(2 * time.Second):
@@ -402,5 +402,126 @@ func TestSessionKeepsMissingExecutableInternal(t *testing.T) {
 	e := s.Exit()
 	if e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL || e.GetMessage() != msg {
 		t.Fatalf("exit = %v", e)
+	}
+}
+
+// blockingPrepare is a prepare that never returns on its own: it waits for
+// ctx (the session's own, which Close / the watchdog / max_session cancel)
+// and reports how it ended. Every prepare that does real work (a helper Pod
+// wait) has this shape at its core.
+type blockingPrepare struct {
+	entered  chan struct{}
+	returned chan context.Context
+	refusal  *agentv1.ExecExit // returned when ctx ends; nil = plain refusal
+}
+
+func newBlockingPrepare() *blockingPrepare {
+	return &blockingPrepare{entered: make(chan struct{}), returned: make(chan context.Context, 1)}
+}
+
+func (b *blockingPrepare) fn(ctx context.Context) (remotecommand.Executor, *agentv1.ExecExit) {
+	close(b.entered)
+	<-ctx.Done()
+	b.returned <- ctx
+	if b.refusal != nil {
+		return nil, b.refusal
+	}
+	return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED, "helper pod wait canceled: "+ctx.Err().Error())
+}
+
+func TestRunPrepareCancelledByCloseEndsClosed(t *testing.T) {
+	s := newSession(sessionSpec{id: "p1", tty: true, stdin: true, resumeWindow: time.Minute, maxSession: time.Minute, ring: newRing(RingBytes)})
+	bp := newBlockingPrepare()
+	done := make(chan struct{})
+	go func() { defer close(done); s.run(context.Background(), bp.fn) }()
+	<-bp.entered
+	s.Close(agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED, "gateway closed")
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return after Close cancelled prepare")
+	}
+	// Close's exit wins: prepare's own refusal must not overwrite it.
+	if e := s.Exit(); e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_CLOSED || e.GetMessage() != "gateway closed" {
+		t.Fatalf("exit = %v, want CLOSED/gateway closed", e)
+	}
+	select {
+	case ctx := <-bp.returned:
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatalf("prepare ctx err = %v, want Canceled", ctx.Err())
+		}
+	default:
+		t.Fatal("prepare never observed the cancel")
+	}
+}
+
+func TestRunPrepareCancelledByMaxSessionEndsMaxSession(t *testing.T) {
+	s := newSession(sessionSpec{id: "p2", tty: true, stdin: true, resumeWindow: time.Minute, maxSession: 50 * time.Millisecond, ring: newRing(RingBytes)})
+	s.Attach() // no resume watchdog interference
+	bp := newBlockingPrepare()
+	done := make(chan struct{})
+	go func() { defer close(done); s.run(context.Background(), bp.fn) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return after max_session elapsed inside prepare")
+	}
+	if e := s.Exit(); e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_MAX_SESSION {
+		t.Fatalf("exit = %v, want MAX_SESSION", e)
+	}
+}
+
+func TestRunPrepareCancelledByResumeWindowEndsResumeExpired(t *testing.T) {
+	// Never attached, window shorter than firstAttachGrace: the bound is
+	// firstAttachGrace (15 s) -- too long for a test -- so attach once and
+	// detach, which puts the configured window in charge.
+	s := newSession(sessionSpec{id: "p3", tty: true, stdin: true, resumeWindow: 50 * time.Millisecond, maxSession: time.Minute, ring: newRing(RingBytes)})
+	s.Attach()
+	s.Detach()
+	bp := newBlockingPrepare()
+	done := make(chan struct{})
+	go func() { defer close(done); s.run(context.Background(), bp.fn) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("run did not return after the resume window elapsed inside prepare")
+	}
+	if e := s.Exit(); e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_RESUME_EXPIRED {
+		t.Fatalf("exit = %v, want RESUME_EXPIRED", e)
+	}
+}
+
+func TestRunPrepareRefusalBecomesTheExit(t *testing.T) {
+	s := newSession(sessionSpec{id: "p4", tty: true, stdin: true, resumeWindow: time.Minute, maxSession: time.Minute, ring: newRing(RingBytes)})
+	refusal := refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED, "helper pod create refused: quota")
+	s.run(context.Background(), func(context.Context) (remotecommand.Executor, *agentv1.ExecExit) { return nil, refusal })
+	if e := s.Exit(); e.GetReason() != agentv1.ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED || e.GetMessage() != "helper pod create refused: quota" {
+		t.Fatalf("exit = %v, want the prepare refusal verbatim", e)
+	}
+	select {
+	case <-s.Done():
+	default:
+		t.Fatal("Done must be closed after a prepare refusal")
+	}
+}
+
+func TestNoteWritesAStderrFrameIntoTheRing(t *testing.T) {
+	s := newSession(sessionSpec{id: "p5", tty: true, stdin: true, resumeWindow: time.Minute, maxSession: time.Minute, ring: newRing(RingBytes)})
+	s.note("kubexa: starting node shell helper on n1 (busybox:1.36)...\r\n")
+	s.note("kubexa: helper ready, entering host namespaces\r\n")
+	frames, gap := s.Replay(0)
+	if gap || len(frames) != 2 {
+		t.Fatalf("frames = %d gap = %v, want 2 frames, no gap", len(frames), gap)
+	}
+	if frames[0].Seq != 1 || frames[1].Seq != 2 {
+		t.Fatalf("seqs = %d,%d want 1,2", frames[0].Seq, frames[1].Seq)
+	}
+	for _, f := range frames {
+		if f.Channel != agentv1.ExecChannel_EXEC_CHANNEL_STDERR {
+			t.Fatalf("channel = %v, want STDERR", f.Channel)
+		}
+	}
+	if string(frames[0].Chunk) != "kubexa: starting node shell helper on n1 (busybox:1.36)...\r\n" {
+		t.Fatalf("chunk = %q", frames[0].Chunk)
 	}
 }

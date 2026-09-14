@@ -637,4 +637,34 @@ func TestBuildExecResponderWiresNodeOptions(t *testing.T) {
 			t.Fatalf("capabilityNodeWiring namespace = %q, want \"\" when the agent could not resolve its own Pod", gotNamespace)
 		}
 	})
+
+	t.Run("exec.pod disabled but invalid names the cause", func(t *testing.T) {
+		cfg := newCfg()
+		cfg.Exec.Pod.Rules = []config.PodExecRule{{Namespace: "de*v"}}
+		// compileExecPolicy's ruling: disabled + invalid = nil policy, a
+		// warning. buildExecResponder then cannot build exec.New without
+		// a policy, and the error must say WHICH section to fix.
+		var buf bytes.Buffer
+		execPolicy, err := compileExecPolicy(cfg, logger.New("test", logger.WithWriter(&buf)))
+		if err != nil || execPolicy != nil {
+			t.Fatalf("precondition: policy = %v err = %v", execPolicy, err)
+		}
+		nodePolicy, err := execpolicy.CompileNode(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		factory := func() (*k8s.ExecClients, error) { return fakeExecClientsFactory()() }
+		resolve := func(context.Context, kubernetes.Interface) (exec.OwnPod, error) {
+			return exec.OwnPod{Name: "a", Namespace: "kubexa", UID: "u"}, nil
+		}
+		_, _, err = buildExecResponder(cfg, execPolicy, nodePolicy, factory, nilExecDialer, logger.New("test"), nil, resolve)
+		if err == nil {
+			t.Fatal("want an error: exec.node cannot run without a valid exec.pod section")
+		}
+		for _, want := range []string{"exec.node", "exec.pod", "de*v"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q does not name %q", err.Error(), want)
+			}
+		}
+	})
 }

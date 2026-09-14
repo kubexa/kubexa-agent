@@ -218,7 +218,7 @@ func (m *Manager) Open(ctx context.Context, open *agentv1.ExecOpen) (*Session, *
 
 	go func() {
 		defer release()
-		s.run(ctx, ex)
+		s.run(ctx, readyExecutor(ex))
 		m.log.Info("console session ended",
 			logger.F("session_id", id), logger.F("target_kind", "pod"), logger.F("namespace", target.Namespace),
 			logger.F("pod", target.Name), logger.F("container", target.Container),
@@ -306,15 +306,17 @@ func refuseFromAPIError(err error) *agentv1.ExecExit {
 // helper needs hostPID.
 var nsenterArgs = []string{"nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--"}
 
-// openNode is Open for a node target: node lookup, policy, helper Pod,
-// then the same pods/exec session as a pod console, against the helper.
-// The gateway's command is ignored: the apiserver refuses a non-empty one
-// before it gets here, and what runs on a node is the operator's
-// exec.node.shell, never a client's argv.
+// openNode is Open for a node target: node lookup and policy
+// synchronously, then the session is returned and its prepare step creates
+// the helper Pod, waits for it, and builds the same pods/exec executor a
+// pod console uses -- against the helper. The gateway's command is
+// ignored: the apiserver refuses a non-empty one before it gets here, and
+// what runs on a node is the operator's exec.node.shell, never a client's
+// argv.
 //
-// Helper lifecycle, in layers. In-process, every failure after the helper
-// exists deletes it before the refusal is returned, and the session's own
-// end (exit, close, deadline, resume window elapsed) deletes it too. What
+// Helper lifecycle, in layers. In-process, every ending of the session --
+// a refusal inside prepare, exit, close, deadline, resume window elapsed
+// -- runs the one deferred delete on the session goroutine. What
 // this function does NOT cover is the agent dying mid-session: there is no
 // shutdown hook, and a SIGTERM ends the run goroutine without its defers.
 // That helper is left to the cluster -- the ownerReference on the agent Pod
@@ -377,43 +379,6 @@ func (m *Manager) openNode(ctx context.Context, open *agentv1.ExecOpen, target *
 	spec := helperSpec{sessionID: id, node: nodeName, namespace: no.Namespace, image: no.Settings.Image,
 		owner: no.Owner, maxSession: maxSession}
 	cs := m.opts.Clients.Clientset
-	helper, err := createHelper(ctx, cs, spec)
-	if err != nil {
-		release()
-		return nil, refuseFromHelperError(err)
-	}
-	cleanup := func() {
-		dctx, cancel := context.WithTimeout(context.Background(), helperDeleteTimeout)
-		defer cancel()
-		if err := deleteHelper(dctx, cs, helper.Namespace, helper.Name); err != nil {
-			m.log.Err(err).Warn("node shell helper delete failed; activeDeadlineSeconds or the sweep will remove it",
-				logger.F("session_id", id), logger.F("pod", helper.Name))
-		}
-	}
-	readyTimeout := time.Duration(no.Settings.HelperReadyTimeoutSec) * time.Second
-	if err := awaitHelperRunning(ctx, cs, helper.Namespace, helper.Name, readyTimeout, m.helperPollInterval()); err != nil {
-		cleanup()
-		release()
-		return nil, refuseFromHelperError(err)
-	}
-
-	command := append(append([]string(nil), nsenterArgs...), no.Settings.Shell...)
-	req := m.execREST.Post().
-		Resource("pods").Namespace(helper.Namespace).Name(helper.Name).SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Container: helperContainer,
-			Command:   command,
-			Stdin:     open.GetStdin(),
-			Stdout:    true,
-			Stderr:    !open.GetTty(),
-			TTY:       open.GetTty(),
-		}, scheme.ParameterCodec)
-	ex, err := m.opts.newExecutor(m.opts.Clients.REST, req.URL())
-	if err != nil {
-		cleanup()
-		release()
-		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, err.Error())
-	}
 
 	s := newSession(sessionSpec{
 		id:           id,
@@ -423,9 +388,58 @@ func (m *Manager) openNode(ctx context.Context, open *agentv1.ExecOpen, target *
 		maxSession:   maxSession,
 		ring:         newRing(RingBytes),
 	})
-	s.target = podTarget{Namespace: helper.Namespace, Name: helper.Name, Container: helperContainer}
+	s.target = podTarget{Namespace: no.Namespace, Name: helperName(id), Container: helperContainer}
 	s.node = nodeName
 	s.ruleID = d.RuleID
+
+	// helperCleanup deletes the helper on a context of its own: the
+	// session's may already be cancelled, and a cancelled delete is a
+	// leaked privileged Pod until activeDeadlineSeconds.
+	helperCleanup := func(name string) {
+		dctx, cancel := context.WithTimeout(context.Background(), helperDeleteTimeout)
+		defer cancel()
+		if err := deleteHelper(dctx, cs, no.Namespace, name); err != nil {
+			m.log.Err(err).Warn("node shell helper delete failed; activeDeadlineSeconds or the sweep will remove it",
+				logger.F("session_id", id), logger.F("pod", name))
+		}
+	}
+
+	// prepare runs on the session goroutine under run's max-session
+	// context and resume watchdog: the transport has attached (or is
+	// dialling) by the time the image pulls, so the gateway's attach
+	// clock never sees this wait, and a browser that leaves mid-pull ends
+	// it through Close or the resume window rather than at
+	// helper_ready_timeout_sec. Nothing here deletes the helper: every
+	// ending, refusal included, goes through the one deferred delete on
+	// the session goroutine below.
+	prepare := func(ctx context.Context) (remotecommand.Executor, *agentv1.ExecExit) {
+		s.note("kubexa: starting node shell helper on " + nodeName + " (" + no.Settings.Image + ")...\r\n")
+		helper, err := createHelper(ctx, cs, spec)
+		if err != nil {
+			return nil, refuseFromHelperError(err)
+		}
+		readyTimeout := time.Duration(no.Settings.HelperReadyTimeoutSec) * time.Second
+		if err := awaitHelperRunning(ctx, cs, helper.Namespace, helper.Name, readyTimeout, m.helperPollInterval()); err != nil {
+			return nil, refuseFromHelperError(err)
+		}
+		s.note("kubexa: helper ready, entering host namespaces\r\n")
+		command := append(append([]string(nil), nsenterArgs...), no.Settings.Shell...)
+		req := m.execREST.Post().
+			Resource("pods").Namespace(helper.Namespace).Name(helper.Name).SubResource("exec").
+			VersionedParams(&corev1.PodExecOptions{
+				Container: helperContainer,
+				Command:   command,
+				Stdin:     open.GetStdin(),
+				Stdout:    true,
+				Stderr:    !open.GetTty(),
+				TTY:       open.GetTty(),
+			}, scheme.ParameterCodec)
+		ex, err := m.opts.newExecutor(m.opts.Clients.REST, req.URL())
+		if err != nil {
+			return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL, err.Error())
+		}
+		return ex, nil
+	}
 
 	m.mu.Lock()
 	m.sessions[id] = s
@@ -433,16 +447,21 @@ func (m *Manager) openNode(ctx context.Context, open *agentv1.ExecOpen, target *
 
 	go func() {
 		defer release()
-		defer cleanup()
-		s.run(ctx, ex)
+		// The one delete for every ending. The helper may or may not exist
+		// when run returns (a create refusal never made one; Close before
+		// the goroutine was scheduled never ran prepare); deleteHelper
+		// treats NotFound as success, so the unconditional delete costs
+		// one harmless call in those cases and a real delete in the rest.
+		defer helperCleanup(helperName(id))
+		s.run(ctx, prepare)
 		m.log.Info("console session ended",
 			logger.F("session_id", id), logger.F("target_kind", "node"), logger.F("node", s.node),
-			logger.F("helper_pod", helper.Name),
+			logger.F("helper_pod", helperName(id)),
 			logger.F("reason", s.Exit().GetReason().String()), logger.F("code", s.Exit().GetCode()))
 	}()
 	m.log.Info("console session opened",
 		logger.F("session_id", id), logger.F("target_kind", "node"), logger.F("node", s.node),
-		logger.F("helper_pod", helper.Name), logger.F("rule", d.RuleID))
+		logger.F("helper_pod", helperName(id)), logger.F("rule", d.RuleID))
 	return s, nil
 }
 
