@@ -413,6 +413,65 @@ func TestOpenNodeRefusals(t *testing.T) {
 	})
 }
 
+// helperDeleted reports whether the fake clientset recorded a delete of
+// the named helper Pod. Read through the action log rather than a Get: the
+// tests below install reactors on "get" that answer for the helper.
+func helperDeleted(cs *fake.Clientset, name string) bool {
+	for _, a := range cs.Actions() {
+		d, ok := a.(k8stesting.DeleteAction)
+		if ok && a.GetResource().Resource == "pods" && d.GetName() == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Two failure paths AFTER the helper exists must each delete it and give
+// both the node slot and the sessions entry back: no refusal may leave a
+// privileged Pod for activeDeadlineSeconds or the next boot's sweep, and
+// no refusal may leave a phantom session counted against max_sessions.
+func TestOpenNodeFailureAfterHelperCleansUp(t *testing.T) {
+	t.Run("helper never running", func(t *testing.T) {
+		m, _, cs := newNodeTestManager(t, []string{"*"}, 1, node("n1"))
+		m.opts.Node.Settings.HelperReadyTimeoutSec = 1
+		// Every lookup sees the helper still Pending: the reactor answers
+		// for the create reactor's Running copy in the tracker.
+		cs.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+			g := a.(k8stesting.GetAction)
+			return true, &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: g.GetName(), Namespace: g.GetNamespace()},
+				Status:     corev1.PodStatus{Phase: corev1.PodPending},
+			}, nil
+		})
+		_, r := m.Open(context.Background(), nodeOpen("n1"))
+		if r == nil || r.Reason != agentv1.ExecExitReason_EXEC_EXIT_REASON_HELPER_REJECTED || !strings.Contains(r.Message, "not running after") {
+			t.Fatalf("r = %v", r)
+		}
+		if !helperDeleted(cs, helperName("nsid")) {
+			t.Fatal("the helper was not deleted after the ready wait expired")
+		}
+		if m.nodeSessions != 0 || len(m.sessions) != 0 {
+			t.Fatalf("nodeSessions = %d, sessions = %d; want both 0", m.nodeSessions, len(m.sessions))
+		}
+	})
+	t.Run("executor construction fails", func(t *testing.T) {
+		m, _, cs := newNodeTestManager(t, []string{"*"}, 1, node("n1"))
+		m.opts.newExecutor = func(*rest.Config, *url.URL) (remotecommand.Executor, error) {
+			return nil, errors.New("spdy: no transport")
+		}
+		_, r := m.Open(context.Background(), nodeOpen("n1"))
+		if r == nil || r.Reason != agentv1.ExecExitReason_EXEC_EXIT_REASON_INTERNAL || !strings.Contains(r.Message, "spdy") {
+			t.Fatalf("r = %v", r)
+		}
+		if !helperDeleted(cs, helperName("nsid")) {
+			t.Fatal("the helper was not deleted after the executor failed to build")
+		}
+		if m.nodeSessions != 0 || len(m.sessions) != 0 {
+			t.Fatalf("nodeSessions = %d, sessions = %d; want both 0", m.nodeSessions, len(m.sessions))
+		}
+	})
+}
+
 func TestNodeReady(t *testing.T) {
 	m, _, _ := newNodeTestManager(t, []string{"*"}, 1)
 	if !m.NodeReady() {
