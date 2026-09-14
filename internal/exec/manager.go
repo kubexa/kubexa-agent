@@ -218,7 +218,7 @@ func (m *Manager) Open(ctx context.Context, open *agentv1.ExecOpen) (*Session, *
 
 	go func() {
 		defer release()
-		s.run(ctx, ex)
+		s.run(ctx, readyExecutor(ex))
 		m.log.Info("console session ended",
 			logger.F("session_id", id), logger.F("target_kind", "pod"), logger.F("namespace", target.Namespace),
 			logger.F("pod", target.Name), logger.F("container", target.Container),
@@ -434,7 +434,7 @@ func (m *Manager) openNode(ctx context.Context, open *agentv1.ExecOpen, target *
 	go func() {
 		defer release()
 		defer cleanup()
-		s.run(ctx, ex)
+		s.run(ctx, readyExecutor(ex))
 		m.log.Info("console session ended",
 			logger.F("session_id", id), logger.F("target_kind", "node"), logger.F("node", s.node),
 			logger.F("helper_pod", helper.Name),
