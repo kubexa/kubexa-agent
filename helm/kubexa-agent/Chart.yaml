@@ -2,6 +2,18 @@ apiVersion: v2
 name: kubexa-agent
 description: Kubexa agent — collects Kubernetes logs, state, and metrics and streams them to the Kubexa gateway.
 type: application
+# 0.9.1 moves the image to 0.9.1: node console fixes from the whole-branch
+# review. rbac.nodeShell now also grants `nodes get` in the ClusterRole --
+# the agent confirms the node exists before it creates a privileged Pod on
+# it, and that read used to come only from the state/query or cAdvisor
+# blocks, so an install with every read feature off answered RBAC_DENIED to
+# every node open. The boot-time helper sweep logs its count ("node shell
+# sweep complete removed=N"), and the openNode comment now states the real
+# helper-lifecycle layers (no shutdown hook: an agent that dies mid-session
+# leaves the helper to ownerReference GC, the next boot's sweep, or
+# activeDeadlineSeconds). Pairs with apiserver/agentserver charts on image
+# 0.5.41 (node attach deadline; error_code on cluster_console_sessions).
+#
 # 0.9.0 moves the image to 0.9.0: node console through a privileged helper
 # Pod. Three gates, all OFF: rbac.nodeShell, exec.node.enabled, and the
 # platform permission.
@@ -177,8 +189,8 @@ type: application
 # install order constraint against the gateway: an older gateway ignores the
 # new heartbeat field, and a newer gateway reads its ABSENCE as "this agent
 # does not report scrape health" rather than as "everything is fine".
-version: 0.9.0
-appVersion: "0.9.0"
+version: 0.9.1
+appVersion: "0.9.1"
 keywords:
   - kubexa
   - observability
