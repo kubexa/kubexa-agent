@@ -232,12 +232,13 @@ func deleteHelper(ctx context.Context, cs kubernetes.Interface, namespace, name 
 // SweepHelpers deletes every helper Pod in each of the namespaces. It runs
 // at boot, when every helper is an orphan by definition: no session
 // survives an agent restart. The caller passes the configured
-// exec.node.namespace AND the agent's own namespace, so a namespace change
-// between two restarts does not strand the previous one -- only a namespace
-// configured two restarts ago and since abandoned is out of reach, and its
-// helpers end on activeDeadlineSeconds. Duplicates and empty entries are
-// skipped. Best-effort -- a list error is logged and boot goes on. Returns
-// how many it deleted.
+// exec.node.namespace AND the agent's own namespace: a switch from the
+// release namespace to a custom one leaves nothing behind, but helpers in
+// any OTHER namespace (one configured before a change, custom to custom or
+// custom back to the release namespace) are not swept and end on
+// activeDeadlineSeconds. Duplicates and empty entries are skipped.
+// Best-effort -- a list error is logged and boot goes on. Returns how many
+// it deleted.
 func SweepHelpers(ctx context.Context, cs kubernetes.Interface, namespaces []string, log *logger.Logger) int {
 	if log == nil {
 		log = logger.New("exec")
