@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -100,6 +101,21 @@ func helperName(sessionID string) string {
 	return helperNamePrefix + hex.EncodeToString(sum[:])[:8]
 }
 
+// nodeLabelValue is the kubexa.dev/node label for a node name. A label
+// value is capped at 63 characters by Pod validation while a node name may
+// run to 253, so a long name becomes its first 55 characters, a dash and
+// seven hex digits of FNV-32a over the full name -- still selectable, still
+// distinct for names that share a prefix. spec.nodeName carries the full
+// name regardless; the label is a convenience selector only.
+func nodeLabelValue(node string) string {
+	if len(node) <= 63 {
+		return node
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(node))
+	return node[:55] + "-" + fmt.Sprintf("%08x", h.Sum32())[:7]
+}
+
 func helperPod(s helperSpec) *corev1.Pod {
 	deadline := int64((s.maxSession + helperDeadlineSlack) / time.Second)
 	privileged := true
@@ -114,7 +130,7 @@ func helperPod(s helperSpec) *corev1.Pod {
 				"app.kubernetes.io/name":       HelperLabelName,
 				"app.kubernetes.io/managed-by": "kubexa-agent",
 				helperSessionLabel:             s.sessionID,
-				helperNodeLabel:                s.node,
+				helperNodeLabel:                nodeLabelValue(s.node),
 			},
 		},
 		Spec: corev1.PodSpec{

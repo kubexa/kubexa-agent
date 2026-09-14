@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -150,6 +151,34 @@ func TestDeleteHelperTreatsNotFoundAsSuccess(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	if err := deleteHelper(context.Background(), cs, "kubexa", "missing"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNodeLabelValueFitsPodValidation(t *testing.T) {
+	short := strings.Repeat("a", 63)
+	if got := nodeLabelValue(short); got != short {
+		t.Fatalf("63-char name must be stored verbatim, got %q", got)
+	}
+	long := strings.Repeat("b", 64)
+	got := nodeLabelValue(long)
+	if len(got) != 63 {
+		t.Fatalf("len = %d, want 63: %q", len(got), got)
+	}
+	if !strings.HasPrefix(got, strings.Repeat("b", 55)+"-") {
+		t.Fatalf("prefix wrong: %q", got)
+	}
+	if errs := validation.IsValidLabelValue(got); len(errs) != 0 {
+		t.Fatalf("not a valid label value: %v", errs)
+	}
+	// Two names sharing a 55-char prefix get different values.
+	other := strings.Repeat("b", 55) + strings.Repeat("c", 198)
+	if o := nodeLabelValue(other); o == got {
+		t.Fatalf("collision: %q for both", o)
+	}
+	// helperPod uses it.
+	p := helperPod(helperSpec{sessionID: "s", node: long, namespace: "kubexa", image: "busybox", maxSession: time.Minute})
+	if p.Labels[helperNodeLabel] != got || p.Spec.NodeName != long {
+		t.Fatalf("label = %q nodeName = %q", p.Labels[helperNodeLabel], p.Spec.NodeName)
 	}
 }
 
