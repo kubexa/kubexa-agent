@@ -312,9 +312,15 @@ var nsenterArgs = []string{"nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "
 // before it gets here, and what runs on a node is the operator's
 // exec.node.shell, never a client's argv.
 //
-// Every failure after the helper exists deletes it before the refusal is
-// returned, and the session's own end deletes it too; no path leaves a
-// privileged Pod behind for the deadline or the sweep to find.
+// Helper lifecycle, in layers. In-process, every failure after the helper
+// exists deletes it before the refusal is returned, and the session's own
+// end (exit, close, deadline, resume window elapsed) deletes it too. What
+// this function does NOT cover is the agent dying mid-session: there is no
+// shutdown hook, and a SIGTERM ends the run goroutine without its defers.
+// That helper is left to the cluster -- the ownerReference on the agent Pod
+// (garbage-collected once the Pod is replaced), the next boot's SweepHelpers
+// (same namespace, see cmd/agent), or the Pod's own activeDeadlineSeconds
+// (max_session + 60 s) -- whichever fires first.
 func (m *Manager) openNode(ctx context.Context, open *agentv1.ExecOpen, target *agentv1.NodeTarget) (*Session, *agentv1.ExecExit) {
 	no := m.opts.Node
 	if no == nil || !no.Policy.AllowsAnyNode() {

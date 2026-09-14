@@ -780,7 +780,7 @@ type AgentCapabilities struct {
 	State         bool                   `protobuf:"varint,2,opt,name=state,proto3" json:"state,omitempty"`
 	Metrics       bool                   `protobuf:"varint,3,opt,name=metrics,proto3" json:"metrics,omitempty"`
 	Mutate        bool                   `protobuf:"varint,4,opt,name=mutate,proto3" json:"mutate,omitempty"`
-	ExecPod       bool                   `protobuf:"varint,5,opt,name=exec_pod,json=execPod,proto3" json:"exec_pod,omitempty"`    // reserved for phase B; the agent sets it false here
+	ExecPod       bool                   `protobuf:"varint,5,opt,name=exec_pod,json=execPod,proto3" json:"exec_pod,omitempty"`    // set from config: exec.pod.enabled (see internal/stream/manager.go)
 	ExecNode      bool                   `protobuf:"varint,6,opt,name=exec_node,json=execNode,proto3" json:"exec_node,omitempty"` // true when exec.node.enabled and the agent resolved its own Pod (see internal/exec/nodeshell.go)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

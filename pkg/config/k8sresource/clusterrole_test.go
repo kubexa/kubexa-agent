@@ -375,8 +375,11 @@ func writeBlock(t *testing.T) string {
 	return chart[start : start+end]
 }
 
-// execBlock returns the text of the {{- if .Values.rbac.exec }} ... {{- end }}
-// block in the ClusterRole template.
+// execBlock returns the text of the
+// {{- if or .Values.rbac.exec .Values.rbac.nodeShell }} ... {{- end }}
+// block in the ClusterRole template, up to ITS OWN {{- end }}: the block
+// nests a {{- if .Values.rbac.nodeShell }} sub-block (nodes get), so the
+// first {{- end }} after the opening is not the closing one.
 func execBlock(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join("..", "..", "..", "helm", "kubexa-agent", "templates", "clusterrole.yaml")
@@ -390,11 +393,25 @@ func execBlock(t *testing.T) string {
 	if start < 0 {
 		t.Fatal("no rbac.exec block in the ClusterRole")
 	}
-	end := strings.Index(chart[start:], "{{- end }}")
-	if end < 0 {
-		t.Fatal("the rbac.exec block is not closed")
+	depth := 0
+	rest := chart[start:]
+	for pos := 0; ; {
+		nextIf := strings.Index(rest[pos:], "{{- if")
+		nextEnd := strings.Index(rest[pos:], "{{- end }}")
+		if nextEnd < 0 {
+			t.Fatal("the rbac.exec block is not closed")
+		}
+		if nextIf >= 0 && nextIf < nextEnd {
+			depth++
+			pos += nextIf + len("{{- if")
+			continue
+		}
+		depth--
+		if depth == 0 {
+			return rest[:pos+nextEnd]
+		}
+		pos += nextEnd + len("{{- end }}")
 	}
-	return chart[start : start+end]
 }
 
 // rbac.exec must gate the pod-console rules on its own -- and on nothing
@@ -435,32 +452,54 @@ func TestClusterRoleExecGateIsRbacExecOnly(t *testing.T) {
 	}
 }
 
-// The exec block must grant exactly the two rules a pod console needs: pods
-// get (to resolve the default container) and pods/exec create (to open the
-// session) -- nothing wider, and nothing the read block does not already
-// legitimize on its own.
+var coreRuleRE = regexp.MustCompile(`(?s)apiGroups:\s*\[""\]\s*\n\s*resources:\s*\["([a-z/]+)"\]\s*\n\s*verbs:\s*\["([a-z]+)"\]`)
+
+// coreRules maps resource -> verb for every single-resource, single-verb
+// core-group rule in a template fragment.
+func coreRules(fragment string) map[string]string {
+	got := map[string]string{}
+	for _, m := range coreRuleRE.FindAllStringSubmatch(fragment, -1) {
+		got[m[1]] = m[2]
+	}
+	return got
+}
+
+// The exec block grants exactly the two rules a pod console needs
+// unconditionally: pods get (to resolve the default container) and
+// pods/exec create (to open the session) -- nothing wider, and nothing the
+// read block does not already legitimize on its own. The ONE addition is
+// nested under its own {{- if .Values.rbac.nodeShell }} gate: nodes get,
+// which openNode needs to confirm the node before it creates a privileged
+// Pod there (cluster-scoped, so the nodeShell Role cannot carry it). It
+// must stay inside that nested gate: rbac.exec alone is a pod console and
+// has no business reading Nodes.
 func TestClusterRoleExecGrantsOnlyPodsGetAndPodsExecCreate(t *testing.T) {
 	block := execBlock(t)
 
-	re := regexp.MustCompile(`(?s)apiGroups:\s*\[""\]\s*\n\s*resources:\s*\["([a-z/]+)"\]\s*\n\s*verbs:\s*\["([a-z]+)"\]`)
-	matches := re.FindAllStringSubmatch(block, -1)
-
-	got := map[string]string{}
-	for _, m := range matches {
-		got[m[1]] = m[2]
+	nested := strings.Index(block, "{{- if .Values.rbac.nodeShell }}")
+	if nested < 0 {
+		t.Fatal("no nested rbac.nodeShell gate in the exec block: nodes get is either missing or granted to rbac.exec too")
 	}
+	unconditional, nodeShellOnly := block[:nested], block[nested:]
 
 	want := map[string]string{
 		"pods":      "get",
 		"pods/exec": "create",
 	}
+	got := coreRules(unconditional)
 	if len(got) != len(want) {
-		t.Fatalf("exec block grants %v, want exactly %v", got, want)
+		t.Fatalf("exec block grants %v unconditionally, want exactly %v", got, want)
 	}
 	for resource, verb := range want {
 		if got[resource] != verb {
 			t.Errorf("exec block grants resource %q verb %q, want %q", resource, got[resource], verb)
 		}
+	}
+
+	wantNode := map[string]string{"nodes": "get"}
+	gotNode := coreRules(nodeShellOnly)
+	if len(gotNode) != 1 || gotNode["nodes"] != "get" {
+		t.Fatalf("nodeShell sub-block grants %v, want exactly %v", gotNode, wantNode)
 	}
 }
 
