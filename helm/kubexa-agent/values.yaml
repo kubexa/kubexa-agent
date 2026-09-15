@@ -437,11 +437,12 @@ exec:
     # the agent). Anything else drops that layer.
     namespace: ""
     # A node session's resume window is exec.pod.resumeWindowSec: the two
-    # consoles share one manager. An invalid exec.pod.rules entry is fatal
-    # while this is enabled, even with exec.pod.enabled false.
+    # consoles share one manager. An invalid exec.pod section (a rule or a
+    # scalar) is fatal while this is enabled, even with exec.pod.enabled false.
     # What nsenter runs inside the host namespaces.
     shell: ["/bin/sh", "-l"]
-    # [10, 86400]; also the helper's activeDeadlineSeconds (+60).
+    # [10, 86400]; also the helper's activeDeadlineSeconds (+60). Must be at
+    # least helperReadyTimeoutSec: the clock starts at open, before the pull.
     maxSessionSec: 1800
     # Concurrent node sessions, separate from exec.pod.maxSessions. [1, 16]
     maxSessions: 1
