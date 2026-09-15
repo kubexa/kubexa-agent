@@ -265,7 +265,7 @@ func (c *Config) validateExecNode() []string {
 // exec.New's "policy is required" (cmd/agent/main.go names the section
 // there as a second net).
 func (c *Config) validateExecPod() []string {
-	if c == nil || !(c.ExecPodEnabled() || c.ExecNodeEnabled()) {
+	if c == nil || (!c.ExecPodEnabled() && !c.ExecNodeEnabled()) {
 		return nil
 	}
 	var errs []string
