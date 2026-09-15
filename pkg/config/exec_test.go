@@ -81,6 +81,25 @@ func TestExecPodDisabledSkipsBoundsAtLoad(t *testing.T) {
 	}
 }
 
+// A node console shares exec.pod's resume_window_sec and its client set,
+// so exec.pod's scalars bind while exec.node is on even with exec.pod off.
+func TestExecNodeOnValidatesExecPodScalars(t *testing.T) {
+	on := true
+	c := config.Config{}
+	c.Exec.Node = config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}}
+	c.Exec.Pod.ResumeWindowSec = 601
+	c.Exec.Pod.MaxSessionSec = 5
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("expected violations")
+	}
+	for _, want := range []string{"exec.pod.resume_window_sec", "exec.pod.max_session_sec"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("violations do not mention %s: %v", want, err)
+		}
+	}
+}
+
 func TestExecNodeDefaultsAndAccessors(t *testing.T) {
 	var nilCfg *config.Config
 	if nilCfg.ExecNodeEnabled() {
@@ -129,6 +148,12 @@ func TestExecNodeValidation(t *testing.T) {
 		{"max_sessions high", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}, MaxSessions: 17}, "exec.node.max_sessions"},
 		{"ready timeout high", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}, HelperReadyTimeoutSec: 601}, "exec.node.helper_ready_timeout_sec"},
 		{"bad namespace", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}, Namespace: "Not_Valid"}, "exec.node.namespace"},
+		// The session clock starts at open and the helper wait runs under it:
+		// a max_session shorter than the helper wait ends every uncached
+		// pull as MAX_SESSION under a "starting helper" line.
+		{"max_session below ready timeout", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}, MaxSessionSec: 60, HelperReadyTimeoutSec: 120}, "exec.node.max_session_sec (60) must be at least exec.node.helper_ready_timeout_sec (120)"},
+		{"max_session below the default ready timeout", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}, MaxSessionSec: 30}, "exec.node.max_session_sec (30) must be at least exec.node.helper_ready_timeout_sec (60)"},
+		{"max_session equal to ready timeout", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}, MaxSessionSec: 120, HelperReadyTimeoutSec: 120}, ""},
 		{"valid", config.NodeExecConfig{Enabled: &on, Image: "busybox", Nodes: []string{"*"}}, ""},
 	}
 	for _, tc := range cases {
