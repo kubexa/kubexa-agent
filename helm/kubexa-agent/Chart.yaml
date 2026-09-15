@@ -189,6 +189,10 @@ type: application
 # install order constraint against the gateway: an older gateway ignores the
 # new heartbeat field, and a newer gateway reads its ABSENCE as "this agent
 # does not report scrape health" rather than as "everything is fine".
+# 0.9.4 moves the image to 0.9.4: the same code as 0.9.3 with a lint line
+# fixed. Image 0.9.3 never built (the tag build failed on staticcheck), so
+# chart 0.9.3 names an image that does not exist -- an install of it rolls
+# back on ImagePullBackOff. Skip it.
 # 0.9.3 moves the image to 0.9.3: config validation closes two silent
 # shapes. exec.pod's scalars (resume_window_sec, max_session_sec, ...)
 # are validated at load while exec.node is on, even with exec.pod.enabled
@@ -215,8 +219,8 @@ type: application
 # install THIS chart first: an older agent on a 0.5.42 gateway ends every
 # uncached node open as attach_timeout.
 #
-version: 0.9.3
-appVersion: "0.9.3"
+version: 0.9.4
+appVersion: "0.9.4"
 keywords:
   - kubexa
   - observability
