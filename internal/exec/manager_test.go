@@ -685,3 +685,25 @@ func TestOpenPodMaxSessionsExcludesNodeSessions(t *testing.T) {
 		t.Fatalf("r = %v", r)
 	}
 }
+
+// A node open's max_session is floored at the helper wait: the clock starts
+// at open and the wait runs under it, so anything shorter could only end as
+// MAX_SESSION before a prompt. The floor never exceeds the agent's own cap.
+func TestNodeMaxSessionIsFlooredAtTheHelperWait(t *testing.T) {
+	s := config.NodeExecSettings{MaxSessionSec: 1800, HelperReadyTimeoutSec: 120}
+	cases := []struct {
+		requested int32
+		want      time.Duration
+	}{
+		{0, 1800 * time.Second},    // "the agent's limit"
+		{5, 120 * time.Second},     // below the wait: floored
+		{120, 120 * time.Second},   // equal: kept
+		{600, 600 * time.Second},   // above the wait, below the cap: kept
+		{3600, 1800 * time.Second}, // above the cap: clamped
+	}
+	for _, tc := range cases {
+		if got := nodeMaxSession(tc.requested, s); got != tc.want {
+			t.Errorf("nodeMaxSession(%d) = %v, want %v", tc.requested, got, tc.want)
+		}
+	}
+}
