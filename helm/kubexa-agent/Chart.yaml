@@ -189,6 +189,16 @@ type: application
 # install order constraint against the gateway: an older gateway ignores the
 # new heartbeat field, and a newer gateway reads its ABSENCE as "this agent
 # does not report scrape health" rather than as "everything is fine".
+# 0.9.3 moves the image to 0.9.3: config validation closes two silent
+# shapes. exec.pod's scalars (resume_window_sec, max_session_sec, ...)
+# are validated at load while exec.node is on, even with exec.pod.enabled
+# false -- a node console shares them -- instead of failing boot as
+# "policy is required". exec.node.max_session_sec must be at least
+# exec.node.helper_ready_timeout_sec (defaults included): the session
+# clock starts at open and the helper wait runs under it, so a shorter
+# cap could only ever end as MAX_SESSION under the "starting helper" line;
+# a per-open request below the wait is floored to it for the same reason.
+# The boot sweep log names each namespace once. No template change.
 # 0.9.2 moves the image to 0.9.2: a node console attaches to the gateway
 # BEFORE its helper Pod is created and waited for. The helper wait now
 # runs inside the session, under its max_session clock and resume window,
@@ -205,8 +215,8 @@ type: application
 # install THIS chart first: an older agent on a 0.5.42 gateway ends every
 # uncached node open as attach_timeout.
 #
-version: 0.9.2
-appVersion: "0.9.2"
+version: 0.9.3
+appVersion: "0.9.3"
 keywords:
   - kubexa
   - observability
