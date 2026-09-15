@@ -246,11 +246,26 @@ func (c *Config) validateExecNode() []string {
 	if n.HelperReadyTimeoutSec != 0 && (n.HelperReadyTimeoutSec < 5 || n.HelperReadyTimeoutSec > 600) {
 		errs = append(errs, "exec.node.helper_ready_timeout_sec must be between 5 and 600")
 	}
+	// The session clock starts at open and the helper wait runs under it
+	// (internal/exec: prepare runs inside Session.run). A max_session
+	// shorter than the helper wait cannot ever reach a prompt on an
+	// uncached pull -- it ends as MAX_SESSION under a "starting helper"
+	// line. Compared on the effective values so a default on either side
+	// counts.
+	if eff := c.ExecNodeSettings(); eff.MaxSessionSec < eff.HelperReadyTimeoutSec {
+		errs = append(errs, fmt.Sprintf("exec.node.max_session_sec (%d) must be at least exec.node.helper_ready_timeout_sec (%d)",
+			eff.MaxSessionSec, eff.HelperReadyTimeoutSec))
+	}
 	return errs
 }
 
+// validateExecPod binds while exec.pod is on OR exec.node is on: a node
+// console shares exec.pod's resume_window_sec and its client set, so a
+// disabled-but-invalid exec.pod would otherwise surface only at boot, as
+// exec.New's "policy is required" (cmd/agent/main.go names the section
+// there as a second net).
 func (c *Config) validateExecPod() []string {
-	if c == nil || !c.ExecPodEnabled() {
+	if c == nil || !(c.ExecPodEnabled() || c.ExecNodeEnabled()) {
 		return nil
 	}
 	var errs []string
@@ -277,10 +292,7 @@ func (c *Config) validateExec() []string {
 	if c == nil {
 		return nil
 	}
-	var errs []string
-	if c.ExecPodEnabled() {
-		errs = append(errs, c.validateExecPod()...)
-	}
+	errs := c.validateExecPod()
 	return append(errs, c.validateExecNode()...)
 }
 

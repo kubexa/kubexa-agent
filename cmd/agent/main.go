@@ -693,8 +693,12 @@ func buildExecResponder(
 		// restart. Best-effort, and bounded by the same bootCtx the identity
 		// resolution above used, so a stuck API server never holds up the
 		// rest of startup. Both the configured namespace and the agent's own
-		// are swept -- SweepHelpers dedupes and skips the empty one.
-		namespaces := []string{opts.Node.Namespace, ownNamespace}
+		// are swept; the list is deduped here so the log line names each
+		// namespace once (SweepHelpers dedupes again and skips the empty one).
+		namespaces := []string{opts.Node.Namespace}
+		if ownNamespace != opts.Node.Namespace {
+			namespaces = append(namespaces, ownNamespace)
+		}
 		removed := exec.SweepHelpers(bootCtx, opts.Clients.Clientset, namespaces, log)
 		log.Info("node shell sweep complete",
 			logger.F("removed", removed), logger.F("namespaces", strings.Join(namespaces, ",")))
