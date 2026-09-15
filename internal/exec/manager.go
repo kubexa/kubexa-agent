@@ -261,6 +261,20 @@ func clampSeconds(requested int32, own int) time.Duration {
 	return time.Duration(requested) * time.Second
 }
 
+// nodeMaxSession is clampSeconds for a node open, floored at the helper
+// wait: the session clock starts at open and the helper wait runs under
+// it, so a requested max_session shorter than helper_ready_timeout_sec
+// could only ever end as MAX_SESSION under a "starting helper" line.
+// Config validation already holds the agent's own limit at or above the
+// wait, so the floor never exceeds own.
+func nodeMaxSession(requested int32, s config.NodeExecSettings) time.Duration {
+	d := clampSeconds(requested, s.MaxSessionSec)
+	if wait := time.Duration(s.HelperReadyTimeoutSec) * time.Second; d < wait && wait <= time.Duration(s.MaxSessionSec)*time.Second {
+		return wait
+	}
+	return d
+}
+
 func resolveContainer(p *corev1.Pod, requested string) (string, error) {
 	if requested != "" {
 		for _, c := range p.Spec.Containers {
@@ -375,7 +389,7 @@ func (m *Manager) openNode(ctx context.Context, open *agentv1.ExecOpen, target *
 		return nil, refuse(agentv1.ExecExitReason_EXEC_EXIT_REASON_POLICY_DENIED, d.Reason)
 	}
 
-	maxSession := clampSeconds(open.GetMaxSessionSec(), no.Settings.MaxSessionSec)
+	maxSession := nodeMaxSession(open.GetMaxSessionSec(), no.Settings)
 	spec := helperSpec{sessionID: id, node: nodeName, namespace: no.Namespace, image: no.Settings.Image,
 		owner: no.Owner, maxSession: maxSession}
 	cs := m.opts.Clients.Clientset
