@@ -143,6 +143,8 @@ var scalarPassthroughs = map[string]bool{
 	"exec.pod.defaultShell":                            true,
 	"exec.node.nodes":                                  true,
 	"exec.node.shell":                                  true,
+	"mutate.node.nodes":                                true,
+	"mutate.node.verbs":                                true,
 }
 
 var toYamlValue = regexp.MustCompile(`\.Values\.([A-Za-z0-9_.]+)`)
