@@ -752,3 +752,63 @@ query:
 		t.Errorf("UnredactedWildcardRuleIDs = %v, want none when redact_secrets is on", got)
 	}
 }
+
+var namespacesRef = Ref{Group: "", Version: "v1", Resource: "namespaces"}
+
+// The chart's default install: collect.state.rules names pods and friends,
+// never namespaces, and query inherits it. The app's namespace picker lists
+// namespaces live, so a policy that answered from the owner's rules alone
+// refused it on every default install.
+func TestDecideAllowsNamespaceDiscoveryOnDefaultRules(t *testing.T) {
+	p := compile(t, `
+collect:
+  state:
+    rules:
+      - namespace: stage
+        resources: [pods, services, deployments, secrets]
+`)
+	if d := p.Decide(namespacesRef, VerbList, "", ""); !d.Allowed {
+		t.Fatalf("list namespaces = %+v, want allowed", d)
+	}
+	if d := p.Decide(namespacesRef, VerbGet, "", "prod"); !d.Allowed {
+		t.Fatalf("get namespace = %+v, want allowed", d)
+	}
+	// The grant is namespaces alone: the owner's namespace scope still
+	// binds everything else.
+	if p.Decide(podsRef, VerbList, "prod", "").Allowed {
+		t.Fatal("pods in an unlisted namespace must stay denied")
+	}
+	if !p.AllowsAnyList("", "v1", "namespaces") {
+		t.Fatal("the catalog must read namespaces as listable")
+	}
+}
+
+func TestDecideNamespaceDiscoveryHonoursDisabledQuery(t *testing.T) {
+	p := compile(t, `
+query:
+  enabled: false
+`)
+	if p.Decide(namespacesRef, VerbList, "", "").Allowed {
+		t.Fatal("query.enabled=false must deny namespace discovery too")
+	}
+}
+
+// An owner rule for namespaces is the only rule for namespaces: its
+// selectors bind a matching request, and a name outside its pattern is
+// denied rather than caught by an implicit grant behind it.
+func TestDecideOwnerNamespaceRuleReplacesDiscovery(t *testing.T) {
+	p := compile(t, `
+query:
+  rules:
+    - resources: [namespaces]
+      names: [team-*]
+      label_selector: tier=app
+`)
+	d := p.Decide(namespacesRef, VerbList, "", "")
+	if !d.Allowed || d.LabelSelector != "tier=app" || strings.Join(d.NamePatterns, ",") != "team-*" {
+		t.Fatalf("Decide = %+v, want the owner's namespaces rule with its selectors", d)
+	}
+	if p.Decide(namespacesRef, VerbGet, "", "kube-system").Allowed {
+		t.Fatal("a namespace outside the owner's name pattern must stay denied")
+	}
+}
