@@ -219,10 +219,10 @@ type: application
 # install THIS chart first: an older agent on a 0.5.42 gateway ends every
 # uncached node open as attach_timeout.
 #
-# 0.10.0 -- node operations: cordon, uncordon and drain as a job with
-# progress and cancellation (mutate.node.*, rbac.nodeOps). The agent's own
-# pod is never evicted. Needs backend 0.5.44 or newer for the platform
-# side; older backends never dispatch a node job.
+# 0.10.0 moves the image to 0.10.0: node operations -- cordon, uncordon and
+# drain as a job with progress and cancellation (mutate.node.*,
+# rbac.nodeOps). The agent's own pod is never evicted. Needs backend 0.5.44
+# or newer for the platform side; older backends never dispatch a node job.
 #
 version: 0.10.0
 appVersion: "0.10.0"
