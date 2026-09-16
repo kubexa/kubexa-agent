@@ -224,7 +224,14 @@ type: application
 # rbac.nodeOps). The agent's own pod is never evicted. Needs backend 0.5.44
 # or newer for the platform side; older backends never dispatch a node job.
 #
-version: 0.10.0
+# 0.10.1 changes one default and no image: gateway.host is now
+# agents.kubexa.dev, the hosted platform's real gateway. The old default,
+# gateway.kubexa.dev, never had a DNS record, so an agent installed with
+# the chart's defaults dialed a name that does not resolve and connected to
+# nothing. A self-hosted platform still sets gateway.host to its own
+# agentserver ingress host; the default only stops being a dead name.
+#
+version: 0.10.1
 appVersion: "0.10.0"
 keywords:
   - kubexa
