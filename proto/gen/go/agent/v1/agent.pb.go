@@ -335,6 +335,250 @@ func (MutationErrorCode) EnumDescriptor() ([]byte, []int) {
 	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{4}
 }
 
+type NodeJobVerb int32
+
+const (
+	NodeJobVerb_NODE_JOB_VERB_UNSPECIFIED NodeJobVerb = 0
+	NodeJobVerb_NODE_JOB_VERB_CORDON      NodeJobVerb = 1
+	NodeJobVerb_NODE_JOB_VERB_UNCORDON    NodeJobVerb = 2
+	NodeJobVerb_NODE_JOB_VERB_DRAIN       NodeJobVerb = 3
+)
+
+// Enum value maps for NodeJobVerb.
+var (
+	NodeJobVerb_name = map[int32]string{
+		0: "NODE_JOB_VERB_UNSPECIFIED",
+		1: "NODE_JOB_VERB_CORDON",
+		2: "NODE_JOB_VERB_UNCORDON",
+		3: "NODE_JOB_VERB_DRAIN",
+	}
+	NodeJobVerb_value = map[string]int32{
+		"NODE_JOB_VERB_UNSPECIFIED": 0,
+		"NODE_JOB_VERB_CORDON":      1,
+		"NODE_JOB_VERB_UNCORDON":    2,
+		"NODE_JOB_VERB_DRAIN":       3,
+	}
+)
+
+func (x NodeJobVerb) Enum() *NodeJobVerb {
+	p := new(NodeJobVerb)
+	*p = x
+	return p
+}
+
+func (x NodeJobVerb) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (NodeJobVerb) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_agent_v1_agent_proto_enumTypes[5].Descriptor()
+}
+
+func (NodeJobVerb) Type() protoreflect.EnumType {
+	return &file_proto_agent_v1_agent_proto_enumTypes[5]
+}
+
+func (x NodeJobVerb) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use NodeJobVerb.Descriptor instead.
+func (NodeJobVerb) EnumDescriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+}
+
+type NodeJobPhase int32
+
+const (
+	NodeJobPhase_NODE_JOB_PHASE_UNSPECIFIED NodeJobPhase = 0
+	NodeJobPhase_NODE_JOB_PHASE_ACCEPTED    NodeJobPhase = 1 // policy and preflight passed; work begins
+	NodeJobPhase_NODE_JOB_PHASE_RUNNING     NodeJobPhase = 2 // cordoning / evicting / waiting
+	NodeJobPhase_NODE_JOB_PHASE_SUCCEEDED   NodeJobPhase = 3
+	NodeJobPhase_NODE_JOB_PHASE_FAILED      NodeJobPhase = 4 // timeout, or at least one eviction failed for good
+	NodeJobPhase_NODE_JOB_PHASE_CANCELLED   NodeJobPhase = 5
+	NodeJobPhase_NODE_JOB_PHASE_REFUSED     NodeJobPhase = 6 // nothing was changed
+)
+
+// Enum value maps for NodeJobPhase.
+var (
+	NodeJobPhase_name = map[int32]string{
+		0: "NODE_JOB_PHASE_UNSPECIFIED",
+		1: "NODE_JOB_PHASE_ACCEPTED",
+		2: "NODE_JOB_PHASE_RUNNING",
+		3: "NODE_JOB_PHASE_SUCCEEDED",
+		4: "NODE_JOB_PHASE_FAILED",
+		5: "NODE_JOB_PHASE_CANCELLED",
+		6: "NODE_JOB_PHASE_REFUSED",
+	}
+	NodeJobPhase_value = map[string]int32{
+		"NODE_JOB_PHASE_UNSPECIFIED": 0,
+		"NODE_JOB_PHASE_ACCEPTED":    1,
+		"NODE_JOB_PHASE_RUNNING":     2,
+		"NODE_JOB_PHASE_SUCCEEDED":   3,
+		"NODE_JOB_PHASE_FAILED":      4,
+		"NODE_JOB_PHASE_CANCELLED":   5,
+		"NODE_JOB_PHASE_REFUSED":     6,
+	}
+)
+
+func (x NodeJobPhase) Enum() *NodeJobPhase {
+	p := new(NodeJobPhase)
+	*p = x
+	return p
+}
+
+func (x NodeJobPhase) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (NodeJobPhase) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_agent_v1_agent_proto_enumTypes[6].Descriptor()
+}
+
+func (NodeJobPhase) Type() protoreflect.EnumType {
+	return &file_proto_agent_v1_agent_proto_enumTypes[6]
+}
+
+func (x NodeJobPhase) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use NodeJobPhase.Descriptor instead.
+func (NodeJobPhase) EnumDescriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{6}
+}
+
+type NodeJobPodState int32
+
+const (
+	NodeJobPodState_NODE_JOB_POD_STATE_UNSPECIFIED NodeJobPodState = 0
+	NodeJobPodState_NODE_JOB_POD_STATE_PENDING     NodeJobPodState = 1 // not yet evicted
+	NodeJobPodState_NODE_JOB_POD_STATE_EVICTING    NodeJobPodState = 2 // eviction accepted, pod still present
+	NodeJobPodState_NODE_JOB_POD_STATE_BLOCKED     NodeJobPodState = 3 // 429 from the Eviction API (a PodDisruptionBudget); retried
+	NodeJobPodState_NODE_JOB_POD_STATE_GONE        NodeJobPodState = 4 // no longer on the node
+	NodeJobPodState_NODE_JOB_POD_STATE_SKIPPED     NodeJobPodState = 5 // never evicted, by rule; reason says which
+	NodeJobPodState_NODE_JOB_POD_STATE_FAILED      NodeJobPodState = 6 // eviction refused for a reason retrying cannot fix
+)
+
+// Enum value maps for NodeJobPodState.
+var (
+	NodeJobPodState_name = map[int32]string{
+		0: "NODE_JOB_POD_STATE_UNSPECIFIED",
+		1: "NODE_JOB_POD_STATE_PENDING",
+		2: "NODE_JOB_POD_STATE_EVICTING",
+		3: "NODE_JOB_POD_STATE_BLOCKED",
+		4: "NODE_JOB_POD_STATE_GONE",
+		5: "NODE_JOB_POD_STATE_SKIPPED",
+		6: "NODE_JOB_POD_STATE_FAILED",
+	}
+	NodeJobPodState_value = map[string]int32{
+		"NODE_JOB_POD_STATE_UNSPECIFIED": 0,
+		"NODE_JOB_POD_STATE_PENDING":     1,
+		"NODE_JOB_POD_STATE_EVICTING":    2,
+		"NODE_JOB_POD_STATE_BLOCKED":     3,
+		"NODE_JOB_POD_STATE_GONE":        4,
+		"NODE_JOB_POD_STATE_SKIPPED":     5,
+		"NODE_JOB_POD_STATE_FAILED":      6,
+	}
+)
+
+func (x NodeJobPodState) Enum() *NodeJobPodState {
+	p := new(NodeJobPodState)
+	*p = x
+	return p
+}
+
+func (x NodeJobPodState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (NodeJobPodState) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_agent_v1_agent_proto_enumTypes[7].Descriptor()
+}
+
+func (NodeJobPodState) Type() protoreflect.EnumType {
+	return &file_proto_agent_v1_agent_proto_enumTypes[7]
+}
+
+func (x NodeJobPodState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use NodeJobPodState.Descriptor instead.
+func (NodeJobPodState) EnumDescriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{7}
+}
+
+type NodeJobErrorCode int32
+
+const (
+	NodeJobErrorCode_NODE_JOB_ERROR_UNSPECIFIED     NodeJobErrorCode = 0
+	NodeJobErrorCode_NODE_JOB_ERROR_POLICY_DENIED   NodeJobErrorCode = 1 // mutate.node: disabled, node not matched, verb not granted
+	NodeJobErrorCode_NODE_JOB_ERROR_RBAC_DENIED     NodeJobErrorCode = 2 // the ClusterRole lacks a verb the job needs; message names it
+	NodeJobErrorCode_NODE_JOB_ERROR_NOT_FOUND       NodeJobErrorCode = 3 // the node does not exist
+	NodeJobErrorCode_NODE_JOB_ERROR_BUSY            NodeJobErrorCode = 4 // another job is running on this agent
+	NodeJobErrorCode_NODE_JOB_ERROR_NEEDS_FORCE     NodeJobErrorCode = 5 // preflight: pod(s) with no controller
+	NodeJobErrorCode_NODE_JOB_ERROR_NEEDS_EMPTYDIR  NodeJobErrorCode = 6 // preflight: pod(s) mounting emptyDir
+	NodeJobErrorCode_NODE_JOB_ERROR_TIMEOUT         NodeJobErrorCode = 7 // pods still present at the deadline
+	NodeJobErrorCode_NODE_JOB_ERROR_EVICTION_FAILED NodeJobErrorCode = 8 // at least one pod's eviction failed for good
+	NodeJobErrorCode_NODE_JOB_ERROR_INTERNAL        NodeJobErrorCode = 9
+)
+
+// Enum value maps for NodeJobErrorCode.
+var (
+	NodeJobErrorCode_name = map[int32]string{
+		0: "NODE_JOB_ERROR_UNSPECIFIED",
+		1: "NODE_JOB_ERROR_POLICY_DENIED",
+		2: "NODE_JOB_ERROR_RBAC_DENIED",
+		3: "NODE_JOB_ERROR_NOT_FOUND",
+		4: "NODE_JOB_ERROR_BUSY",
+		5: "NODE_JOB_ERROR_NEEDS_FORCE",
+		6: "NODE_JOB_ERROR_NEEDS_EMPTYDIR",
+		7: "NODE_JOB_ERROR_TIMEOUT",
+		8: "NODE_JOB_ERROR_EVICTION_FAILED",
+		9: "NODE_JOB_ERROR_INTERNAL",
+	}
+	NodeJobErrorCode_value = map[string]int32{
+		"NODE_JOB_ERROR_UNSPECIFIED":     0,
+		"NODE_JOB_ERROR_POLICY_DENIED":   1,
+		"NODE_JOB_ERROR_RBAC_DENIED":     2,
+		"NODE_JOB_ERROR_NOT_FOUND":       3,
+		"NODE_JOB_ERROR_BUSY":            4,
+		"NODE_JOB_ERROR_NEEDS_FORCE":     5,
+		"NODE_JOB_ERROR_NEEDS_EMPTYDIR":  6,
+		"NODE_JOB_ERROR_TIMEOUT":         7,
+		"NODE_JOB_ERROR_EVICTION_FAILED": 8,
+		"NODE_JOB_ERROR_INTERNAL":        9,
+	}
+)
+
+func (x NodeJobErrorCode) Enum() *NodeJobErrorCode {
+	p := new(NodeJobErrorCode)
+	*p = x
+	return p
+}
+
+func (x NodeJobErrorCode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (NodeJobErrorCode) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_agent_v1_agent_proto_enumTypes[8].Descriptor()
+}
+
+func (NodeJobErrorCode) Type() protoreflect.EnumType {
+	return &file_proto_agent_v1_agent_proto_enumTypes[8]
+}
+
+func (x NodeJobErrorCode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use NodeJobErrorCode.Descriptor instead.
+func (NodeJobErrorCode) EnumDescriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{8}
+}
+
 type ExecChannel int32
 
 const (
@@ -371,11 +615,11 @@ func (x ExecChannel) String() string {
 }
 
 func (ExecChannel) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_agent_v1_agent_proto_enumTypes[5].Descriptor()
+	return file_proto_agent_v1_agent_proto_enumTypes[9].Descriptor()
 }
 
 func (ExecChannel) Type() protoreflect.EnumType {
-	return &file_proto_agent_v1_agent_proto_enumTypes[5]
+	return &file_proto_agent_v1_agent_proto_enumTypes[9]
 }
 
 func (x ExecChannel) Number() protoreflect.EnumNumber {
@@ -384,7 +628,7 @@ func (x ExecChannel) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ExecChannel.Descriptor instead.
 func (ExecChannel) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{9}
 }
 
 type ExecExitReason int32
@@ -446,11 +690,11 @@ func (x ExecExitReason) String() string {
 }
 
 func (ExecExitReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_agent_v1_agent_proto_enumTypes[6].Descriptor()
+	return file_proto_agent_v1_agent_proto_enumTypes[10].Descriptor()
 }
 
 func (ExecExitReason) Type() protoreflect.EnumType {
-	return &file_proto_agent_v1_agent_proto_enumTypes[6]
+	return &file_proto_agent_v1_agent_proto_enumTypes[10]
 }
 
 func (x ExecExitReason) Number() protoreflect.EnumNumber {
@@ -459,7 +703,7 @@ func (x ExecExitReason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ExecExitReason.Descriptor instead.
 func (ExecExitReason) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{6}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{10}
 }
 
 type AgentMessage struct {
@@ -478,6 +722,7 @@ type AgentMessage struct {
 	//	*AgentMessage_Catalog
 	//	*AgentMessage_ResourceQueryResult
 	//	*AgentMessage_MutationResult
+	//	*AgentMessage_NodeJobEvent
 	Payload       isAgentMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -625,6 +870,15 @@ func (x *AgentMessage) GetMutationResult() *MutationResult {
 	return nil
 }
 
+func (x *AgentMessage) GetNodeJobEvent() *NodeJobEvent {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentMessage_NodeJobEvent); ok {
+			return x.NodeJobEvent
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Payload interface {
 	isAgentMessage_Payload()
 }
@@ -670,6 +924,10 @@ type AgentMessage_MutationResult struct {
 	MutationResult *MutationResult `protobuf:"bytes,12,opt,name=mutation_result,json=mutationResult,proto3,oneof"`
 }
 
+type AgentMessage_NodeJobEvent struct {
+	NodeJobEvent *NodeJobEvent `protobuf:"bytes,13,opt,name=node_job_event,json=nodeJobEvent,proto3,oneof"`
+}
+
 func (*AgentMessage_Handshake) isAgentMessage_Payload() {}
 
 func (*AgentMessage_Logs) isAgentMessage_Payload() {}
@@ -689,6 +947,8 @@ func (*AgentMessage_Catalog) isAgentMessage_Payload() {}
 func (*AgentMessage_ResourceQueryResult) isAgentMessage_Payload() {}
 
 func (*AgentMessage_MutationResult) isAgentMessage_Payload() {}
+
+func (*AgentMessage_NodeJobEvent) isAgentMessage_Payload() {}
 
 type HandshakeRequest struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
@@ -782,6 +1042,7 @@ type AgentCapabilities struct {
 	Mutate        bool                   `protobuf:"varint,4,opt,name=mutate,proto3" json:"mutate,omitempty"`
 	ExecPod       bool                   `protobuf:"varint,5,opt,name=exec_pod,json=execPod,proto3" json:"exec_pod,omitempty"`    // set from config: exec.pod.enabled (see internal/stream/manager.go)
 	ExecNode      bool                   `protobuf:"varint,6,opt,name=exec_node,json=execNode,proto3" json:"exec_node,omitempty"` // true when exec.node.enabled and the agent resolved its own Pod (see internal/exec/nodeshell.go)
+	NodeOps       bool                   `protobuf:"varint,7,opt,name=node_ops,json=nodeOps,proto3" json:"node_ops,omitempty"`    // true when mutate.node.enabled and the node-ops engine was built (see internal/stream/manager.go)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -854,6 +1115,13 @@ func (x *AgentCapabilities) GetExecPod() bool {
 func (x *AgentCapabilities) GetExecNode() bool {
 	if x != nil {
 		return x.ExecNode
+	}
+	return false
+}
+
+func (x *AgentCapabilities) GetNodeOps() bool {
+	if x != nil {
+		return x.NodeOps
 	}
 	return false
 }
@@ -1168,6 +1436,8 @@ type GatewayMessage struct {
 	//	*GatewayMessage_ResourceQuery
 	//	*GatewayMessage_Mutation
 	//	*GatewayMessage_ExecOpen
+	//	*GatewayMessage_NodeJob
+	//	*GatewayMessage_NodeJobCancel
 	Payload       isGatewayMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1289,6 +1559,24 @@ func (x *GatewayMessage) GetExecOpen() *ExecOpen {
 	return nil
 }
 
+func (x *GatewayMessage) GetNodeJob() *NodeJobRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*GatewayMessage_NodeJob); ok {
+			return x.NodeJob
+		}
+	}
+	return nil
+}
+
+func (x *GatewayMessage) GetNodeJobCancel() *NodeJobCancel {
+	if x != nil {
+		if x, ok := x.Payload.(*GatewayMessage_NodeJobCancel); ok {
+			return x.NodeJobCancel
+		}
+	}
+	return nil
+}
+
 type isGatewayMessage_Payload interface {
 	isGatewayMessage_Payload()
 }
@@ -1325,6 +1613,14 @@ type GatewayMessage_ExecOpen struct {
 	ExecOpen *ExecOpen `protobuf:"bytes,9,opt,name=exec_open,json=execOpen,proto3,oneof"`
 }
 
+type GatewayMessage_NodeJob struct {
+	NodeJob *NodeJobRequest `protobuf:"bytes,10,opt,name=node_job,json=nodeJob,proto3,oneof"`
+}
+
+type GatewayMessage_NodeJobCancel struct {
+	NodeJobCancel *NodeJobCancel `protobuf:"bytes,11,opt,name=node_job_cancel,json=nodeJobCancel,proto3,oneof"`
+}
+
 func (*GatewayMessage_Handshake) isGatewayMessage_Payload() {}
 
 func (*GatewayMessage_Ack) isGatewayMessage_Payload() {}
@@ -1340,6 +1636,10 @@ func (*GatewayMessage_ResourceQuery) isGatewayMessage_Payload() {}
 func (*GatewayMessage_Mutation) isGatewayMessage_Payload() {}
 
 func (*GatewayMessage_ExecOpen) isGatewayMessage_Payload() {}
+
+func (*GatewayMessage_NodeJob) isGatewayMessage_Payload() {}
+
+func (*GatewayMessage_NodeJobCancel) isGatewayMessage_Payload() {}
 
 type HandshakeResponse struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
@@ -2988,6 +3288,438 @@ func (x *NodeTarget) GetName() string {
 	return ""
 }
 
+type NodeJobRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"` // opaque to the agent; correlates every event
+	Node          string                 `protobuf:"bytes,2,opt,name=node,proto3" json:"node,omitempty"`
+	Verb          NodeJobVerb            `protobuf:"varint,3,opt,name=verb,proto3,enum=agent.v1.NodeJobVerb" json:"verb,omitempty"`
+	Drain         *DrainOptions          `protobuf:"bytes,4,opt,name=drain,proto3" json:"drain,omitempty"` // read for DRAIN only
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeJobRequest) Reset() {
+	*x = NodeJobRequest{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeJobRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeJobRequest) ProtoMessage() {}
+
+func (x *NodeJobRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeJobRequest.ProtoReflect.Descriptor instead.
+func (*NodeJobRequest) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *NodeJobRequest) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *NodeJobRequest) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+func (x *NodeJobRequest) GetVerb() NodeJobVerb {
+	if x != nil {
+		return x.Verb
+	}
+	return NodeJobVerb_NODE_JOB_VERB_UNSPECIFIED
+}
+
+func (x *NodeJobRequest) GetDrain() *DrainOptions {
+	if x != nil {
+		return x.Drain
+	}
+	return nil
+}
+
+type DrainOptions struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Force              bool                   `protobuf:"varint,1,opt,name=force,proto3" json:"force,omitempty"`                                                       // evict pods with no controller
+	DeleteEmptydirData bool                   `protobuf:"varint,2,opt,name=delete_emptydir_data,json=deleteEmptydirData,proto3" json:"delete_emptydir_data,omitempty"` // evict pods that mount emptyDir
+	GracePeriodSeconds int64                  `protobuf:"varint,3,opt,name=grace_period_seconds,json=gracePeriodSeconds,proto3" json:"grace_period_seconds,omitempty"` // -1 unset (the pod's own); 0 is meaningful
+	TimeoutSec         int32                  `protobuf:"varint,4,opt,name=timeout_sec,json=timeoutSec,proto3" json:"timeout_sec,omitempty"`                           // whole job; the agent clamps to [30, mutate.node.max_timeout_sec]
+	DryRun             bool                   `protobuf:"varint,5,opt,name=dry_run,json=dryRun,proto3" json:"dry_run,omitempty"`                                       // dryRun=All on the cordon patch and every eviction
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *DrainOptions) Reset() {
+	*x = DrainOptions{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DrainOptions) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DrainOptions) ProtoMessage() {}
+
+func (x *DrainOptions) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DrainOptions.ProtoReflect.Descriptor instead.
+func (*DrainOptions) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *DrainOptions) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
+}
+
+func (x *DrainOptions) GetDeleteEmptydirData() bool {
+	if x != nil {
+		return x.DeleteEmptydirData
+	}
+	return false
+}
+
+func (x *DrainOptions) GetGracePeriodSeconds() int64 {
+	if x != nil {
+		return x.GracePeriodSeconds
+	}
+	return 0
+}
+
+func (x *DrainOptions) GetTimeoutSec() int32 {
+	if x != nil {
+		return x.TimeoutSec
+	}
+	return 0
+}
+
+func (x *DrainOptions) GetDryRun() bool {
+	if x != nil {
+		return x.DryRun
+	}
+	return false
+}
+
+type NodeJobCancel struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeJobCancel) Reset() {
+	*x = NodeJobCancel{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeJobCancel) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeJobCancel) ProtoMessage() {}
+
+func (x *NodeJobCancel) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeJobCancel.ProtoReflect.Descriptor instead.
+func (*NodeJobCancel) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *NodeJobCancel) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+type NodeJobEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	Phase         NodeJobPhase           `protobuf:"varint,2,opt,name=phase,proto3,enum=agent.v1.NodeJobPhase" json:"phase,omitempty"`
+	Error         *NodeJobError          `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`     // set for REFUSED and FAILED
+	Message       string                 `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"` // one human line, e.g. "waiting for 3 pods"
+	PodsTotal     int32                  `protobuf:"varint,5,opt,name=pods_total,json=podsTotal,proto3" json:"pods_total,omitempty"`
+	PodsEvicted   int32                  `protobuf:"varint,6,opt,name=pods_evicted,json=podsEvicted,proto3" json:"pods_evicted,omitempty"` // evicted AND gone
+	PodsPending   int32                  `protobuf:"varint,7,opt,name=pods_pending,json=podsPending,proto3" json:"pods_pending,omitempty"` // not yet gone: pending, evicting, blocked
+	PodsSkipped   int32                  `protobuf:"varint,8,opt,name=pods_skipped,json=podsSkipped,proto3" json:"pods_skipped,omitempty"`
+	Pods          []*NodeJobPod          `protobuf:"bytes,9,rep,name=pods,proto3" json:"pods,omitempty"`                                       // the full table, every event
+	NodeCordoned  bool                   `protobuf:"varint,10,opt,name=node_cordoned,json=nodeCordoned,proto3" json:"node_cordoned,omitempty"` // true once the cordon patch landed (never on dry_run)
+	EmittedUnixMs int64                  `protobuf:"varint,11,opt,name=emitted_unix_ms,json=emittedUnixMs,proto3" json:"emitted_unix_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeJobEvent) Reset() {
+	*x = NodeJobEvent{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeJobEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeJobEvent) ProtoMessage() {}
+
+func (x *NodeJobEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeJobEvent.ProtoReflect.Descriptor instead.
+func (*NodeJobEvent) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *NodeJobEvent) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *NodeJobEvent) GetPhase() NodeJobPhase {
+	if x != nil {
+		return x.Phase
+	}
+	return NodeJobPhase_NODE_JOB_PHASE_UNSPECIFIED
+}
+
+func (x *NodeJobEvent) GetError() *NodeJobError {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
+func (x *NodeJobEvent) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *NodeJobEvent) GetPodsTotal() int32 {
+	if x != nil {
+		return x.PodsTotal
+	}
+	return 0
+}
+
+func (x *NodeJobEvent) GetPodsEvicted() int32 {
+	if x != nil {
+		return x.PodsEvicted
+	}
+	return 0
+}
+
+func (x *NodeJobEvent) GetPodsPending() int32 {
+	if x != nil {
+		return x.PodsPending
+	}
+	return 0
+}
+
+func (x *NodeJobEvent) GetPodsSkipped() int32 {
+	if x != nil {
+		return x.PodsSkipped
+	}
+	return 0
+}
+
+func (x *NodeJobEvent) GetPods() []*NodeJobPod {
+	if x != nil {
+		return x.Pods
+	}
+	return nil
+}
+
+func (x *NodeJobEvent) GetNodeCordoned() bool {
+	if x != nil {
+		return x.NodeCordoned
+	}
+	return false
+}
+
+func (x *NodeJobEvent) GetEmittedUnixMs() int64 {
+	if x != nil {
+		return x.EmittedUnixMs
+	}
+	return 0
+}
+
+type NodeJobPod struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	State         NodeJobPodState        `protobuf:"varint,3,opt,name=state,proto3,enum=agent.v1.NodeJobPodState" json:"state,omitempty"`
+	Reason        string                 `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"` // daemonset | mirror | agent_self | terminating | pdb | no_controller | emptydir | dry_run | API server text
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeJobPod) Reset() {
+	*x = NodeJobPod{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeJobPod) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeJobPod) ProtoMessage() {}
+
+func (x *NodeJobPod) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeJobPod.ProtoReflect.Descriptor instead.
+func (*NodeJobPod) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *NodeJobPod) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *NodeJobPod) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *NodeJobPod) GetState() NodeJobPodState {
+	if x != nil {
+		return x.State
+	}
+	return NodeJobPodState_NODE_JOB_POD_STATE_UNSPECIFIED
+}
+
+func (x *NodeJobPod) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+type NodeJobError struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          NodeJobErrorCode       `protobuf:"varint,1,opt,name=code,proto3,enum=agent.v1.NodeJobErrorCode" json:"code,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeJobError) Reset() {
+	*x = NodeJobError{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeJobError) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeJobError) ProtoMessage() {}
+
+func (x *NodeJobError) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeJobError.ProtoReflect.Descriptor instead.
+func (*NodeJobError) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *NodeJobError) GetCode() NodeJobErrorCode {
+	if x != nil {
+		return x.Code
+	}
+	return NodeJobErrorCode_NODE_JOB_ERROR_UNSPECIFIED
+}
+
+func (x *NodeJobError) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 // ExecClientMessage is what the AGENT sends on ExecSession.
 type ExecClientMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -3003,7 +3735,7 @@ type ExecClientMessage struct {
 
 func (x *ExecClientMessage) Reset() {
 	*x = ExecClientMessage{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[29]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3015,7 +3747,7 @@ func (x *ExecClientMessage) String() string {
 func (*ExecClientMessage) ProtoMessage() {}
 
 func (x *ExecClientMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[29]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3028,7 +3760,7 @@ func (x *ExecClientMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecClientMessage.ProtoReflect.Descriptor instead.
 func (*ExecClientMessage) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{29}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ExecClientMessage) GetPayload() isExecClientMessage_Payload {
@@ -3103,7 +3835,7 @@ type ExecServerMessage struct {
 
 func (x *ExecServerMessage) Reset() {
 	*x = ExecServerMessage{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[30]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3115,7 +3847,7 @@ func (x *ExecServerMessage) String() string {
 func (*ExecServerMessage) ProtoMessage() {}
 
 func (x *ExecServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[30]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3128,7 +3860,7 @@ func (x *ExecServerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecServerMessage.ProtoReflect.Descriptor instead.
 func (*ExecServerMessage) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{30}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ExecServerMessage) GetPayload() isExecServerMessage_Payload {
@@ -3218,7 +3950,7 @@ type ExecAttach struct {
 
 func (x *ExecAttach) Reset() {
 	*x = ExecAttach{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[31]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3230,7 +3962,7 @@ func (x *ExecAttach) String() string {
 func (*ExecAttach) ProtoMessage() {}
 
 func (x *ExecAttach) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[31]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3243,7 +3975,7 @@ func (x *ExecAttach) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecAttach.ProtoReflect.Descriptor instead.
 func (*ExecAttach) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{31}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ExecAttach) GetSessionId() string {
@@ -3288,7 +4020,7 @@ type ExecAttachAck struct {
 
 func (x *ExecAttachAck) Reset() {
 	*x = ExecAttachAck{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[32]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3300,7 +4032,7 @@ func (x *ExecAttachAck) String() string {
 func (*ExecAttachAck) ProtoMessage() {}
 
 func (x *ExecAttachAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[32]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3313,7 +4045,7 @@ func (x *ExecAttachAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecAttachAck.ProtoReflect.Descriptor instead.
 func (*ExecAttachAck) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{32}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ExecAttachAck) GetAccepted() bool {
@@ -3348,7 +4080,7 @@ type ExecData struct {
 
 func (x *ExecData) Reset() {
 	*x = ExecData{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[33]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3360,7 +4092,7 @@ func (x *ExecData) String() string {
 func (*ExecData) ProtoMessage() {}
 
 func (x *ExecData) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[33]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3373,7 +4105,7 @@ func (x *ExecData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecData.ProtoReflect.Descriptor instead.
 func (*ExecData) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{33}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ExecData) GetChannel() ExecChannel {
@@ -3407,7 +4139,7 @@ type ExecResize struct {
 
 func (x *ExecResize) Reset() {
 	*x = ExecResize{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[34]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3419,7 +4151,7 @@ func (x *ExecResize) String() string {
 func (*ExecResize) ProtoMessage() {}
 
 func (x *ExecResize) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[34]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3432,7 +4164,7 @@ func (x *ExecResize) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecResize.ProtoReflect.Descriptor instead.
 func (*ExecResize) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{34}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ExecResize) GetCols() int32 {
@@ -3458,7 +4190,7 @@ type ExecClose struct {
 
 func (x *ExecClose) Reset() {
 	*x = ExecClose{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[35]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3470,7 +4202,7 @@ func (x *ExecClose) String() string {
 func (*ExecClose) ProtoMessage() {}
 
 func (x *ExecClose) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[35]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3483,7 +4215,7 @@ func (x *ExecClose) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecClose.ProtoReflect.Descriptor instead.
 func (*ExecClose) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{35}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ExecClose) GetReason() string {
@@ -3507,7 +4239,7 @@ type ExecExit struct {
 
 func (x *ExecExit) Reset() {
 	*x = ExecExit{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[36]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3519,7 +4251,7 @@ func (x *ExecExit) String() string {
 func (*ExecExit) ProtoMessage() {}
 
 func (x *ExecExit) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[36]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3532,7 +4264,7 @@ func (x *ExecExit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecExit.ProtoReflect.Descriptor instead.
 func (*ExecExit) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{36}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ExecExit) GetCode() int32 {
@@ -3560,7 +4292,7 @@ var File_proto_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x1aproto/agent/v1/agent.proto\x12\bagent.v1\x1a\x1cproto/agent/v1/catalog.proto\x1a\x18proto/agent/v1/log.proto\x1a\x1aproto/agent/v1/state.proto\x1a\x1bproto/agent/v1/metric.proto\x1a\x1eproto/common/v1/metadata.proto\"\xc7\x05\n" +
+	"\x1aproto/agent/v1/agent.proto\x12\bagent.v1\x1a\x1cproto/agent/v1/catalog.proto\x1a\x18proto/agent/v1/log.proto\x1a\x1aproto/agent/v1/state.proto\x1a\x1bproto/agent/v1/metric.proto\x1a\x1eproto/common/v1/metadata.proto\"\x87\x06\n" +
 	"\fAgentMessage\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x12,\n" +
@@ -3575,7 +4307,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\acatalog\x18\n" +
 	" \x01(\v2\x19.agent.v1.ResourceCatalogH\x00R\acatalog\x12S\n" +
 	"\x15resource_query_result\x18\v \x01(\v2\x1d.agent.v1.ResourceQueryResultH\x00R\x13resourceQueryResult\x12C\n" +
-	"\x0fmutation_result\x18\f \x01(\v2\x18.agent.v1.MutationResultH\x00R\x0emutationResultB\t\n" +
+	"\x0fmutation_result\x18\f \x01(\v2\x18.agent.v1.MutationResultH\x00R\x0emutationResult\x12>\n" +
+	"\x0enode_job_event\x18\r \x01(\v2\x16.agent.v1.NodeJobEventH\x00R\fnodeJobEventB\t\n" +
 	"\apayload\"\x89\x02\n" +
 	"\x10HandshakeRequest\x12#\n" +
 	"\ragent_version\x18\x01 \x01(\tR\fagentVersion\x12#\n" +
@@ -3584,14 +4317,15 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"cluster_id\x18\x03 \x01(\tR\tclusterId\x12!\n" +
 	"\ftenant_token\x18\x04 \x01(\tR\vtenantToken\x12/\n" +
 	"\x04caps\x18\x05 \x01(\v2\x1b.agent.v1.AgentCapabilitiesR\x04caps\x128\n" +
-	"\x18supported_proto_versions\x18\x06 \x03(\tR\x16supportedProtoVersions\"\xa7\x01\n" +
+	"\x18supported_proto_versions\x18\x06 \x03(\tR\x16supportedProtoVersions\"\xc2\x01\n" +
 	"\x11AgentCapabilities\x12\x12\n" +
 	"\x04logs\x18\x01 \x01(\bR\x04logs\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\bR\x05state\x12\x18\n" +
 	"\ametrics\x18\x03 \x01(\bR\ametrics\x12\x16\n" +
 	"\x06mutate\x18\x04 \x01(\bR\x06mutate\x12\x19\n" +
 	"\bexec_pod\x18\x05 \x01(\bR\aexecPod\x12\x1b\n" +
-	"\texec_node\x18\x06 \x01(\bR\bexecNode\"f\n" +
+	"\texec_node\x18\x06 \x01(\bR\bexecNode\x12\x19\n" +
+	"\bnode_ops\x18\a \x01(\bR\anodeOps\"f\n" +
 	"\tHeartbeat\x12*\n" +
 	"\x11timestamp_unix_ms\x18\x01 \x01(\x03R\x0ftimestampUnixMs\x12-\n" +
 	"\x06health\x18\x02 \x01(\v2\x15.agent.v1.AgentHealthR\x06health\"\xe0\x02\n" +
@@ -3612,7 +4346,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x0ftargets_failing\x18\x04 \x01(\x05R\x0etargetsFailing\x12/\n" +
 	"\x14last_success_unix_ms\x18\x05 \x01(\x03R\x11lastSuccessUnixMs\x12.\n" +
 	"\x13samples_last_scrape\x18\x06 \x01(\x03R\x11samplesLastScrape\x12/\n" +
-	"\x13dropped_cardinality\x18\a \x01(\x03R\x12droppedCardinality\"\xf0\x03\n" +
+	"\x13dropped_cardinality\x18\a \x01(\x03R\x12droppedCardinality\"\xea\x04\n" +
 	"\x0eGatewayMessage\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x12;\n" +
@@ -3623,7 +4357,10 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\bshutdown\x18\x06 \x01(\v2\x12.agent.v1.ShutdownH\x00R\bshutdown\x12@\n" +
 	"\x0eresource_query\x18\a \x01(\v2\x17.agent.v1.ResourceQueryH\x00R\rresourceQuery\x127\n" +
 	"\bmutation\x18\b \x01(\v2\x19.agent.v1.MutationRequestH\x00R\bmutation\x121\n" +
-	"\texec_open\x18\t \x01(\v2\x12.agent.v1.ExecOpenH\x00R\bexecOpenB\t\n" +
+	"\texec_open\x18\t \x01(\v2\x12.agent.v1.ExecOpenH\x00R\bexecOpen\x125\n" +
+	"\bnode_job\x18\n" +
+	" \x01(\v2\x18.agent.v1.NodeJobRequestH\x00R\anodeJob\x12A\n" +
+	"\x0fnode_job_cancel\x18\v \x01(\v2\x17.agent.v1.NodeJobCancelH\x00R\rnodeJobCancelB\t\n" +
 	"\apayload\"\xd6\x02\n" +
 	"\x11HandshakeResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x1d\n" +
@@ -3763,7 +4500,44 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\tcontainer\x18\x03 \x01(\tR\tcontainer\" \n" +
 	"\n" +
 	"NodeTarget\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"\xa2\x01\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"\x94\x01\n" +
+	"\x0eNodeJobRequest\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x12\n" +
+	"\x04node\x18\x02 \x01(\tR\x04node\x12)\n" +
+	"\x04verb\x18\x03 \x01(\x0e2\x15.agent.v1.NodeJobVerbR\x04verb\x12,\n" +
+	"\x05drain\x18\x04 \x01(\v2\x16.agent.v1.DrainOptionsR\x05drain\"\xc2\x01\n" +
+	"\fDrainOptions\x12\x14\n" +
+	"\x05force\x18\x01 \x01(\bR\x05force\x120\n" +
+	"\x14delete_emptydir_data\x18\x02 \x01(\bR\x12deleteEmptydirData\x120\n" +
+	"\x14grace_period_seconds\x18\x03 \x01(\x03R\x12gracePeriodSeconds\x12\x1f\n" +
+	"\vtimeout_sec\x18\x04 \x01(\x05R\n" +
+	"timeoutSec\x12\x17\n" +
+	"\adry_run\x18\x05 \x01(\bR\x06dryRun\"&\n" +
+	"\rNodeJobCancel\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\tR\x05jobId\"\x9a\x03\n" +
+	"\fNodeJobEvent\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12,\n" +
+	"\x05phase\x18\x02 \x01(\x0e2\x16.agent.v1.NodeJobPhaseR\x05phase\x12,\n" +
+	"\x05error\x18\x03 \x01(\v2\x16.agent.v1.NodeJobErrorR\x05error\x12\x18\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\x12\x1d\n" +
+	"\n" +
+	"pods_total\x18\x05 \x01(\x05R\tpodsTotal\x12!\n" +
+	"\fpods_evicted\x18\x06 \x01(\x05R\vpodsEvicted\x12!\n" +
+	"\fpods_pending\x18\a \x01(\x05R\vpodsPending\x12!\n" +
+	"\fpods_skipped\x18\b \x01(\x05R\vpodsSkipped\x12(\n" +
+	"\x04pods\x18\t \x03(\v2\x14.agent.v1.NodeJobPodR\x04pods\x12#\n" +
+	"\rnode_cordoned\x18\n" +
+	" \x01(\bR\fnodeCordoned\x12&\n" +
+	"\x0femitted_unix_ms\x18\v \x01(\x03R\remittedUnixMs\"\x87\x01\n" +
+	"\n" +
+	"NodeJobPod\x12\x1c\n" +
+	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12/\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x19.agent.v1.NodeJobPodStateR\x05state\x12\x16\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"X\n" +
+	"\fNodeJobError\x12.\n" +
+	"\x04code\x18\x01 \x01(\x0e2\x1a.agent.v1.NodeJobErrorCodeR\x04code\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xa2\x01\n" +
 	"\x11ExecClientMessage\x12.\n" +
 	"\x06attach\x18\x01 \x01(\v2\x14.agent.v1.ExecAttachH\x00R\x06attach\x12(\n" +
 	"\x04data\x18\x02 \x01(\v2\x12.agent.v1.ExecDataH\x00R\x04data\x12(\n" +
@@ -3837,7 +4611,39 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x16MUTATION_ERROR_TIMEOUT\x10\x06\x12\x1c\n" +
 	"\x18MUTATION_ERROR_TOO_LARGE\x10\a\x12\x1b\n" +
 	"\x17MUTATION_ERROR_INTERNAL\x10\b\x12%\n" +
-	"!MUTATION_ERROR_RESOURCE_EXHAUSTED\x10\t*u\n" +
+	"!MUTATION_ERROR_RESOURCE_EXHAUSTED\x10\t*{\n" +
+	"\vNodeJobVerb\x12\x1d\n" +
+	"\x19NODE_JOB_VERB_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14NODE_JOB_VERB_CORDON\x10\x01\x12\x1a\n" +
+	"\x16NODE_JOB_VERB_UNCORDON\x10\x02\x12\x17\n" +
+	"\x13NODE_JOB_VERB_DRAIN\x10\x03*\xda\x01\n" +
+	"\fNodeJobPhase\x12\x1e\n" +
+	"\x1aNODE_JOB_PHASE_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17NODE_JOB_PHASE_ACCEPTED\x10\x01\x12\x1a\n" +
+	"\x16NODE_JOB_PHASE_RUNNING\x10\x02\x12\x1c\n" +
+	"\x18NODE_JOB_PHASE_SUCCEEDED\x10\x03\x12\x19\n" +
+	"\x15NODE_JOB_PHASE_FAILED\x10\x04\x12\x1c\n" +
+	"\x18NODE_JOB_PHASE_CANCELLED\x10\x05\x12\x1a\n" +
+	"\x16NODE_JOB_PHASE_REFUSED\x10\x06*\xf2\x01\n" +
+	"\x0fNodeJobPodState\x12\"\n" +
+	"\x1eNODE_JOB_POD_STATE_UNSPECIFIED\x10\x00\x12\x1e\n" +
+	"\x1aNODE_JOB_POD_STATE_PENDING\x10\x01\x12\x1f\n" +
+	"\x1bNODE_JOB_POD_STATE_EVICTING\x10\x02\x12\x1e\n" +
+	"\x1aNODE_JOB_POD_STATE_BLOCKED\x10\x03\x12\x1b\n" +
+	"\x17NODE_JOB_POD_STATE_GONE\x10\x04\x12\x1e\n" +
+	"\x1aNODE_JOB_POD_STATE_SKIPPED\x10\x05\x12\x1d\n" +
+	"\x19NODE_JOB_POD_STATE_FAILED\x10\x06*\xcb\x02\n" +
+	"\x10NodeJobErrorCode\x12\x1e\n" +
+	"\x1aNODE_JOB_ERROR_UNSPECIFIED\x10\x00\x12 \n" +
+	"\x1cNODE_JOB_ERROR_POLICY_DENIED\x10\x01\x12\x1e\n" +
+	"\x1aNODE_JOB_ERROR_RBAC_DENIED\x10\x02\x12\x1c\n" +
+	"\x18NODE_JOB_ERROR_NOT_FOUND\x10\x03\x12\x17\n" +
+	"\x13NODE_JOB_ERROR_BUSY\x10\x04\x12\x1e\n" +
+	"\x1aNODE_JOB_ERROR_NEEDS_FORCE\x10\x05\x12!\n" +
+	"\x1dNODE_JOB_ERROR_NEEDS_EMPTYDIR\x10\x06\x12\x1a\n" +
+	"\x16NODE_JOB_ERROR_TIMEOUT\x10\a\x12\"\n" +
+	"\x1eNODE_JOB_ERROR_EVICTION_FAILED\x10\b\x12\x1b\n" +
+	"\x17NODE_JOB_ERROR_INTERNAL\x10\t*u\n" +
 	"\vExecChannel\x12\x1c\n" +
 	"\x18EXEC_CHANNEL_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12EXEC_CHANNEL_STDIN\x10\x01\x12\x17\n" +
@@ -3870,126 +4676,146 @@ func file_proto_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_proto_agent_v1_agent_proto_rawDescData
 }
 
-var file_proto_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
-var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
+var file_proto_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 11)
+var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 44)
 var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(QueryVerb)(0),                 // 0: agent.v1.QueryVerb
 	(QueryView)(0),                 // 1: agent.v1.QueryView
 	(QueryErrorCode)(0),            // 2: agent.v1.QueryErrorCode
 	(MutationVerb)(0),              // 3: agent.v1.MutationVerb
 	(MutationErrorCode)(0),         // 4: agent.v1.MutationErrorCode
-	(ExecChannel)(0),               // 5: agent.v1.ExecChannel
-	(ExecExitReason)(0),            // 6: agent.v1.ExecExitReason
-	(*AgentMessage)(nil),           // 7: agent.v1.AgentMessage
-	(*HandshakeRequest)(nil),       // 8: agent.v1.HandshakeRequest
-	(*AgentCapabilities)(nil),      // 9: agent.v1.AgentCapabilities
-	(*Heartbeat)(nil),              // 10: agent.v1.Heartbeat
-	(*AgentHealth)(nil),            // 11: agent.v1.AgentHealth
-	(*ScrapeTargetHealth)(nil),     // 12: agent.v1.ScrapeTargetHealth
-	(*GatewayMessage)(nil),         // 13: agent.v1.GatewayMessage
-	(*HandshakeResponse)(nil),      // 14: agent.v1.HandshakeResponse
-	(*Ack)(nil),                    // 15: agent.v1.Ack
-	(*BackpressureSignal)(nil),     // 16: agent.v1.BackpressureSignal
-	(*Shutdown)(nil),               // 17: agent.v1.Shutdown
-	(*ConfigUpdate)(nil),           // 18: agent.v1.ConfigUpdate
-	(*ConfigSnapshot)(nil),         // 19: agent.v1.ConfigSnapshot
-	(*IngestRules)(nil),            // 20: agent.v1.IngestRules
-	(*LogCollectorConfig)(nil),     // 21: agent.v1.LogCollectorConfig
-	(*WatcherConfig)(nil),          // 22: agent.v1.WatcherConfig
-	(*ResourceRef)(nil),            // 23: agent.v1.ResourceRef
-	(*MetricScrapeConfig)(nil),     // 24: agent.v1.MetricScrapeConfig
-	(*ResourceQuery)(nil),          // 25: agent.v1.ResourceQuery
-	(*ResourceQueryResult)(nil),    // 26: agent.v1.ResourceQueryResult
-	(*QueryError)(nil),             // 27: agent.v1.QueryError
-	(*MutationRequest)(nil),        // 28: agent.v1.MutationRequest
-	(*DeleteOptions)(nil),          // 29: agent.v1.DeleteOptions
-	(*MutationResult)(nil),         // 30: agent.v1.MutationResult
-	(*MutationError)(nil),          // 31: agent.v1.MutationError
-	(*ExecOpen)(nil),               // 32: agent.v1.ExecOpen
-	(*ExecTarget)(nil),             // 33: agent.v1.ExecTarget
-	(*PodTarget)(nil),              // 34: agent.v1.PodTarget
-	(*NodeTarget)(nil),             // 35: agent.v1.NodeTarget
-	(*ExecClientMessage)(nil),      // 36: agent.v1.ExecClientMessage
-	(*ExecServerMessage)(nil),      // 37: agent.v1.ExecServerMessage
-	(*ExecAttach)(nil),             // 38: agent.v1.ExecAttach
-	(*ExecAttachAck)(nil),          // 39: agent.v1.ExecAttachAck
-	(*ExecData)(nil),               // 40: agent.v1.ExecData
-	(*ExecResize)(nil),             // 41: agent.v1.ExecResize
-	(*ExecClose)(nil),              // 42: agent.v1.ExecClose
-	(*ExecExit)(nil),               // 43: agent.v1.ExecExit
-	nil,                            // 44: agent.v1.MetricScrapeConfig.ExtraLabelsEntry
-	(*v1.AgentMetadata)(nil),       // 45: common.v1.AgentMetadata
-	(*LogBatch)(nil),               // 46: agent.v1.LogBatch
-	(*StateEvent)(nil),             // 47: agent.v1.StateEvent
-	(*MetricBatch)(nil),            // 48: agent.v1.MetricBatch
-	(*MetricsEvent)(nil),           // 49: agent.v1.MetricsEvent
-	(*PrometheusMetricsEvent)(nil), // 50: agent.v1.PrometheusMetricsEvent
-	(*ResourceCatalog)(nil),        // 51: agent.v1.ResourceCatalog
-	(ResourceKind)(0),              // 52: agent.v1.ResourceKind
+	(NodeJobVerb)(0),               // 5: agent.v1.NodeJobVerb
+	(NodeJobPhase)(0),              // 6: agent.v1.NodeJobPhase
+	(NodeJobPodState)(0),           // 7: agent.v1.NodeJobPodState
+	(NodeJobErrorCode)(0),          // 8: agent.v1.NodeJobErrorCode
+	(ExecChannel)(0),               // 9: agent.v1.ExecChannel
+	(ExecExitReason)(0),            // 10: agent.v1.ExecExitReason
+	(*AgentMessage)(nil),           // 11: agent.v1.AgentMessage
+	(*HandshakeRequest)(nil),       // 12: agent.v1.HandshakeRequest
+	(*AgentCapabilities)(nil),      // 13: agent.v1.AgentCapabilities
+	(*Heartbeat)(nil),              // 14: agent.v1.Heartbeat
+	(*AgentHealth)(nil),            // 15: agent.v1.AgentHealth
+	(*ScrapeTargetHealth)(nil),     // 16: agent.v1.ScrapeTargetHealth
+	(*GatewayMessage)(nil),         // 17: agent.v1.GatewayMessage
+	(*HandshakeResponse)(nil),      // 18: agent.v1.HandshakeResponse
+	(*Ack)(nil),                    // 19: agent.v1.Ack
+	(*BackpressureSignal)(nil),     // 20: agent.v1.BackpressureSignal
+	(*Shutdown)(nil),               // 21: agent.v1.Shutdown
+	(*ConfigUpdate)(nil),           // 22: agent.v1.ConfigUpdate
+	(*ConfigSnapshot)(nil),         // 23: agent.v1.ConfigSnapshot
+	(*IngestRules)(nil),            // 24: agent.v1.IngestRules
+	(*LogCollectorConfig)(nil),     // 25: agent.v1.LogCollectorConfig
+	(*WatcherConfig)(nil),          // 26: agent.v1.WatcherConfig
+	(*ResourceRef)(nil),            // 27: agent.v1.ResourceRef
+	(*MetricScrapeConfig)(nil),     // 28: agent.v1.MetricScrapeConfig
+	(*ResourceQuery)(nil),          // 29: agent.v1.ResourceQuery
+	(*ResourceQueryResult)(nil),    // 30: agent.v1.ResourceQueryResult
+	(*QueryError)(nil),             // 31: agent.v1.QueryError
+	(*MutationRequest)(nil),        // 32: agent.v1.MutationRequest
+	(*DeleteOptions)(nil),          // 33: agent.v1.DeleteOptions
+	(*MutationResult)(nil),         // 34: agent.v1.MutationResult
+	(*MutationError)(nil),          // 35: agent.v1.MutationError
+	(*ExecOpen)(nil),               // 36: agent.v1.ExecOpen
+	(*ExecTarget)(nil),             // 37: agent.v1.ExecTarget
+	(*PodTarget)(nil),              // 38: agent.v1.PodTarget
+	(*NodeTarget)(nil),             // 39: agent.v1.NodeTarget
+	(*NodeJobRequest)(nil),         // 40: agent.v1.NodeJobRequest
+	(*DrainOptions)(nil),           // 41: agent.v1.DrainOptions
+	(*NodeJobCancel)(nil),          // 42: agent.v1.NodeJobCancel
+	(*NodeJobEvent)(nil),           // 43: agent.v1.NodeJobEvent
+	(*NodeJobPod)(nil),             // 44: agent.v1.NodeJobPod
+	(*NodeJobError)(nil),           // 45: agent.v1.NodeJobError
+	(*ExecClientMessage)(nil),      // 46: agent.v1.ExecClientMessage
+	(*ExecServerMessage)(nil),      // 47: agent.v1.ExecServerMessage
+	(*ExecAttach)(nil),             // 48: agent.v1.ExecAttach
+	(*ExecAttachAck)(nil),          // 49: agent.v1.ExecAttachAck
+	(*ExecData)(nil),               // 50: agent.v1.ExecData
+	(*ExecResize)(nil),             // 51: agent.v1.ExecResize
+	(*ExecClose)(nil),              // 52: agent.v1.ExecClose
+	(*ExecExit)(nil),               // 53: agent.v1.ExecExit
+	nil,                            // 54: agent.v1.MetricScrapeConfig.ExtraLabelsEntry
+	(*v1.AgentMetadata)(nil),       // 55: common.v1.AgentMetadata
+	(*LogBatch)(nil),               // 56: agent.v1.LogBatch
+	(*StateEvent)(nil),             // 57: agent.v1.StateEvent
+	(*MetricBatch)(nil),            // 58: agent.v1.MetricBatch
+	(*MetricsEvent)(nil),           // 59: agent.v1.MetricsEvent
+	(*PrometheusMetricsEvent)(nil), // 60: agent.v1.PrometheusMetricsEvent
+	(*ResourceCatalog)(nil),        // 61: agent.v1.ResourceCatalog
+	(ResourceKind)(0),              // 62: agent.v1.ResourceKind
 }
 var file_proto_agent_v1_agent_proto_depIdxs = []int32{
-	45, // 0: agent.v1.AgentMessage.meta:type_name -> common.v1.AgentMetadata
-	8,  // 1: agent.v1.AgentMessage.handshake:type_name -> agent.v1.HandshakeRequest
-	46, // 2: agent.v1.AgentMessage.logs:type_name -> agent.v1.LogBatch
-	47, // 3: agent.v1.AgentMessage.state:type_name -> agent.v1.StateEvent
-	48, // 4: agent.v1.AgentMessage.metrics:type_name -> agent.v1.MetricBatch
-	10, // 5: agent.v1.AgentMessage.heartbeat:type_name -> agent.v1.Heartbeat
-	49, // 6: agent.v1.AgentMessage.kube_metrics:type_name -> agent.v1.MetricsEvent
-	50, // 7: agent.v1.AgentMessage.prometheus_metrics:type_name -> agent.v1.PrometheusMetricsEvent
-	51, // 8: agent.v1.AgentMessage.catalog:type_name -> agent.v1.ResourceCatalog
-	26, // 9: agent.v1.AgentMessage.resource_query_result:type_name -> agent.v1.ResourceQueryResult
-	30, // 10: agent.v1.AgentMessage.mutation_result:type_name -> agent.v1.MutationResult
-	9,  // 11: agent.v1.HandshakeRequest.caps:type_name -> agent.v1.AgentCapabilities
-	11, // 12: agent.v1.Heartbeat.health:type_name -> agent.v1.AgentHealth
-	12, // 13: agent.v1.AgentHealth.scrape_targets:type_name -> agent.v1.ScrapeTargetHealth
-	14, // 14: agent.v1.GatewayMessage.handshake:type_name -> agent.v1.HandshakeResponse
-	15, // 15: agent.v1.GatewayMessage.ack:type_name -> agent.v1.Ack
-	18, // 16: agent.v1.GatewayMessage.config:type_name -> agent.v1.ConfigUpdate
-	16, // 17: agent.v1.GatewayMessage.backpressure:type_name -> agent.v1.BackpressureSignal
-	17, // 18: agent.v1.GatewayMessage.shutdown:type_name -> agent.v1.Shutdown
-	25, // 19: agent.v1.GatewayMessage.resource_query:type_name -> agent.v1.ResourceQuery
-	28, // 20: agent.v1.GatewayMessage.mutation:type_name -> agent.v1.MutationRequest
-	32, // 21: agent.v1.GatewayMessage.exec_open:type_name -> agent.v1.ExecOpen
-	19, // 22: agent.v1.HandshakeResponse.config:type_name -> agent.v1.ConfigSnapshot
-	19, // 23: agent.v1.ConfigUpdate.config:type_name -> agent.v1.ConfigSnapshot
-	21, // 24: agent.v1.ConfigSnapshot.log_collectors:type_name -> agent.v1.LogCollectorConfig
-	22, // 25: agent.v1.ConfigSnapshot.watchers:type_name -> agent.v1.WatcherConfig
-	24, // 26: agent.v1.ConfigSnapshot.metric_scrapers:type_name -> agent.v1.MetricScrapeConfig
-	20, // 27: agent.v1.ConfigSnapshot.ingest_rules:type_name -> agent.v1.IngestRules
-	52, // 28: agent.v1.WatcherConfig.kinds:type_name -> agent.v1.ResourceKind
-	23, // 29: agent.v1.WatcherConfig.resources:type_name -> agent.v1.ResourceRef
-	44, // 30: agent.v1.MetricScrapeConfig.extra_labels:type_name -> agent.v1.MetricScrapeConfig.ExtraLabelsEntry
-	23, // 31: agent.v1.ResourceQuery.ref:type_name -> agent.v1.ResourceRef
-	0,  // 32: agent.v1.ResourceQuery.verb:type_name -> agent.v1.QueryVerb
-	1,  // 33: agent.v1.ResourceQuery.view:type_name -> agent.v1.QueryView
-	27, // 34: agent.v1.ResourceQueryResult.error:type_name -> agent.v1.QueryError
-	2,  // 35: agent.v1.QueryError.code:type_name -> agent.v1.QueryErrorCode
-	23, // 36: agent.v1.MutationRequest.ref:type_name -> agent.v1.ResourceRef
-	3,  // 37: agent.v1.MutationRequest.verb:type_name -> agent.v1.MutationVerb
-	29, // 38: agent.v1.MutationRequest.delete_options:type_name -> agent.v1.DeleteOptions
-	31, // 39: agent.v1.MutationResult.error:type_name -> agent.v1.MutationError
-	4,  // 40: agent.v1.MutationError.code:type_name -> agent.v1.MutationErrorCode
-	33, // 41: agent.v1.ExecOpen.target:type_name -> agent.v1.ExecTarget
-	34, // 42: agent.v1.ExecTarget.pod:type_name -> agent.v1.PodTarget
-	35, // 43: agent.v1.ExecTarget.node:type_name -> agent.v1.NodeTarget
-	38, // 44: agent.v1.ExecClientMessage.attach:type_name -> agent.v1.ExecAttach
-	40, // 45: agent.v1.ExecClientMessage.data:type_name -> agent.v1.ExecData
-	43, // 46: agent.v1.ExecClientMessage.exit:type_name -> agent.v1.ExecExit
-	39, // 47: agent.v1.ExecServerMessage.ack:type_name -> agent.v1.ExecAttachAck
-	40, // 48: agent.v1.ExecServerMessage.stdin:type_name -> agent.v1.ExecData
-	41, // 49: agent.v1.ExecServerMessage.resize:type_name -> agent.v1.ExecResize
-	42, // 50: agent.v1.ExecServerMessage.close:type_name -> agent.v1.ExecClose
-	5,  // 51: agent.v1.ExecData.channel:type_name -> agent.v1.ExecChannel
-	6,  // 52: agent.v1.ExecExit.reason:type_name -> agent.v1.ExecExitReason
-	7,  // 53: agent.v1.AgentService.Connect:input_type -> agent.v1.AgentMessage
-	36, // 54: agent.v1.AgentService.ExecSession:input_type -> agent.v1.ExecClientMessage
-	13, // 55: agent.v1.AgentService.Connect:output_type -> agent.v1.GatewayMessage
-	37, // 56: agent.v1.AgentService.ExecSession:output_type -> agent.v1.ExecServerMessage
-	55, // [55:57] is the sub-list for method output_type
-	53, // [53:55] is the sub-list for method input_type
-	53, // [53:53] is the sub-list for extension type_name
-	53, // [53:53] is the sub-list for extension extendee
-	0,  // [0:53] is the sub-list for field type_name
+	55, // 0: agent.v1.AgentMessage.meta:type_name -> common.v1.AgentMetadata
+	12, // 1: agent.v1.AgentMessage.handshake:type_name -> agent.v1.HandshakeRequest
+	56, // 2: agent.v1.AgentMessage.logs:type_name -> agent.v1.LogBatch
+	57, // 3: agent.v1.AgentMessage.state:type_name -> agent.v1.StateEvent
+	58, // 4: agent.v1.AgentMessage.metrics:type_name -> agent.v1.MetricBatch
+	14, // 5: agent.v1.AgentMessage.heartbeat:type_name -> agent.v1.Heartbeat
+	59, // 6: agent.v1.AgentMessage.kube_metrics:type_name -> agent.v1.MetricsEvent
+	60, // 7: agent.v1.AgentMessage.prometheus_metrics:type_name -> agent.v1.PrometheusMetricsEvent
+	61, // 8: agent.v1.AgentMessage.catalog:type_name -> agent.v1.ResourceCatalog
+	30, // 9: agent.v1.AgentMessage.resource_query_result:type_name -> agent.v1.ResourceQueryResult
+	34, // 10: agent.v1.AgentMessage.mutation_result:type_name -> agent.v1.MutationResult
+	43, // 11: agent.v1.AgentMessage.node_job_event:type_name -> agent.v1.NodeJobEvent
+	13, // 12: agent.v1.HandshakeRequest.caps:type_name -> agent.v1.AgentCapabilities
+	15, // 13: agent.v1.Heartbeat.health:type_name -> agent.v1.AgentHealth
+	16, // 14: agent.v1.AgentHealth.scrape_targets:type_name -> agent.v1.ScrapeTargetHealth
+	18, // 15: agent.v1.GatewayMessage.handshake:type_name -> agent.v1.HandshakeResponse
+	19, // 16: agent.v1.GatewayMessage.ack:type_name -> agent.v1.Ack
+	22, // 17: agent.v1.GatewayMessage.config:type_name -> agent.v1.ConfigUpdate
+	20, // 18: agent.v1.GatewayMessage.backpressure:type_name -> agent.v1.BackpressureSignal
+	21, // 19: agent.v1.GatewayMessage.shutdown:type_name -> agent.v1.Shutdown
+	29, // 20: agent.v1.GatewayMessage.resource_query:type_name -> agent.v1.ResourceQuery
+	32, // 21: agent.v1.GatewayMessage.mutation:type_name -> agent.v1.MutationRequest
+	36, // 22: agent.v1.GatewayMessage.exec_open:type_name -> agent.v1.ExecOpen
+	40, // 23: agent.v1.GatewayMessage.node_job:type_name -> agent.v1.NodeJobRequest
+	42, // 24: agent.v1.GatewayMessage.node_job_cancel:type_name -> agent.v1.NodeJobCancel
+	23, // 25: agent.v1.HandshakeResponse.config:type_name -> agent.v1.ConfigSnapshot
+	23, // 26: agent.v1.ConfigUpdate.config:type_name -> agent.v1.ConfigSnapshot
+	25, // 27: agent.v1.ConfigSnapshot.log_collectors:type_name -> agent.v1.LogCollectorConfig
+	26, // 28: agent.v1.ConfigSnapshot.watchers:type_name -> agent.v1.WatcherConfig
+	28, // 29: agent.v1.ConfigSnapshot.metric_scrapers:type_name -> agent.v1.MetricScrapeConfig
+	24, // 30: agent.v1.ConfigSnapshot.ingest_rules:type_name -> agent.v1.IngestRules
+	62, // 31: agent.v1.WatcherConfig.kinds:type_name -> agent.v1.ResourceKind
+	27, // 32: agent.v1.WatcherConfig.resources:type_name -> agent.v1.ResourceRef
+	54, // 33: agent.v1.MetricScrapeConfig.extra_labels:type_name -> agent.v1.MetricScrapeConfig.ExtraLabelsEntry
+	27, // 34: agent.v1.ResourceQuery.ref:type_name -> agent.v1.ResourceRef
+	0,  // 35: agent.v1.ResourceQuery.verb:type_name -> agent.v1.QueryVerb
+	1,  // 36: agent.v1.ResourceQuery.view:type_name -> agent.v1.QueryView
+	31, // 37: agent.v1.ResourceQueryResult.error:type_name -> agent.v1.QueryError
+	2,  // 38: agent.v1.QueryError.code:type_name -> agent.v1.QueryErrorCode
+	27, // 39: agent.v1.MutationRequest.ref:type_name -> agent.v1.ResourceRef
+	3,  // 40: agent.v1.MutationRequest.verb:type_name -> agent.v1.MutationVerb
+	33, // 41: agent.v1.MutationRequest.delete_options:type_name -> agent.v1.DeleteOptions
+	35, // 42: agent.v1.MutationResult.error:type_name -> agent.v1.MutationError
+	4,  // 43: agent.v1.MutationError.code:type_name -> agent.v1.MutationErrorCode
+	37, // 44: agent.v1.ExecOpen.target:type_name -> agent.v1.ExecTarget
+	38, // 45: agent.v1.ExecTarget.pod:type_name -> agent.v1.PodTarget
+	39, // 46: agent.v1.ExecTarget.node:type_name -> agent.v1.NodeTarget
+	5,  // 47: agent.v1.NodeJobRequest.verb:type_name -> agent.v1.NodeJobVerb
+	41, // 48: agent.v1.NodeJobRequest.drain:type_name -> agent.v1.DrainOptions
+	6,  // 49: agent.v1.NodeJobEvent.phase:type_name -> agent.v1.NodeJobPhase
+	45, // 50: agent.v1.NodeJobEvent.error:type_name -> agent.v1.NodeJobError
+	44, // 51: agent.v1.NodeJobEvent.pods:type_name -> agent.v1.NodeJobPod
+	7,  // 52: agent.v1.NodeJobPod.state:type_name -> agent.v1.NodeJobPodState
+	8,  // 53: agent.v1.NodeJobError.code:type_name -> agent.v1.NodeJobErrorCode
+	48, // 54: agent.v1.ExecClientMessage.attach:type_name -> agent.v1.ExecAttach
+	50, // 55: agent.v1.ExecClientMessage.data:type_name -> agent.v1.ExecData
+	53, // 56: agent.v1.ExecClientMessage.exit:type_name -> agent.v1.ExecExit
+	49, // 57: agent.v1.ExecServerMessage.ack:type_name -> agent.v1.ExecAttachAck
+	50, // 58: agent.v1.ExecServerMessage.stdin:type_name -> agent.v1.ExecData
+	51, // 59: agent.v1.ExecServerMessage.resize:type_name -> agent.v1.ExecResize
+	52, // 60: agent.v1.ExecServerMessage.close:type_name -> agent.v1.ExecClose
+	9,  // 61: agent.v1.ExecData.channel:type_name -> agent.v1.ExecChannel
+	10, // 62: agent.v1.ExecExit.reason:type_name -> agent.v1.ExecExitReason
+	11, // 63: agent.v1.AgentService.Connect:input_type -> agent.v1.AgentMessage
+	46, // 64: agent.v1.AgentService.ExecSession:input_type -> agent.v1.ExecClientMessage
+	17, // 65: agent.v1.AgentService.Connect:output_type -> agent.v1.GatewayMessage
+	47, // 66: agent.v1.AgentService.ExecSession:output_type -> agent.v1.ExecServerMessage
+	65, // [65:67] is the sub-list for method output_type
+	63, // [63:65] is the sub-list for method input_type
+	63, // [63:63] is the sub-list for extension type_name
+	63, // [63:63] is the sub-list for extension extendee
+	0,  // [0:63] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_agent_proto_init() }
@@ -4012,6 +4838,7 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*AgentMessage_Catalog)(nil),
 		(*AgentMessage_ResourceQueryResult)(nil),
 		(*AgentMessage_MutationResult)(nil),
+		(*AgentMessage_NodeJobEvent)(nil),
 	}
 	file_proto_agent_v1_agent_proto_msgTypes[6].OneofWrappers = []any{
 		(*GatewayMessage_Handshake)(nil),
@@ -4022,17 +4849,19 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*GatewayMessage_ResourceQuery)(nil),
 		(*GatewayMessage_Mutation)(nil),
 		(*GatewayMessage_ExecOpen)(nil),
+		(*GatewayMessage_NodeJob)(nil),
+		(*GatewayMessage_NodeJobCancel)(nil),
 	}
 	file_proto_agent_v1_agent_proto_msgTypes[26].OneofWrappers = []any{
 		(*ExecTarget_Pod)(nil),
 		(*ExecTarget_Node)(nil),
 	}
-	file_proto_agent_v1_agent_proto_msgTypes[29].OneofWrappers = []any{
+	file_proto_agent_v1_agent_proto_msgTypes[35].OneofWrappers = []any{
 		(*ExecClientMessage_Attach)(nil),
 		(*ExecClientMessage_Data)(nil),
 		(*ExecClientMessage_Exit)(nil),
 	}
-	file_proto_agent_v1_agent_proto_msgTypes[30].OneofWrappers = []any{
+	file_proto_agent_v1_agent_proto_msgTypes[36].OneofWrappers = []any{
 		(*ExecServerMessage_Ack)(nil),
 		(*ExecServerMessage_Stdin)(nil),
 		(*ExecServerMessage_Resize)(nil),
@@ -4043,8 +4872,8 @@ func file_proto_agent_v1_agent_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_v1_agent_proto_rawDesc), len(file_proto_agent_v1_agent_proto_rawDesc)),
-			NumEnums:      7,
-			NumMessages:   38,
+			NumEnums:      11,
+			NumMessages:   44,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

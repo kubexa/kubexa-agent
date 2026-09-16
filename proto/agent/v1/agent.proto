@@ -45,6 +45,7 @@ message AgentMessage {
     ResourceCatalog        catalog            = 10;
     ResourceQueryResult    resource_query_result = 11;
     MutationResult mutation_result = 12;
+    NodeJobEvent   node_job_event  = 13;
   }
 }
 
@@ -64,6 +65,7 @@ message AgentCapabilities {
   bool mutate    = 4;
   bool exec_pod  = 5;   // set from config: exec.pod.enabled (see internal/stream/manager.go)
   bool exec_node = 6;   // true when exec.node.enabled and the agent resolved its own Pod (see internal/exec/nodeshell.go)
+  bool node_ops  = 7;   // true when mutate.node.enabled and the node-ops engine was built (see internal/stream/manager.go)
 }
 
 message Heartbeat {
@@ -165,6 +167,8 @@ message GatewayMessage {
     ResourceQuery      resource_query = 7;
     MutationRequest mutation = 8;
     ExecOpen exec_open = 9;
+    NodeJobRequest node_job        = 10;
+    NodeJobCancel  node_job_cancel = 11;
   }
 }
 
@@ -464,6 +468,97 @@ message ExecTarget {
 
 message PodTarget  { string namespace = 1; string name = 2; string container = 3; }
 message NodeTarget { string name = 1; }
+
+// ─── Node operations (cordon / uncordon / drain) ───────────────────────────────
+//
+// A node job is the one gateway request that is NOT answered by one reply:
+// the agent runs it for seconds or minutes and emits NodeJobEvent as it goes.
+// Every event is a FULL snapshot -- phase, counters and the whole pod table
+// -- so a lost or reordered one costs nothing but freshness. The gateway
+// keeps only the latest.
+
+message NodeJobRequest {
+  string       job_id = 1;   // opaque to the agent; correlates every event
+  string       node   = 2;
+  NodeJobVerb  verb   = 3;
+  DrainOptions drain  = 4;   // read for DRAIN only
+}
+
+enum NodeJobVerb {
+  NODE_JOB_VERB_UNSPECIFIED = 0;
+  NODE_JOB_VERB_CORDON      = 1;
+  NODE_JOB_VERB_UNCORDON    = 2;
+  NODE_JOB_VERB_DRAIN       = 3;
+}
+
+message DrainOptions {
+  bool  force                = 1;  // evict pods with no controller
+  bool  delete_emptydir_data = 2;  // evict pods that mount emptyDir
+  int64 grace_period_seconds = 3;  // -1 unset (the pod's own); 0 is meaningful
+  int32 timeout_sec          = 4;  // whole job; the agent clamps to [30, mutate.node.max_timeout_sec]
+  bool  dry_run              = 5;  // dryRun=All on the cordon patch and every eviction
+}
+
+message NodeJobCancel { string job_id = 1; }
+
+message NodeJobEvent {
+  string        job_id          = 1;
+  NodeJobPhase  phase           = 2;
+  NodeJobError  error           = 3;   // set for REFUSED and FAILED
+  string        message         = 4;   // one human line, e.g. "waiting for 3 pods"
+  int32         pods_total      = 5;
+  int32         pods_evicted    = 6;   // evicted AND gone
+  int32         pods_pending    = 7;   // not yet gone: pending, evicting, blocked
+  int32         pods_skipped    = 8;
+  repeated NodeJobPod pods      = 9;   // the full table, every event
+  bool          node_cordoned   = 10;  // true once the cordon patch landed (never on dry_run)
+  int64         emitted_unix_ms = 11;
+}
+
+enum NodeJobPhase {
+  NODE_JOB_PHASE_UNSPECIFIED = 0;
+  NODE_JOB_PHASE_ACCEPTED    = 1;  // policy and preflight passed; work begins
+  NODE_JOB_PHASE_RUNNING     = 2;  // cordoning / evicting / waiting
+  NODE_JOB_PHASE_SUCCEEDED   = 3;
+  NODE_JOB_PHASE_FAILED      = 4;  // timeout, or at least one eviction failed for good
+  NODE_JOB_PHASE_CANCELLED   = 5;
+  NODE_JOB_PHASE_REFUSED     = 6;  // nothing was changed
+}
+
+message NodeJobPod {
+  string          namespace = 1;
+  string          name      = 2;
+  NodeJobPodState state     = 3;
+  string          reason    = 4;   // daemonset | mirror | agent_self | terminating | pdb | no_controller | emptydir | dry_run | API server text
+}
+
+enum NodeJobPodState {
+  NODE_JOB_POD_STATE_UNSPECIFIED = 0;
+  NODE_JOB_POD_STATE_PENDING     = 1;  // not yet evicted
+  NODE_JOB_POD_STATE_EVICTING    = 2;  // eviction accepted, pod still present
+  NODE_JOB_POD_STATE_BLOCKED     = 3;  // 429 from the Eviction API (a PodDisruptionBudget); retried
+  NODE_JOB_POD_STATE_GONE        = 4;  // no longer on the node
+  NODE_JOB_POD_STATE_SKIPPED     = 5;  // never evicted, by rule; reason says which
+  NODE_JOB_POD_STATE_FAILED      = 6;  // eviction refused for a reason retrying cannot fix
+}
+
+message NodeJobError {
+  NodeJobErrorCode code    = 1;
+  string           message = 2;
+}
+
+enum NodeJobErrorCode {
+  NODE_JOB_ERROR_UNSPECIFIED     = 0;
+  NODE_JOB_ERROR_POLICY_DENIED   = 1;  // mutate.node: disabled, node not matched, verb not granted
+  NODE_JOB_ERROR_RBAC_DENIED     = 2;  // the ClusterRole lacks a verb the job needs; message names it
+  NODE_JOB_ERROR_NOT_FOUND       = 3;  // the node does not exist
+  NODE_JOB_ERROR_BUSY            = 4;  // another job is running on this agent
+  NODE_JOB_ERROR_NEEDS_FORCE     = 5;  // preflight: pod(s) with no controller
+  NODE_JOB_ERROR_NEEDS_EMPTYDIR  = 6;  // preflight: pod(s) mounting emptyDir
+  NODE_JOB_ERROR_TIMEOUT         = 7;  // pods still present at the deadline
+  NODE_JOB_ERROR_EVICTION_FAILED = 8;  // at least one pod's eviction failed for good
+  NODE_JOB_ERROR_INTERNAL        = 9;
+}
 
 // ExecClientMessage is what the AGENT sends on ExecSession.
 message ExecClientMessage {

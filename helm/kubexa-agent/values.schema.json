@@ -46,6 +46,13 @@
           ],
           "description": "Grants the ServiceAccount create/get/list/watch/delete on pods in the release namespace and pods/exec create. NOT derived from exec.node -- see the comment beside rbac.nodeShell in values.yaml."
         },
+        "nodeOps": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Grants the ServiceAccount nodes get/patch, pods list in every namespace and pods/eviction create. NOT derived from mutate.node -- see the comment beside rbac.nodeOps in values.yaml."
+        },
         "extraRules": {
           "type": [
             "array",
@@ -1183,6 +1190,61 @@
                   "pattern": "^\\s*([Pp][Aa][Tt][Cc][Hh]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Rr][Ee][Ss][Tt][Aa][Rr][Tt]|[Ss][Cc][Aa][Ll][Ee]|[Cc][Rr][Ee][Aa][Tt][Ee])\\s*$"
                 }
               }
+            }
+          }
+        },
+        "node": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "nodes": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "null",
+                  "number",
+                  "string"
+                ],
+                "pattern": "^[^*]*\\*?$"
+              }
+            },
+            "verbs": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": [
+                  "boolean",
+                  "integer",
+                  "null",
+                  "number",
+                  "string"
+                ],
+                "pattern": "^\\s*([Cc][Oo][Rr][Dd][Oo][Nn]|[Uu][Nn][Cc][Oo][Rr][Dd][Oo][Nn]|[Dd][Rr][Aa][Ii][Nn])\\s*$"
+              }
+            },
+            "maxTimeoutSec": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 30,
+              "maximum": 86400
             }
           }
         }

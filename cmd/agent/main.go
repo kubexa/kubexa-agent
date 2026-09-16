@@ -32,6 +32,7 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/metrics"
 	"github.com/kubexa/kubexa-agent/internal/mutate"
 	mutatepolicy "github.com/kubexa/kubexa-agent/internal/mutate/policy"
+	"github.com/kubexa/kubexa-agent/internal/nodeops"
 	agentpprof "github.com/kubexa/kubexa-agent/internal/pprof"
 	"github.com/kubexa/kubexa-agent/internal/query"
 	"github.com/kubexa/kubexa-agent/internal/query/policy"
@@ -346,6 +347,30 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		}
 	}
 
+	nodeOpsPolicy, err := compileNodeOpsPolicy(cfg, log)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("node ops policy: %w", err)
+	}
+	nodeJobs, err := buildNodeJobResponder(
+		cfg,
+		nodeOpsPolicy,
+		func() (kubernetes.Interface, error) {
+			// Its own limiter, like the exec and mutate pools: a drain's
+			// poll loop must not queue behind the informers' bucket.
+			c, err := k8s.NewExecClients(&k8sconfig.Config{}, 0, 0)
+			if err != nil {
+				return nil, err
+			}
+			return c.Clientset, nil
+		},
+		logger.New("nodeops", logger.WithAgentID(cfg.Agent.AgentID)),
+	)
+	if err != nil {
+		_ = q.Close()
+		return fmt.Errorf("node ops engine: %w", err)
+	}
+
 	streamMgr, err := stream.New(
 		cfg,
 		q,
@@ -359,6 +384,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		rulesStore,
 		ruleCounters,
 		scrapeHealth,
+		nodeJobs,
 	)
 	if err != nil {
 		_ = q.Close()
@@ -710,6 +736,68 @@ func buildExecResponder(
 	return exec.NewTransport(m, dial, exec.Identity{
 		ClusterID: cfg.Agent.ClusterID, TenantToken: cfg.Agent.TenantToken,
 	}, log), opts, nil
+}
+
+// compileNodeOpsPolicy applies compileMutatePolicy's ruling to mutate.node:
+// nodeops.Compile validates the section unconditionally, so a bad rule under
+// an enabled section is fatal while under a disabled one it is a warning
+// naming the rule and a nil policy (every *nodeops.Policy method is
+// nil-safe and denies).
+func compileNodeOpsPolicy(cfg *config.Config, log *logger.Logger) (*nodeops.Policy, error) {
+	p, err := nodeops.Compile(cfg)
+	if err == nil {
+		return p, nil
+	}
+	if cfg.MutateNodeEnabled() {
+		return nil, err
+	}
+	log.Warn("mutate.node has an invalid rule; node operations stay disabled",
+		logger.F("error", err.Error()))
+	return nil, nil
+}
+
+// buildNodeJobResponder wires mutate.node into a nodeops.Engine. Nil when
+// the section is disabled, so a disabled agent resolves no REST config for
+// a feature it will not answer. newClientset is a FACTORY called only past
+// the enabled gate, for the reason buildMutationResponder gives.
+func buildNodeJobResponder(
+	cfg *config.Config,
+	policy *nodeops.Policy,
+	newClientset func() (kubernetes.Interface, error),
+	log *logger.Logger,
+) (stream.NodeJobResponder, error) {
+	if !cfg.MutateNodeEnabled() {
+		return nil, nil
+	}
+	if policy == nil {
+		return nil, errors.New("mutate.node is enabled but its policy did not compile; fix mutate.node")
+	}
+	cs, err := newClientset()
+	if err != nil {
+		return nil, fmt.Errorf("node ops clients: %w", err)
+	}
+	s := cfg.MutateNodeSettings()
+	own := nodeops.OwnPodFromEnv()
+	if own.Name == "" {
+		log.Warn("POD_NAME/POD_NAMESPACE are not set; a drain of this agent's own node will evict the agent itself")
+	}
+	if !policy.AllowsAnyNode() {
+		log.Warn("mutate.node is on but matches no node (nodes is empty)")
+	}
+	eng, err := nodeops.New(nodeops.Options{
+		Clientset:  cs,
+		Policy:     policy,
+		Own:        own,
+		MaxTimeout: time.Duration(s.MaxTimeoutSec) * time.Second,
+		Logger:     log,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Never return a typed-nil *nodeops.Engine through the interface: that
+	// would make m.nodeJobs != nil true in the manager, advertising
+	// node_ops=true for a responder that answers nothing.
+	return eng, nil
 }
 
 // capabilityNodeWiring derives the capability reporter's node-exec inputs

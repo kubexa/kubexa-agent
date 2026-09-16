@@ -100,7 +100,7 @@ func newTestManager(t *testing.T, cfg *config.Config, q queue.Queue, lis *bufcon
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	_, streamMetrics, connMetrics := newTestAgentMetrics(t, reg)
-	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil, nil, nil, nil, nil, nil, nil)
+	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -967,7 +967,7 @@ func newDrainTestManager(t *testing.T, cfg *config.Config, q queue.Queue) *strea
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	_, streamMetrics, connMetrics := newTestAgentMetrics(t, reg)
-	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil, nil, nil, nil, nil, nil, nil)
+	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
