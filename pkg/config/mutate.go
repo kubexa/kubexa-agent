@@ -22,6 +22,13 @@ type MutateConfig struct {
 	// Rules lists what may be changed. There is no inheritance and no
 	// implicit rule: an empty list with Enabled true permits nothing.
 	Rules []MutateRule `yaml:"rules,omitempty"`
+	// Node is the `mutate.node` section: cordon / uncordon / drain. It
+	// shares NOTHING with Enabled or Rules above -- a `resources: [nodes]`
+	// rule with `patch` still permits a raw patch of spec.unschedulable
+	// through the mutation path, but it does not grant `cordon` here, and
+	// Enabled false above does not switch this section off. Two paths, two
+	// grants.
+	Node NodeMutateConfig `yaml:"node,omitempty"`
 }
 
 // MutateRule permits a set of writes.
@@ -137,6 +144,111 @@ func ValidateMutateRules(rules []MutateRule) []string {
 
 func knownMutateVerb(v string) bool {
 	for _, known := range MutateVerbs {
+		if strings.EqualFold(strings.TrimSpace(v), known) {
+			return true
+		}
+	}
+	return false
+}
+
+// NodeMutateConfig governs the node jobs (cordon, uncordon, drain) the
+// platform may run on this cluster.
+type NodeMutateConfig struct {
+	// Enabled false refuses every node job. Unset means FALSE.
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// Nodes lists node-name patterns (trailing "*" supported). Empty
+	// matches NOTHING; unlike exec.node it is not a load error, because an
+	// operator who enables the section and names no node has permitted
+	// nothing, which is safe -- the agent logs it once at boot.
+	Nodes []string `yaml:"nodes,omitempty"`
+	// Verbs is a subset of {cordon, uncordon, drain}. EMPTY GRANTS NOTHING
+	// and is refused at load, the mutate.rules convention.
+	Verbs []string `yaml:"verbs,omitempty"`
+	// MaxTimeoutSec caps a drain's DrainOptions.timeout_sec. 0 means the
+	// default (1800); otherwise [30, 86400].
+	MaxTimeoutSec int `yaml:"max_timeout_sec,omitempty"`
+}
+
+// NodeMutateVerbs is the closed set mutate.node.verbs may name.
+var NodeMutateVerbs = []string{"cordon", "uncordon", "drain"}
+
+const defaultNodeMutateMaxTimeoutSec = 1800
+
+// NodeMutateSettings is mutate.node with its defaults applied.
+type NodeMutateSettings struct {
+	Nodes         []string
+	Verbs         []string
+	MaxTimeoutSec int
+}
+
+// MutateNodeEnabled reports whether any node job is answered at all. It
+// reads mutate.node.enabled ONLY -- not mutate.enabled.
+func (c *Config) MutateNodeEnabled() bool {
+	if c == nil || c.Mutate.Node.Enabled == nil {
+		return false
+	}
+	return *c.Mutate.Node.Enabled
+}
+
+// MutateNodeSettings returns mutate.node with defaults applied.
+func (c *Config) MutateNodeSettings() NodeMutateSettings {
+	s := NodeMutateSettings{MaxTimeoutSec: defaultNodeMutateMaxTimeoutSec}
+	if c == nil {
+		return s
+	}
+	s.Nodes = trimAll(c.Mutate.Node.Nodes)
+	s.Verbs = trimAll(c.Mutate.Node.Verbs)
+	if c.Mutate.Node.MaxTimeoutSec != 0 {
+		s.MaxTimeoutSec = c.Mutate.Node.MaxTimeoutSec
+	}
+	return s
+}
+
+func trimAll(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if t := strings.TrimSpace(v); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func (c *Config) validateMutateNode() []string {
+	if c == nil || !c.MutateNodeEnabled() {
+		return nil
+	}
+	return ValidateNodeMutateRules(c.Mutate.Node)
+}
+
+// ValidateNodeMutateRules validates mutate.node in isolation and does NOT
+// consult Enabled, for the reason ValidateMutateRules gives: the policy
+// compiler calls it unconditionally.
+func ValidateNodeMutateRules(n NodeMutateConfig) []string {
+	var errs []string
+	for _, p := range n.Nodes {
+		if err := validatePattern(p); err != nil {
+			errs = append(errs, fmt.Sprintf("mutate.node.nodes: %q: %v", p, err))
+		}
+	}
+	if len(n.Verbs) == 0 {
+		errs = append(errs, "mutate.node.verbs must name at least one of "+strings.Join(NodeMutateVerbs, ", ")+
+			" (an empty list grants nothing)")
+	}
+	for _, v := range n.Verbs {
+		if !knownNodeMutateVerb(v) {
+			errs = append(errs, fmt.Sprintf("mutate.node.verbs: unknown verb %q; want one of %s",
+				v, strings.Join(NodeMutateVerbs, ", ")))
+		}
+	}
+	if n.MaxTimeoutSec != 0 && (n.MaxTimeoutSec < 30 || n.MaxTimeoutSec > 86400) {
+		errs = append(errs, "mutate.node.max_timeout_sec must be between 30 and 86400")
+	}
+	return errs
+}
+
+func knownNodeMutateVerb(v string) bool {
+	for _, known := range NodeMutateVerbs {
 		if strings.EqualFold(strings.TrimSpace(v), known) {
 			return true
 		}

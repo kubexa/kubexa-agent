@@ -274,6 +274,23 @@ rules:
   {{- end }}
   {{- end }}
 
+  {{- if .Values.rbac.nodeOps }}
+  # rbac.nodeOps: a node job reads and patches the Node (cordon), lists the
+  # pods scheduled on it across every namespace, and evicts them through the
+  # Eviction subresource -- which is what makes PodDisruptionBudgets apply.
+  # pods delete is deliberately absent: deleting instead of evicting walks
+  # around every PDB and is not offered.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  {{- end }}
+
   {{- with .Values.rbac.extraRules }}
   {{- toYaml . | nindent 2 }}
   {{- end }}
