@@ -238,9 +238,16 @@ type: application
 # the chart's defaults dialed a name that does not resolve and connected to
 # nothing. A self-hosted platform still sets gateway.host to its own
 # agentserver ingress host; the default only stops being a dead name.
+# 0.10.3 moves the image to 0.10.3: on every accepted handshake the agent
+# re-sends the latest snapshot of each node job it emitted in the last ten
+# minutes. A stream can die before the peer notices, and the event just
+# written into it -- seen live: a drain's FAILED/timeout -- never reaches
+# the gateway; the platform then waited out its bound and recorded the
+# finished job as lost. The gateway keeps only the latest snapshot per job,
+# so a re-announcement is idempotent. Pairs with backend 0.5.46.
 #
-version: 0.10.2
-appVersion: "0.10.2"
+version: 0.10.3
+appVersion: "0.10.3"
 keywords:
   - kubexa
   - observability
