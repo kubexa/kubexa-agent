@@ -312,7 +312,7 @@ func TestDrainTimesOutListingWhatIsLeft(t *testing.T) {
 	evictionReactor(cs, func(string, string, *metav1.DeleteOptions) error { return nil }) // accepted, never leaves
 	e := newEngine(t, cs, enabledPolicy(t, "drain"))
 	r := newRecorder()
-	e.Start(drainReq("j1", func(d *agentv1.DrainOptions) { d.TimeoutSec = 1 }), r.emit) // clamps to MinTimeout (50ms)
+	e.Start(drainReq("j1", func(d *agentv1.DrainOptions) { d.TimeoutSec = 0 }), r.emit) // 0 floors to MinTimeout (50ms); 1s is not < MinTimeout and would NOT be floored
 	ev := r.terminal(t)
 	if ev.GetPhase() != agentv1.NodeJobPhase_NODE_JOB_PHASE_FAILED || ev.GetError().GetCode() != agentv1.NodeJobErrorCode_NODE_JOB_ERROR_TIMEOUT {
 		t.Fatalf("timeout: %+v", ev)
@@ -425,6 +425,66 @@ func TestRBACDeniedNamesTheVerb(t *testing.T) {
 	}
 	if !strings.Contains(ev.GetError().GetMessage(), "pods list") {
 		t.Fatalf("message %q does not name the verb", ev.GetError().GetMessage())
+	}
+}
+
+// TestDrainWaitListForbiddenEndsRBACDenied guards Finding I1: the wait loop
+// polls with ONE "pods list" per tick, never a per-pod "pods get". The
+// preflight list (building the table) succeeds; every list after that
+// (the wait loop's) is answered 403, as it would be for an RBAC binding
+// missing "pods list" -- which must never be read as "still evicting".
+func TestDrainWaitListForbiddenEndsRBACDenied(t *testing.T) {
+	cs := fake.NewSimpleClientset(nodeW1(), onNode("app", "web-1", func(p *corev1.Pod) { p.OwnerReferences = ctrl("ReplicaSet") }))
+	evictionReactor(cs, func(string, string, *metav1.DeleteOptions) error { return nil }) // accepted; pod stays (never deleted)
+	calls := 0
+	cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		calls++
+		if calls == 1 {
+			return false, nil, nil // let the preflight list through to the tracker
+		}
+		return true, nil, apierrors.NewForbidden(podsGVR.GroupResource(), "", errors.New("forbidden"))
+	})
+	e := newEngine(t, cs, enabledPolicy(t, "drain"))
+	r := newRecorder()
+	e.Start(drainReq("j1", nil), r.emit)
+	ev := r.terminal(t)
+	if ev.GetPhase() != agentv1.NodeJobPhase_NODE_JOB_PHASE_FAILED || ev.GetError().GetCode() != agentv1.NodeJobErrorCode_NODE_JOB_ERROR_RBAC_DENIED {
+		t.Fatalf("wait-list forbidden: %+v", ev)
+	}
+	if !strings.Contains(ev.GetError().GetMessage(), "pods list") {
+		t.Fatalf("message %q does not name pods list", ev.GetError().GetMessage())
+	}
+	if calls < 2 {
+		t.Fatalf("list calls = %d, want at least 2 (preflight, then the wait loop)", calls)
+	}
+}
+
+// TestNilDrainOptionsUsesThePodsOwnGrace guards Finding I3: a nil Drain must
+// mean "the pod's own grace period", the same as GracePeriodSeconds: -1 --
+// never an explicit 0 (immediate SIGKILL of every pod on the node).
+// d.GetGracePeriodSeconds() on a nil d silently returns 0, which is why the
+// fix reads the field only after a nil check instead of through the getter.
+func TestNilDrainOptionsUsesThePodsOwnGrace(t *testing.T) {
+	cs := fake.NewSimpleClientset(nodeW1(), onNode("app", "web-1", func(p *corev1.Pod) { p.OwnerReferences = ctrl("ReplicaSet") }))
+	var opts *metav1.DeleteOptions
+	var sawEviction bool
+	evictionReactor(cs, func(ns, name string, o *metav1.DeleteOptions) error {
+		sawEviction = true
+		opts = o
+		return cs.Tracker().Delete(podsGVR, ns, name)
+	})
+	e := newEngine(t, cs, enabledPolicy(t, "drain"))
+	r := newRecorder()
+	e.Start(&agentv1.NodeJobRequest{JobId: "j1", Node: "w1", Verb: agentv1.NodeJobVerb_NODE_JOB_VERB_DRAIN, Drain: nil}, r.emit)
+	ev := r.terminal(t)
+	if ev.GetPhase() != agentv1.NodeJobPhase_NODE_JOB_PHASE_SUCCEEDED {
+		t.Fatalf("nil drain: %+v", ev)
+	}
+	if !sawEviction {
+		t.Fatal("no eviction observed")
+	}
+	if opts != nil {
+		t.Fatalf("eviction DeleteOptions = %+v, want nil (grace period is the pod's own)", opts)
 	}
 }
 
