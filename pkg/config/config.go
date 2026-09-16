@@ -638,6 +638,7 @@ func (c *Config) Validate() error {
 	violations = append(violations, c.Collect.Metrics.validate()...)
 	violations = append(violations, c.validateQuery()...)
 	violations = append(violations, c.validateMutate()...)
+	violations = append(violations, c.validateMutateNode()...)
 	violations = append(violations, c.validateExec()...)
 
 	if len(violations) == 0 {
