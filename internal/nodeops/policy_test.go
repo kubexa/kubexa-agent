@@ -21,6 +21,21 @@ func TestCompileValidatesEvenWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestCompileAbsentSectionIsNotAnError guards Finding I2: an agent whose
+// config never mentions mutate.node at all -- the zero value, not a
+// disabled-but-configured section -- must compile to a denying policy with
+// no error, so cmd/agent/main.go logs no "invalid rule" warning nobody
+// wrote.
+func TestCompileAbsentSectionIsNotAnError(t *testing.T) {
+	p, err := Compile(cfgWith(config.NodeMutateConfig{}))
+	if err != nil {
+		t.Fatalf("Compile = %v, want nil for an absent mutate.node section", err)
+	}
+	if d := p.Decide("w1", VerbDrain); d.Allowed {
+		t.Fatalf("absent section allowed: %+v", d)
+	}
+}
+
 func TestDecideOrder(t *testing.T) {
 	disabled, _ := Compile(cfgWith(config.NodeMutateConfig{Nodes: []string{"*"}, Verbs: []string{"drain"}}))
 	if d := disabled.Decide("w1", VerbDrain); d.Allowed || !strings.Contains(d.Reason, "disabled") {
