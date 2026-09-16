@@ -11,8 +11,10 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/kubexa/kubexa-agent/internal/logger"
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
 
@@ -54,12 +56,42 @@ func (e *Engine) runDrain(ctx context.Context, id, node string, d *agentv1.Drain
 	emit(s.event(agentv1.NodeJobPhase_NODE_JOB_PHASE_RUNNING, "node cordoned; evicting"))
 
 	var grace *int64
-	if g := d.GetGracePeriodSeconds(); g >= 0 {
+	if d != nil && d.GracePeriodSeconds >= 0 {
+		g := d.GracePeriodSeconds
 		grace = &g
 	}
 	nextRetry := map[string]time.Time{}
 	for {
 		now := time.Now()
+
+		// ONE pods List per tick covers every EVICTING pod -- rbac.nodeOps
+		// grants "pods list", never a per-pod "pods get" (Finding I1). Done
+		// once, before walking the table, and skipped entirely when there
+		// is nothing EVICTING to check (including every dry run: a dry run
+		// never leaves a pod EVICTING -- see the PENDING/BLOCKED case
+		// below).
+		var live map[string]types.UID
+		if !dryRun && anyEvicting(s.pods) {
+			list, err := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{FieldSelector: "spec.nodeName=" + node})
+			switch {
+			case err == nil:
+				live = make(map[string]types.UID, len(list.Items))
+				for _, p := range list.Items {
+					live[p.Namespace+"/"+p.Name] = p.UID
+				}
+			case ctx.Err() != nil:
+				return endEarly(s, ctx.Err())
+			case apierrors.IsForbidden(err):
+				code, msg := codeFor(err, "pods list")
+				return s.failed(code, msg)
+			default:
+				// NotFound or another transient error: leave every EVICTING
+				// pod as it is and look again next tick.
+				e.opts.Logger.Debug("node job: pods list failed while waiting for evictions; retrying next tick",
+					logger.F("job_id", id), logger.F("node", node), logger.F("error", err.Error()))
+			}
+		}
+
 		for i := range s.pods {
 			if ctx.Err() != nil {
 				break
@@ -76,6 +108,11 @@ func (e *Engine) runDrain(ctx context.Context, id, node string, d *agentv1.Drain
 				}
 				err := evict(ctx, cs, p.Namespace, p.Name, grace, dryRun)
 				switch {
+				case err == nil && dryRun:
+					// Folded into this same pass: a dry run has nothing to
+					// wait for, so it SUCCEEDS at once (spec) instead of
+					// costing an extra tick through EVICTING.
+					p.State, p.Reason = agentv1.NodeJobPodState_NODE_JOB_POD_STATE_GONE, ReasonDryRun
 				case err == nil:
 					p.State, p.Reason = agentv1.NodeJobPodState_NODE_JOB_POD_STATE_EVICTING, ""
 				case ctx.Err() != nil:
@@ -95,15 +132,21 @@ func (e *Engine) runDrain(ctx context.Context, id, node string, d *agentv1.Drain
 					p.State, p.Reason = agentv1.NodeJobPodState_NODE_JOB_POD_STATE_FAILED, err.Error()
 				}
 			case agentv1.NodeJobPodState_NODE_JOB_POD_STATE_EVICTING:
+				// A pod can only reach EVICTING here without going through
+				// the eviction call above by already being Terminating at
+				// classification time (ReasonTerminating) -- a dry run
+				// resolves that the same way it resolves an eviction it
+				// just issued: at once, no list needed.
 				if dryRun {
 					p.State, p.Reason = agentv1.NodeJobPodState_NODE_JOB_POD_STATE_GONE, ReasonDryRun
 					continue
 				}
-				cur, err := cs.CoreV1().Pods(p.Namespace).Get(ctx, p.Name, metav1.GetOptions{})
-				if apierrors.IsNotFound(err) || (err == nil && cur.UID != p.UID) {
+				if live == nil {
+					continue // no fresh list this tick; look again next tick
+				}
+				if uid, ok := live[key]; !ok || uid != p.UID {
 					p.State, p.Reason = agentv1.NodeJobPodState_NODE_JOB_POD_STATE_GONE, ""
 				}
-				// any other error: still evicting; look again next tick
 			}
 		}
 		if err := ctx.Err(); err != nil {
@@ -153,6 +196,11 @@ func endEarly(s *snapshot, err error) *agentv1.NodeJobEvent {
 		}
 		return s.event(agentv1.NodeJobPhase_NODE_JOB_PHASE_CANCELLED, msg)
 	}
+	if len(s.pods) == 0 {
+		// A cordon/uncordon job never has a pod table, and neither does a
+		// drain whose deadline fired before the pods List that builds one.
+		return s.failed(agentv1.NodeJobErrorCode_NODE_JOB_ERROR_TIMEOUT, "timed out before the node answered")
+	}
 	var left []string
 	for _, p := range s.pods {
 		switch p.State {
@@ -162,6 +210,17 @@ func endEarly(s *snapshot, err error) *agentv1.NodeJobEvent {
 	}
 	return s.failed(agentv1.NodeJobErrorCode_NODE_JOB_ERROR_TIMEOUT,
 		fmt.Sprintf("timed out with %d pod(s) still on the node: %s", len(left), strings.Join(left, ", ")))
+}
+
+// anyEvicting reports whether any pod in the table is currently EVICTING --
+// the only state the wait-loop's pods List needs to resolve.
+func anyEvicting(pods []PodClass) bool {
+	for _, p := range pods {
+		if p.State == agentv1.NodeJobPodState_NODE_JOB_POD_STATE_EVICTING {
+			return true
+		}
+	}
+	return false
 }
 
 func evict(ctx context.Context, cs kubernetes.Interface, ns, name string, grace *int64, dryRun bool) error {
