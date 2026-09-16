@@ -224,6 +224,14 @@ type: application
 # rbac.nodeOps). The agent's own pod is never evicted. Needs backend 0.5.44
 # or newer for the platform side; older backends never dispatch a node job.
 #
+# 0.10.2 moves the image to 0.10.2: the live query policy grants list and
+# get on namespaces implicitly, cluster-wide, unless an owner rule names
+# namespaces itself. A default install inherits collect.state.rules, which
+# never name namespaces, so the app's namespace picker (a live LIST) was
+# refused with POLICY_DENIED on every load and fell back to the stored
+# subset. The ClusterRole already granted namespaces; only the policy said
+# no.
+#
 # 0.10.1 changes one default and no image: gateway.host is now
 # agents.kubexa.dev, the hosted platform's real gateway. The old default,
 # gateway.kubexa.dev, never had a DNS record, so an agent installed with
@@ -231,8 +239,8 @@ type: application
 # nothing. A self-hosted platform still sets gateway.host to its own
 # agentserver ingress host; the default only stops being a dead name.
 #
-version: 0.10.1
-appVersion: "0.10.0"
+version: 0.10.2
+appVersion: "0.10.2"
 keywords:
   - kubexa
   - observability
