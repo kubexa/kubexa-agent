@@ -358,6 +358,12 @@ query:
   # here directly: doing so would make this list non-empty and silently drop
   # the inherited object rules.
   #
+  # Listing and getting namespaces is granted implicitly too, cluster-wide,
+  # unless a rule here (or an inherited one) names namespaces itself -- the
+  # ClusterRole below grants them unconditionally for discovery, and the
+  # app's namespace picker lists them live. A rule of your own for
+  # namespaces replaces the implicit grant entirely.
+  #
   # A rule may name `"*"` as its only resource, which permits every
   # group/version/resource including CRDs. It covers secrets too -- set
   # redactSecrets: true unless you specifically need values readable. Pair it
