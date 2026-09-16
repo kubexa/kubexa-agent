@@ -5,11 +5,18 @@ import (
 
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // The two gateway payloads and the one agent payload ride the existing
 // oneofs on new field numbers. An old gateway must still parse a message
-// carrying them; this fails loudly if one is retyped or renumbered.
+// carrying them. This round trip does NOT prove the numbers are the ones
+// the wire contract promises: marshal and unmarshal here both run through
+// the SAME generated code, so a field silently renumbered in the .proto
+// (and regenerated) would still round-trip perfectly against itself --
+// there is no old binary in this test to disagree with it. Only
+// TestNodeJobFieldNumbersArePinned below, which checks the numbers
+// themselves against literal constants, catches a renumbering.
 func TestNodeJobRidesTheExistingOneofs(t *testing.T) {
 	gw := &agentv1.GatewayMessage{
 		MessageId: "m1",
@@ -60,6 +67,28 @@ func TestNodeOpsCapabilityDefaultsFalse(t *testing.T) {
 	if caps.GetNodeOps() {
 		t.Fatal("node_ops defaulted to true")
 	}
+}
+
+// TestNodeJobFieldNumbersArePinned pins the wire field numbers themselves,
+// via protoreflect, against the literal constants agent.proto declares.
+// This is what actually catches a renumbering: TestNodeJobRidesTheExisting
+// Oneofs marshals and unmarshals with the SAME generated code on both
+// ends, so it cannot.
+func TestNodeJobFieldNumbersArePinned(t *testing.T) {
+	check := func(t *testing.T, fields protoreflect.FieldDescriptors, name string, want protoreflect.FieldNumber) {
+		t.Helper()
+		fd := fields.ByName(protoreflect.Name(name))
+		if fd == nil {
+			t.Fatalf("field %q not found", name)
+		}
+		if fd.Number() != want {
+			t.Fatalf("field %q number = %d, want %d", name, fd.Number(), want)
+		}
+	}
+	check(t, (&agentv1.GatewayMessage{}).ProtoReflect().Descriptor().Fields(), "node_job", 10)
+	check(t, (&agentv1.GatewayMessage{}).ProtoReflect().Descriptor().Fields(), "node_job_cancel", 11)
+	check(t, (&agentv1.AgentMessage{}).ProtoReflect().Descriptor().Fields(), "node_job_event", 13)
+	check(t, (&agentv1.AgentCapabilities{}).ProtoReflect().Descriptor().Fields(), "node_ops", 7)
 }
 
 // Enum zero values are UNSPECIFIED, never a real verb or a real phase: an
