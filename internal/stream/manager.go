@@ -64,6 +64,17 @@ type ExecResponder interface {
 	Open(ctx context.Context, open *agentv1.ExecOpen)
 }
 
+// NodeJobResponder runs node jobs (cordon / uncordon / drain) requested by
+// the gateway. Satisfied structurally by *nodeops.Engine; nil drops every
+// node_job (mutate.node.enabled false, or its policy failed to compile
+// while disabled). Unlike the two responders above it answers with a STREAM
+// of events through emit, not one reply, so the manager hands it a sender
+// closure rather than waiting on a return value.
+type NodeJobResponder interface {
+	Start(req *agentv1.NodeJobRequest, emit func(*agentv1.NodeJobEvent))
+	Cancel(jobID string) bool
+}
+
 // NodeConsoleReporter is implemented by an ExecResponder that can answer
 // node targets. Read through a type assertion rather than a New
 // parameter: the pod console's responder already reaches the handshake,
@@ -158,6 +169,11 @@ type streamManager struct {
 	// exec_open is dropped when exec.pod.enabled is false.
 	execResponder ExecResponder
 
+	// nodeJobs runs node jobs requested by the gateway. Set once at
+	// construction and read-only afterward. Nil is valid -- a node_job is
+	// dropped and the handshake advertises node_ops=false.
+	nodeJobs NodeJobResponder
+
 	// scrapeHealth supplies per-kind scrape health for the heartbeat. Set
 	// once at construction and read-only afterward. Nil is valid — an agent
 	// with metrics collection disabled reports no scrape_targets at all,
@@ -245,7 +261,9 @@ func (g *throttleGate) throttled() bool {
 // policy failed to compile while disabled). execResponder opens console
 // sessions; pass nil to drop every exec_open (exec.pod.enabled is false).
 // scrapeHealth supplies the heartbeat's per-kind scrape health; pass nil if
-// this agent does not run metrics collection.
+// this agent does not run metrics collection. nodeJobs runs node jobs; pass
+// nil to drop every node_job (mutate.node.enabled is false, or its policy
+// failed to compile while disabled).
 func New(
 	cfg *config.Config,
 	q queue.Queue,
@@ -259,6 +277,7 @@ func New(
 	rules *ingestrules.Store,
 	counters *ingestrules.Counters,
 	scrapeHealth ScrapeHealthSource,
+	nodeJobs NodeJobResponder,
 ) (Manager, error) {
 	if cfg == nil {
 		return nil, errors.New("config is nil")
@@ -283,6 +302,7 @@ func New(
 		responder:         responder,
 		mutationResponder: mutationResponder,
 		execResponder:     execResponder,
+		nodeJobs:          nodeJobs,
 		scrapeHealth:      scrapeHealth,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
 		sleep:             defaultSleeper,
@@ -632,6 +652,7 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 					Mutate:   m.cfg.MutateEnabled(),
 					ExecPod:  m.cfg.ExecPodEnabled(),
 					ExecNode: nodeConsoleReady(m.execResponder),
+					NodeOps:  m.nodeJobs != nil,
 				},
 			},
 		},
@@ -1124,6 +1145,14 @@ func (m *streamManager) handleGatewayMessage(ctx context.Context, msg *agentv1.G
 		if m.execResponder != nil && p.ExecOpen != nil {
 			m.execResponder.Open(ctx, p.ExecOpen)
 		}
+	case *agentv1.GatewayMessage_NodeJob:
+		m.handleNodeJob(p.NodeJob)
+	case *agentv1.GatewayMessage_NodeJobCancel:
+		if m.nodeJobs != nil && p.NodeJobCancel != nil {
+			if !m.nodeJobs.Cancel(p.NodeJobCancel.GetJobId()) {
+				m.log.Debug("node job cancel for a job that is not running", logger.F("job_id", p.NodeJobCancel.GetJobId()))
+			}
+		}
 	default:
 	}
 }
@@ -1195,6 +1224,33 @@ func (m *streamManager) handleMutation(ctx context.Context, req *agentv1.Mutatio
 			)
 		}
 	}()
+}
+
+// handleNodeJob hands a node job to the engine. Start returns at once (the
+// job runs on the engine's own goroutine), so, like exec_open, this needs no
+// goroutine of its own to keep the recv loop live.
+//
+// The emit closure deliberately does NOT carry the session ctx: a drain
+// outlives the stream that started it (nodeops.Engine.Start's doc), and an
+// event produced after this session ended must still be offered to
+// whatever stream is up now. Send fails when nothing is; that is logged and
+// dropped -- the gateway keeps only the latest snapshot anyway.
+func (m *streamManager) handleNodeJob(req *agentv1.NodeJobRequest) {
+	if m.nodeJobs == nil || req == nil {
+		return
+	}
+	m.nodeJobs.Start(req, func(ev *agentv1.NodeJobEvent) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		msg := &agentv1.AgentMessage{
+			MessageId: uuid.NewString(),
+			Payload:   &agentv1.AgentMessage_NodeJobEvent{NodeJobEvent: ev},
+		}
+		if err := m.Send(ctx, msg); err != nil {
+			m.log.Err(err).Warn("failed to send node job event",
+				logger.F("job_id", ev.GetJobId()), logger.F("phase", ev.GetPhase().String()))
+		}
+	})
 }
 
 // reconcileWatchConfig maps every WatcherConfig.Resources entry across every
