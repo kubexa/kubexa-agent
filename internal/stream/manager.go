@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,6 +30,20 @@ const (
 	defaultSendChannelSize = 256
 	handshakeMsgTimeout    = 10 * time.Second
 )
+
+// nodeJobRetention is how long the stream manager keeps a node job's latest
+// event after handleNodeJob's emit closure last recorded it, so a reconnect
+// can re-announce it. Matches the window the gateway keeps a terminal
+// snapshot for, so a re-announcement is never stale enough to be pointless.
+const nodeJobRetention = 10 * time.Minute
+
+// nodeJobRetained is one job's latest NodeJobEvent, and when it was
+// recorded -- used both to expire it and to order a re-announcement
+// oldest-updated first.
+type nodeJobRetained struct {
+	ev *agentv1.NodeJobEvent
+	at time.Time
+}
 
 // ErrSendQueueFull is returned when the internal send buffer is saturated.
 var ErrSendQueueFull = errors.New("stream send queue full")
@@ -174,6 +189,23 @@ type streamManager struct {
 	// dropped and the handshake advertises node_ops=false.
 	nodeJobs NodeJobResponder
 
+	// nodeJobLast retains the latest NodeJobEvent per job id, recorded by
+	// handleNodeJob's emit closure before it ever tries to send. A stream can
+	// die without this side noticing (Send "succeeds" into a doomed stream --
+	// see handleNodeJob's doc), so the event that closure just sent may never
+	// have reached the gateway; reannounceNodeJobs resends what is retained
+	// here on the next accepted handshake. Guarded by nodeJobMu.
+	nodeJobMu   sync.Mutex
+	nodeJobLast map[string]nodeJobRetained
+
+	// nodeJobClock and nodeJobRetention back the expiry check above. Fields
+	// rather than time.Now and the nodeJobRetention const directly so a test
+	// can inject a fake clock and a short window instead of sleeping for real
+	// minutes. Set to their real defaults in New and read-only after that,
+	// except in tests.
+	nodeJobClock     func() time.Time
+	nodeJobRetention time.Duration
+
 	// scrapeHealth supplies per-kind scrape health for the heartbeat. Set
 	// once at construction and read-only afterward. Nil is valid — an agent
 	// with metrics collection disabled reports no scrape_targets at all,
@@ -311,6 +343,9 @@ func New(
 		rules:             rules,
 		counters:          counters,
 		ackCh:             make(chan []string, 64),
+		nodeJobLast:       make(map[string]nodeJobRetained),
+		nodeJobClock:      time.Now,
+		nodeJobRetention:  nodeJobRetention,
 	}
 	// The manager is the store's only writer and Set panics on a nil receiver,
 	// so a caller that passes none gets a private store rather than a crash on
@@ -421,6 +456,7 @@ func (m *streamManager) Run(ctx context.Context) error {
 		stalled = false
 		m.transition(StateReady, "stream ready", nil)
 
+		m.reannounceNodeJobs()
 		m.startSessionWorkers(sessionCtx, stream)
 
 		err = m.waitSession(ctx)
@@ -1233,13 +1269,21 @@ func (m *streamManager) handleMutation(ctx context.Context, req *agentv1.Mutatio
 // The emit closure deliberately does NOT carry the session ctx: a drain
 // outlives the stream that started it (nodeops.Engine.Start's doc), and an
 // event produced after this session ended must still be offered to
-// whatever stream is up now. Send fails when nothing is; that is logged and
-// dropped -- the gateway keeps only the latest snapshot anyway.
+// whatever stream is up now. Before it tries, the closure records the
+// snapshot in nodeJobLast, because Send can "succeed" into a stream that is
+// already dead but not yet known to be: a gRPC stream write can be accepted
+// locally before the peer's absence is detected, so this event may never
+// reach the gateway even though Send reports no error. Retaining it here is
+// what lets reannounceNodeJobs re-send it -- for free, since the gateway
+// keeps only the latest snapshot per job and drops duplicates by content --
+// the moment a reconnect happens, instead of relying on Send's own success.
 func (m *streamManager) handleNodeJob(req *agentv1.NodeJobRequest) {
 	if m.nodeJobs == nil || req == nil {
 		return
 	}
 	m.nodeJobs.Start(req, func(ev *agentv1.NodeJobEvent) {
+		m.retainNodeJobEvent(ev)
+
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		msg := &agentv1.AgentMessage{
@@ -1251,6 +1295,78 @@ func (m *streamManager) handleNodeJob(req *agentv1.NodeJobRequest) {
 				logger.F("job_id", ev.GetJobId()), logger.F("phase", ev.GetPhase().String()))
 		}
 	})
+}
+
+// retainNodeJobEvent stores ev as its job's latest snapshot, keyed by job
+// id, and sweeps expired entries while it already holds the lock. Called by
+// handleNodeJob's emit closure before that closure ever attempts to send.
+func (m *streamManager) retainNodeJobEvent(ev *agentv1.NodeJobEvent) {
+	if ev == nil || ev.GetJobId() == "" {
+		return
+	}
+	now := m.nodeJobClock()
+	m.nodeJobMu.Lock()
+	defer m.nodeJobMu.Unlock()
+	m.nodeJobLast[ev.GetJobId()] = nodeJobRetained{ev: ev, at: now}
+	m.sweepNodeJobLastLocked(now)
+}
+
+// sweepNodeJobLastLocked drops retained snapshots older than
+// nodeJobRetention. Callers must hold nodeJobMu.
+func (m *streamManager) sweepNodeJobLastLocked(now time.Time) {
+	for id, r := range m.nodeJobLast {
+		if now.Sub(r.at) > m.nodeJobRetention {
+			delete(m.nodeJobLast, id)
+		}
+	}
+}
+
+// reannounceNodeJobs re-sends every retained node job snapshot on a freshly
+// accepted stream, oldest-updated first, using the same AgentMessage shape
+// and per-send timeout handleNodeJob's emit closure uses. It is what
+// recovers an event that a previous, already-dead stream swallowed (see
+// handleNodeJob's doc): the gateway keeps only the latest snapshot per job
+// and drops duplicates by content, so resending here is free and
+// idempotent whether or not the earlier send actually landed.
+//
+// A send failure is logged at Debug and the snapshot stays retained -- the
+// next reconnect tries again -- rather than at Warn, because losing a
+// re-announcement to a stream that is itself about to be torn down (the
+// caller is still inside the connect path) is the expected case, not an
+// operational surprise.
+func (m *streamManager) reannounceNodeJobs() {
+	now := m.nodeJobClock()
+	m.nodeJobMu.Lock()
+	m.sweepNodeJobLastLocked(now)
+	retained := make([]nodeJobRetained, 0, len(m.nodeJobLast))
+	for _, r := range m.nodeJobLast {
+		retained = append(retained, r)
+	}
+	m.nodeJobMu.Unlock()
+	if len(retained) == 0 {
+		return
+	}
+	sort.Slice(retained, func(i, j int) bool { return retained[i].at.Before(retained[j].at) })
+
+	sent := 0
+	for _, r := range retained {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		msg := &agentv1.AgentMessage{
+			MessageId: uuid.NewString(),
+			Payload:   &agentv1.AgentMessage_NodeJobEvent{NodeJobEvent: r.ev},
+		}
+		err := m.Send(ctx, msg)
+		cancel()
+		if err != nil {
+			m.log.Err(err).Debug("failed to re-announce node job snapshot",
+				logger.F("job_id", r.ev.GetJobId()))
+			continue
+		}
+		sent++
+	}
+	if sent > 0 {
+		m.log.Info("re-announced node job snapshots", logger.F("count", sent))
+	}
 }
 
 // reconcileWatchConfig maps every WatcherConfig.Resources entry across every
