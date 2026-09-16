@@ -40,11 +40,22 @@ type Policy struct {
 // an invalid rule is still an error here: the caller decides whether that is
 // fatal (enabled) or a warning (disabled), as cmd/agent/main.go does for
 // mutate.rules.
+//
+// A zero-valued NodeMutateConfig (no field set at all) is the ABSENT case,
+// not a disabled-but-configured one: most agents never mention mutate.node
+// in their config, and that must compile to a denying policy silently, not
+// to a validation error (empty verbs) the caller logs as a warning about an
+// "invalid rule" nobody wrote. A section with ANY field set still validates
+// unconditionally.
 func Compile(root *config.Config) (*Policy, error) {
 	if root == nil {
 		return &Policy{}, nil
 	}
-	if violations := config.ValidateNodeMutateRules(root.Mutate.Node); len(violations) > 0 {
+	n := root.Mutate.Node
+	if n.Enabled == nil && len(n.Nodes) == 0 && len(n.Verbs) == 0 && n.MaxTimeoutSec == 0 {
+		return &Policy{}, nil
+	}
+	if violations := config.ValidateNodeMutateRules(n); len(violations) > 0 {
 		return nil, errors.New("mutate.node: " + strings.Join(violations, "; "))
 	}
 	s := root.MutateNodeSettings()
