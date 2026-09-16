@@ -78,6 +78,48 @@ func (c *Config) QueryRedactSecrets() bool {
 // mirrors are still distinguishable from one another.
 const metricsUsageRuleID = "kubexa-usage-metrics"
 
+// namespaceDiscoveryRuleID names the one rule QueryRules appends to every
+// effective set regardless of what the owner wrote: list and get on core
+// namespaces, cluster-wide, no selectors.
+//
+// The chart's ClusterRole already grants namespaces unconditionally under
+// "cluster identity and discovery", so this widens nothing at the API
+// server. What it closes is a gap between that grant and the policy: a
+// default install inherits collect.state.rules, which name pods, services,
+// deployments and secrets and never namespaces, so the app's namespace
+// picker -- a live LIST of namespaces, so that an empty namespace is still
+// selectable -- answered POLICY_DENIED on every load of every default
+// install, and the picker silently fell back to the stored projection's
+// subset.
+//
+// A namespace object carries a name, labels, annotations and a phase --
+// nothing that leaves the cluster here that the stored projection was not
+// already naming.
+//
+// It is appended only when no owner rule already targets namespaces (a
+// wildcard counts). An owner who wrote one -- say `names: [team-*]` --
+// owns the whole answer: under Decide's first-match-wins a GET for a
+// namespace outside that pattern falls through the owner's rule, and an
+// implicit rule behind it would then allow exactly what the owner
+// narrowed. So the owner's rule is the only rule, and the default install
+// that never wrote one gets discovery.
+const namespaceDiscoveryRuleID = "kubexa-namespace-discovery"
+
+var coreNamespacesGVR = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+
+func withNamespaceDiscovery(rules []QueryRule) []QueryRule {
+	for _, r := range rules {
+		if ruleTargets(r.Resources, coreNamespacesGVR) {
+			return rules
+		}
+	}
+	return append(rules, QueryRule{
+		ID:        namespaceDiscoveryRuleID,
+		Resources: []string{"namespaces"},
+		Verbs:     []string{"list", "get"},
+	})
+}
+
 // ResourceWildcard is the one entry a query rule's Resources may carry that is
 // not a resource name: it permits every group/version/resource, CRDs included.
 //
@@ -252,7 +294,9 @@ func metricsUsageRules(rules []QueryRule) []QueryRule {
 // otherwise collect.state.rules converted rule for rule -- plus, in both
 // cases, a metrics.k8s.io mirror of every rule that permits listing pods or
 // nodes, so live queries can answer the cpu/memory columns without widening
-// what the owner already granted.
+// what the owner already granted, and -- unless the owner wrote a rule for
+// namespaces -- the namespace discovery rule last (see
+// namespaceDiscoveryRuleID).
 //
 // An inherited rule carries no Verbs, which means both list and get -- the
 // same access the streaming path already had to those resources. Widening is
@@ -264,7 +308,8 @@ func (c *Config) QueryRules() []QueryRule {
 	if len(c.Query.Rules) > 0 {
 		out := make([]QueryRule, len(c.Query.Rules))
 		copy(out, c.Query.Rules)
-		return append(out, metricsUsageRules(c.Query.Rules)...)
+		out = append(out, metricsUsageRules(c.Query.Rules)...)
+		return withNamespaceDiscovery(out)
 	}
 	base := make([]QueryRule, 0, len(c.Collect.State.Rules))
 	for _, r := range c.Collect.State.Rules {
@@ -276,7 +321,8 @@ func (c *Config) QueryRules() []QueryRule {
 			FieldSelector: r.FieldSelector,
 		})
 	}
-	return append(base, metricsUsageRules(base)...)
+	base = append(base, metricsUsageRules(base)...)
+	return withNamespaceDiscovery(base)
 }
 
 // validateQuery returns one violation string per problem, matching the

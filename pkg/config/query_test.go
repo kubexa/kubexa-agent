@@ -22,7 +22,7 @@ collect:
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	rules := cfg.QueryRules()
+	rules := ownerRules(t, &cfg)
 	// +1 for the implicit metrics usage rule that QueryRules always appends.
 	if len(rules) != 2 {
 		t.Fatalf("got %d inherited rules, want 2 (the inherited rule plus the implicit metrics rule)", len(rules))
@@ -66,7 +66,7 @@ query:
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	rules := cfg.QueryRules()
+	rules := ownerRules(t, &cfg)
 	// +1 for the implicit metrics usage rule that QueryRules always appends.
 	if len(rules) != 2 || rules[0].Namespace != "prod" {
 		t.Fatalf("got %+v, want the query rule to replace the state rules", rules)
@@ -96,7 +96,7 @@ query:
 		t.Fatalf("unmarshal: %v", err)
 	}
 	// +1 for the implicit metrics usage rule that QueryRules always appends.
-	if got := cfg.QueryRules(); len(got) != 2 || got[0].Namespace != "stage" {
+	if got := ownerRules(t, &cfg); len(got) != 2 || got[0].Namespace != "stage" {
 		t.Errorf("rules = %+v, want the inherited state rule plus the implicit metrics rule", got)
 	}
 	if cfg.QueryRedactSecrets() {
@@ -208,7 +208,7 @@ func TestQueryRulesMirrorScopedOwnerRuleIntoOneMetricsRule(t *testing.T) {
 		LabelSelector: "app=be",
 	}}
 
-	rules := cfg.QueryRules()
+	rules := ownerRules(t, cfg)
 
 	// The owner's own rule must still be first; the mirror only adds.
 	if len(rules) != 2 || rules[0].ID != "be" {
@@ -243,7 +243,7 @@ func TestQueryRulesMirrorUnrestrictedRuleIntoPodsAndNodesMetricsRules(t *testing
 	cfg := &Config{}
 	cfg.Query.Rules = []QueryRule{{ID: "own", Resources: []string{"pods", "nodes"}}}
 
-	rules := cfg.QueryRules()
+	rules := ownerRules(t, cfg)
 
 	if len(rules) != 3 || rules[0].ID != "own" {
 		t.Fatalf("got %+v, want the owner's rule first plus two mirrors", rules)
@@ -276,7 +276,7 @@ func TestQueryRulesMirrorResourceAliasForms(t *testing.T) {
 		t.Run(alias, func(t *testing.T) {
 			cfg := &Config{}
 			cfg.Query.Rules = []QueryRule{{Resources: []string{alias}}}
-			rules := cfg.QueryRules()
+			rules := ownerRules(t, cfg)
 			if len(rules) != 2 || strings.Join(rules[1].Resources, ",") != "metrics.k8s.io/v1beta1/pods" {
 				t.Fatalf("got %+v, want the alias recognised and mirrored to metrics.k8s.io/v1beta1/pods", rules)
 			}
@@ -288,7 +288,7 @@ func TestQueryRulesGetOnlyRuleProducesNoMetricsMirror(t *testing.T) {
 	cfg := &Config{}
 	cfg.Query.Rules = []QueryRule{{Resources: []string{"pods"}, Verbs: []string{"get"}}}
 
-	rules := cfg.QueryRules()
+	rules := ownerRules(t, cfg)
 	if len(rules) != 1 {
 		t.Fatalf("got %+v, want no mirror: a get-only rule permits no listing for a metrics column to attach to", rules)
 	}
@@ -298,7 +298,7 @@ func TestQueryRulesFieldSelectorRuleProducesNoMetricsMirror(t *testing.T) {
 	cfg := &Config{}
 	cfg.Query.Rules = []QueryRule{{Resources: []string{"pods"}, FieldSelector: "spec.nodeName=x"}}
 
-	rules := cfg.QueryRules()
+	rules := ownerRules(t, cfg)
 	if len(rules) != 1 {
 		t.Fatalf("got %+v, want no mirror: metrics-server's PodMetrics fieldSelector accepts only "+
 			"metadata.name/metadata.namespace and hard-400s on anything else (verified against a live "+
@@ -323,7 +323,7 @@ func TestQueryRulesFieldSelectorRuleBlocksLaterBroaderRuleFromMirroring(t *testi
 		{ID: "b", Resources: []string{"pods"}},
 	}
 
-	rules := cfg.QueryRules()
+	rules := ownerRules(t, cfg)
 
 	for _, r := range rules {
 		if strings.HasPrefix(r.ID, metricsUsageRuleID) {
@@ -341,7 +341,7 @@ func TestQueryRulesUnparseableResourceEntryIsSkippedNotFatal(t *testing.T) {
 	cfg := &Config{}
 	cfg.Query.Rules = []QueryRule{{Resources: []string{"nonsense", "pods"}}}
 
-	rules := cfg.QueryRules()
+	rules := ownerRules(t, cfg)
 
 	var sawMirror bool
 	for _, r := range rules {
@@ -361,7 +361,7 @@ func TestQueryRulesUnrelatedResourceProducesNoMetricsMirror(t *testing.T) {
 	cfg := &Config{}
 	cfg.Query.Rules = []QueryRule{{Resources: []string{"services"}}}
 
-	rules := cfg.QueryRules()
+	rules := ownerRules(t, cfg)
 	if len(rules) != 1 {
 		t.Fatalf("got %+v, want no mirror for a rule that grants neither pods nor nodes", rules)
 	}
@@ -371,7 +371,7 @@ func TestQueryRulesMirrorInheritedStateRulesToo(t *testing.T) {
 	cfg := &Config{}
 	cfg.Collect.State.Rules = []StateNamespaceRule{{ID: "pods", Namespace: "stage", Resources: []string{"pods"}}}
 
-	rules := cfg.QueryRules()
+	rules := ownerRules(t, cfg)
 
 	// The inherited rule must still be there: the mirror only adds.
 	if len(rules) != 2 || rules[0].ID != "pods" {
@@ -468,7 +468,7 @@ query:
 	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	rules := cfg.QueryRules()
+	rules := cfg.QueryRules() // a wildcard targets namespaces, so no discovery rule either
 	if len(rules) != 1 {
 		t.Fatalf("got %d rules, want 1 (the wildcard alone, no mirror): %+v", len(rules), rules)
 	}
@@ -636,6 +636,78 @@ collect:
 			}
 			if !strings.Contains(err.Error(), spec) {
 				t.Errorf("violation = %q, want it to name %q", err.Error(), spec)
+			}
+		})
+	}
+}
+
+// ownerRules returns the effective rules minus the namespace discovery rule
+// QueryRules always appends last, so the tests above can count what the
+// owner wrote plus its metrics mirrors without every count carrying a +1.
+func ownerRules(t *testing.T, cfg *Config) []QueryRule {
+	t.Helper()
+	rules := cfg.QueryRules()
+	if len(rules) == 0 || rules[len(rules)-1].ID != namespaceDiscoveryRuleID {
+		t.Fatalf("got %+v, want the namespace discovery rule last", rules)
+	}
+	return rules[:len(rules)-1]
+}
+
+func TestQueryRulesAlwaysPermitNamespaceDiscoveryLast(t *testing.T) {
+	// The chart's ClusterRole grants namespaces unconditionally ("cluster
+	// identity and discovery"), and the app's namespace picker lists them
+	// live. A default install inherits collect.state.rules, which name
+	// pods/services/deployments/secrets and never namespaces, so without an
+	// implicit grant every default install answered POLICY_DENIED to the
+	// picker on every load.
+	for name, cfg := range map[string]*Config{
+		"inherited": func() *Config {
+			c := &Config{}
+			c.Collect.State.Rules = []StateNamespaceRule{{ID: "core", Resources: []string{"pods"}}}
+			return c
+		}(),
+		"explicit": func() *Config {
+			c := &Config{}
+			c.Query.Rules = []QueryRule{{ID: "svc", Namespace: "prod", Resources: []string{"services"}}}
+			return c
+		}(),
+		"empty": &Config{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rules := cfg.QueryRules()
+			if len(rules) == 0 {
+				t.Fatal("got no rules, want at least the namespace discovery rule")
+			}
+			last := rules[len(rules)-1]
+			if last.ID != namespaceDiscoveryRuleID {
+				t.Fatalf("last rule = %+v, want the namespace discovery rule (owner rules must come first)", last)
+			}
+			if last.Namespace != "" || len(last.Names) != 0 || last.LabelSelector != "" || last.FieldSelector != "" {
+				t.Errorf("discovery rule = %+v, want cluster-wide with no selectors", last)
+			}
+			if strings.Join(last.Resources, ",") != "namespaces" {
+				t.Errorf("resources = %v, want [namespaces]", last.Resources)
+			}
+			if strings.Join(last.Verbs, ",") != "list,get" {
+				t.Errorf("verbs = %v, want [list get]", last.Verbs)
+			}
+		})
+	}
+}
+
+func TestQueryRulesSkipNamespaceDiscoveryWhenOwnerRuleTargetsNamespaces(t *testing.T) {
+	for name, resources := range map[string][]string{
+		"explicit": {"namespaces"},
+		"alias":    {"v1/namespaces"},
+		"wildcard": {"*"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.Query.Rules = []QueryRule{{ID: "own", Resources: resources, Names: []string{"team-*"}}}
+			for _, r := range cfg.QueryRules() {
+				if r.ID == namespaceDiscoveryRuleID {
+					t.Fatalf("got %+v, want no discovery rule behind the owner's own", r)
+				}
 			}
 		})
 	}
