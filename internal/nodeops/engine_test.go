@@ -427,3 +427,53 @@ func TestRBACDeniedNamesTheVerb(t *testing.T) {
 		t.Fatalf("message %q does not name the verb", ev.GetError().GetMessage())
 	}
 }
+
+// TestContextCancelDuringEvictionEndsCancelledNotFailed guards Finding 1's
+// first bullet: a Cancel (or the deadline) firing WHILE an eviction call is
+// in flight must end the job CANCELLED, and must never mark the
+// still-present pod FAILED for what is really a cancellation. The fake
+// clientset ignores ctx entirely, so the eviction reactor cancels the
+// engine itself and then hands back the error a real client would return
+// once its request context was cancelled mid-flight.
+func TestContextCancelDuringEvictionEndsCancelledNotFailed(t *testing.T) {
+	cs := fake.NewSimpleClientset(nodeW1(), onNode("app", "slow", func(p *corev1.Pod) { p.OwnerReferences = ctrl("ReplicaSet") }))
+	e := newEngine(t, cs, enabledPolicy(t, "drain"))
+	evictionReactor(cs, func(string, string, *metav1.DeleteOptions) error {
+		e.Cancel("j1")
+		return context.Canceled
+	})
+	r := newRecorder()
+	e.Start(drainReq("j1", nil), r.emit)
+	ev := r.terminal(t)
+	if ev.GetPhase() != agentv1.NodeJobPhase_NODE_JOB_PHASE_CANCELLED {
+		t.Fatalf("phase = %v, want CANCELLED: %+v", ev.GetPhase(), ev)
+	}
+	if p := podRow(ev, "app", "slow"); p.GetState() == agentv1.NodeJobPodState_NODE_JOB_POD_STATE_FAILED {
+		t.Fatalf("pod marked FAILED for a context cancellation: %+v", p)
+	}
+}
+
+// TestContextDeadlineBeforeAcceptedEndsTimeoutNotInternal guards Finding
+// 1's second bullet: the deadline firing before ACCEPTED (here, during the
+// pods List call inside runDrain) must end the job FAILED/TIMEOUT, not
+// REFUSED/INTERNAL. The reactor sleeps past MinTimeout so the job's REAL
+// context (from context.WithTimeout in Start) is genuinely expired by the
+// time it returns -- ctx.Err() must be the thing that decides this, not
+// the shape of the error the fake handed back.
+func TestContextDeadlineBeforeAcceptedEndsTimeoutNotInternal(t *testing.T) {
+	cs := fake.NewSimpleClientset(nodeW1(), onNode("app", "x", func(p *corev1.Pod) { p.OwnerReferences = ctrl("ReplicaSet") }))
+	cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		time.Sleep(150 * time.Millisecond) // outlast the floored MinTimeout (50ms)
+		return true, nil, context.DeadlineExceeded
+	})
+	e := newEngine(t, cs, enabledPolicy(t, "drain"))
+	r := newRecorder()
+	// TimeoutSec 0 floors to MinTimeout (50ms) via timeoutFor -- TimeoutSec
+	// 1 would set a real 1s deadline (1s is not < MinTimeout, so it is
+	// NOT floored), which the reactor's sleep would need to outlast too.
+	e.Start(drainReq("j1", func(d *agentv1.DrainOptions) { d.TimeoutSec = 0 }), r.emit)
+	ev := r.terminal(t)
+	if ev.GetPhase() != agentv1.NodeJobPhase_NODE_JOB_PHASE_FAILED || ev.GetError().GetCode() != agentv1.NodeJobErrorCode_NODE_JOB_ERROR_TIMEOUT {
+		t.Fatalf("deadline before accepted: %+v", ev)
+	}
+}

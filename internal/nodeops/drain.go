@@ -23,6 +23,9 @@ func (e *Engine) runDrain(ctx context.Context, id, node string, d *agentv1.Drain
 
 	list, err := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{FieldSelector: "spec.nodeName=" + node})
 	if err != nil {
+		if ctx.Err() != nil {
+			return endEarly(s, ctx.Err())
+		}
 		code, msg := codeFor(err, "pods list")
 		return s.refused(code, msg)
 	}
@@ -41,6 +44,9 @@ func (e *Engine) runDrain(ctx context.Context, id, node string, d *agentv1.Drain
 	emit(s.event(agentv1.NodeJobPhase_NODE_JOB_PHASE_ACCEPTED, fmt.Sprintf("%d pods on the node", len(s.pods))))
 
 	if _, err := SetUnschedulable(ctx, cs, node, true, dryRun); err != nil {
+		if ctx.Err() != nil {
+			return endEarly(s, ctx.Err())
+		}
 		code, msg := codeFor(err, "nodes patch")
 		return s.failed(code, msg)
 	}
@@ -62,13 +68,21 @@ func (e *Engine) runDrain(ctx context.Context, id, node string, d *agentv1.Drain
 			key := p.Namespace + "/" + p.Name
 			switch p.State {
 			case agentv1.NodeJobPodState_NODE_JOB_POD_STATE_PENDING, agentv1.NodeJobPodState_NODE_JOB_POD_STATE_BLOCKED:
-				if p.State == agentv1.NodeJobPodState_NODE_JOB_POD_STATE_BLOCKED && now.Before(nextRetry[key]) {
+				// A dry run's BLOCKED is the answer, not a wait (see the
+				// "remaining" count below) -- it must never be re-attempted,
+				// regardless of nextRetry timing.
+				if p.State == agentv1.NodeJobPodState_NODE_JOB_POD_STATE_BLOCKED && (dryRun || now.Before(nextRetry[key])) {
 					continue
 				}
 				err := evict(ctx, cs, p.Namespace, p.Name, grace, dryRun)
 				switch {
 				case err == nil:
 					p.State, p.Reason = agentv1.NodeJobPodState_NODE_JOB_POD_STATE_EVICTING, ""
+				case ctx.Err() != nil:
+					// Cancel or the deadline fired during this call. Leave
+					// the pod's state untouched -- the ctx.Err() check
+					// below ends the job CANCELLED/TIMEOUT; marking a
+					// still-present pod FAILED here would be wrong.
 				case isPDBBlocked(err):
 					p.State, p.Reason = agentv1.NodeJobPodState_NODE_JOB_POD_STATE_BLOCKED, ReasonPDB
 					nextRetry[key] = now.Add(e.opts.RetryInterval)
