@@ -181,6 +181,12 @@ func (e *Engine) timeoutFor(verb Verb, d *agentv1.DrainOptions) time.Duration {
 func (e *Engine) run(ctx context.Context, verb Verb, req *agentv1.NodeJobRequest, emit Emitter) *agentv1.NodeJobEvent {
 	id, node := req.GetJobId(), req.GetNode()
 	if _, err := e.opts.Clientset.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{}); err != nil {
+		// Cancel or the deadline firing during this call must end the job
+		// CANCELLED/TIMEOUT, not REFUSED/INTERNAL -- no snapshot exists yet
+		// this early, so build one just for endEarly.
+		if ctx.Err() != nil {
+			return endEarly(&snapshot{id: id}, ctx.Err())
+		}
 		code, msg := codeFor(err, "nodes get")
 		return refused(id, code, msg)
 	}
@@ -199,6 +205,9 @@ func (e *Engine) runCordon(ctx context.Context, id, node string, cordon bool, em
 	emit(s.event(agentv1.NodeJobPhase_NODE_JOB_PHASE_ACCEPTED, ""))
 	changed, err := SetUnschedulable(ctx, e.opts.Clientset, node, cordon, false)
 	if err != nil {
+		if ctx.Err() != nil {
+			return endEarly(s, ctx.Err())
+		}
 		code, msg := codeFor(err, "nodes patch")
 		return s.failed(code, msg)
 	}
