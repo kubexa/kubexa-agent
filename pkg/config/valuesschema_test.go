@@ -454,6 +454,10 @@ func chartOnlyKeys() map[string]string {
 		// helperReadyTimeoutSec -- are each paired and type-checked
 		// individually via renderedPairs.
 		"exec.node": "a nested block name (NodeExecConfig), not a scalar; its own fields are each checked",
+		// Same shape again: a nested block name (NodeMutateConfig), not a
+		// scalar. Its own leaves -- enabled, nodes, verbs, maxTimeoutSec --
+		// are each paired and type-checked individually via renderedPairs.
+		"mutate.node": "a nested block name (NodeMutateConfig), not a scalar; its own fields are each checked",
 	}
 }
 

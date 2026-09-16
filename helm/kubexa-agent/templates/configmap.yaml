@@ -182,6 +182,17 @@ data:
       rules:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      node:
+        enabled: {{ .Values.mutate.node.enabled }}
+        {{- with .Values.mutate.node.nodes }}
+        nodes:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.mutate.node.verbs }}
+        verbs:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        max_timeout_sec: {{ .Values.mutate.node.maxTimeoutSec }}
 
     exec:
       pod:

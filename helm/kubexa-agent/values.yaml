@@ -47,6 +47,14 @@ rbac:
   # on the node: leave this false unless you mean it. If exec.node.namespace
   # names another namespace, write that Role yourself.
   nodeShell: false
+  # nodeOps grants what a node job (cordon / uncordon / drain) needs and
+  # nothing the read block does not already say: nodes get/patch
+  # (spec.unschedulable), pods list in EVERY namespace (the pods on the node,
+  # by spec.nodeName -- deliberately not derived from query rules, which may
+  # exclude namespaces a drain must still see) and pods/eviction create. NOT
+  # derived from mutate.node, for the reason rbac.write gives. A drain evicts
+  # every pod on a node: leave this false unless you mean it.
+  nodeOps: false
   # Extra ClusterRole rules appended to the generated role.
   extraRules: []
   # The generated ClusterRole grants read access to the resource block below
@@ -388,6 +396,21 @@ mutate:
   #    resources: [deployments, statefulsets]
   #    names: ["api-*"]
   #    verbs: [patch, restart, scale]
+  # Node jobs: cordon, uncordon, drain. Its own gate -- mutate.enabled and
+  # mutate.rules above do not switch it on, and a `resources: [nodes]` rule
+  # does not grant cordon. Enabling it here is not enough: the ServiceAccount
+  # needs rbac.nodeOps, and the platform its own cluster:node_write
+  # permission at write level on the cluster.
+  node:
+    enabled: false
+    # Node-name patterns, trailing "*" as everywhere else. An empty list
+    # matches no node.
+    nodes: ["*"]
+    # Subset of [cordon, uncordon, drain]. An empty list grants nothing and
+    # is refused at startup.
+    verbs: [cordon, uncordon, drain]
+    # Cap on a drain's requested timeout, seconds. [30, 86400].
+    maxTimeoutSec: 1800
 
 # Interactive console sessions the Kubexa platform may open in this cluster.
 # Disabled by default. Enabling it here is NOT enough: the ServiceAccount also
