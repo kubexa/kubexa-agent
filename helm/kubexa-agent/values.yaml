@@ -153,7 +153,10 @@ agent:
 gateway:
   # Full host:port address. When set, overrides gateway.host/port.
   address: ""
-  host: gateway.kubexa.dev
+  # The hosted platform's gateway. A self-hosted platform sets this to its
+  # own agentserver ingress host; an agent left on the default dials
+  # kubexa.dev, not your install.
+  host: agents.kubexa.dev
   port: 443
   tls: true
   insecureSkipVerify: false
