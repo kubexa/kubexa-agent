@@ -1885,6 +1885,18 @@ func (m *streamManager) EffectiveConfig() *config.Config {
 	return m.cfg
 }
 
+// SetOnEffectiveConfig registers the callback applyManaged invokes with the
+// newly-applied effective config after each managed-block set. New returns
+// Manager, the narrow interface used everywhere the manager only needs to
+// run and send -- it deliberately does not expose the field this sets. A
+// caller that needs the hook (cmd/agent, wiring the live query policy swap)
+// type-asserts its Manager value to the small interface this method
+// satisfies. fn may be nil, which leaves the swap unwired -- the same as
+// never calling this at all.
+func (m *streamManager) SetOnEffectiveConfig(fn func(*config.Config)) {
+	m.onEffectiveConfig = fn
+}
+
 // applyManaged overlays a complete managed-block set. A nil set means the
 // sender said nothing about managed blocks and the current overlay stands --
 // that is ConfigSnapshot's patch rule, and it is what keeps the clusterwatch
