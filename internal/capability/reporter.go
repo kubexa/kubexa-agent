@@ -111,6 +111,16 @@ type Reporter struct {
 
 	state sweepState
 
+	// nudge carries a request to sweep on the very next cycle, bypassing the
+	// fingerprint/interval check in needsSweep. Buffered size 1 with a
+	// non-blocking send in RequestSweep, so a burst of pushes collapses into
+	// at most one extra sweep and a caller is never blocked by a sweep
+	// already in flight. Deliberately no minimum interval between nudged
+	// sweeps: config pushes are human-driven from a screen, and this
+	// buffered-1 send already collapses a burst arriving while a sweep runs
+	// -- do not "fix" that by adding one.
+	nudge chan struct{}
+
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
@@ -124,12 +134,16 @@ type sweepState struct {
 	ran             bool
 }
 
-// needsSweep is true on the first run, whenever the set of GVRs changed, and
-// whenever the safety interval has elapsed. The last case is not redundant:
-// an operator widening the ClusterRole changes no GVR, so a fingerprint-only
-// rule would never notice the new grant.
-func (s sweepState) needsSweep(fingerprint string, now time.Time, safety time.Duration) bool {
-	if !s.ran {
+// needsSweep is true on the first run, whenever the set of GVRs changed,
+// whenever the safety interval has elapsed, or whenever force is set. The
+// safety-interval case is not redundant with the fingerprint check: an
+// operator widening the ClusterRole changes no GVR, so a fingerprint-only
+// rule would never notice the new grant. force is a plain parameter rather
+// than a field on sweepState so a nudge from another goroutine never has to
+// touch this value -- sweepState is read and written only inside refresh, on
+// the reporter's own goroutine.
+func (s sweepState) needsSweep(fingerprint string, now time.Time, safety time.Duration, force bool) bool {
+	if force || !s.ran {
 		return true
 	}
 	if fingerprint != s.lastFingerprint {
@@ -163,6 +177,7 @@ func NewReporter(opts Options) (*Reporter, error) {
 		execPolicy:        opts.ExecPolicy,
 		nodeExecPolicy:    opts.NodeExecPolicy,
 		helperNamespace:   opts.HelperNamespace,
+		nudge:             make(chan struct{}, 1),
 	}
 	if r.discoveryInterval <= 0 {
 		r.discoveryInterval = defaultDiscoveryInterval
@@ -175,6 +190,20 @@ func NewReporter(opts Options) (*Reporter, error) {
 
 // Name identifies this component in the agent's collector registry.
 func (r *Reporter) Name() string { return componentName }
+
+// RequestSweep asks the reporter to publish a fresh catalog on its next
+// cycle rather than waiting out the discovery tick or the hourly safety
+// interval. Safe to call from any goroutine, including before Start or
+// after Stop -- the send is non-blocking either way, and any nudge beyond
+// the one the buffer already holds is dropped rather than queued into an
+// unbounded backlog: the catalog a second, third, or later nudge would
+// produce is the same catalog the one already pending will produce.
+func (r *Reporter) RequestSweep() {
+	select {
+	case r.nudge <- struct{}{}:
+	default:
+	}
+}
 
 // Start runs an immediate refresh, then one every discovery interval.
 func (r *Reporter) Start(ctx context.Context) error {
@@ -190,7 +219,7 @@ func (r *Reporter) Start(ctx context.Context) error {
 		// The first refresh stands in for "on handshake": the agent connects,
 		// collectors start, and the catalog follows without the connection
 		// having waited on a several-hundred-GVR sweep.
-		r.refresh(runCtx)
+		r.refresh(runCtx, false)
 
 		ticker := time.NewTicker(r.discoveryInterval)
 		defer ticker.Stop()
@@ -199,7 +228,14 @@ func (r *Reporter) Start(ctx context.Context) error {
 			case <-runCtx.Done():
 				return
 			case <-ticker.C:
-				r.refresh(runCtx)
+				r.refresh(runCtx, false)
+			case <-r.nudge:
+				// A policy swap wants the explorer catalog current now, not
+				// at the next tick or the hourly safety sweep. force=true
+				// bypasses needsSweep's fingerprint/interval check for this
+				// one call only -- it does not touch sweepState, which stays
+				// a value read and written solely inside refresh.
+				r.refresh(runCtx, true)
 			}
 		}
 	}()
@@ -233,7 +269,7 @@ func (r *Reporter) Stop(ctx context.Context) error {
 	}
 }
 
-func (r *Reporter) refresh(ctx context.Context) {
+func (r *Reporter) refresh(ctx context.Context, force bool) {
 	gvrs, failedGroups, err := Discover(r.cs.Discovery())
 	if err != nil {
 		r.log.Error("capability discovery failed", logger.F("error", err.Error()))
@@ -248,7 +284,7 @@ func (r *Reporter) refresh(ctx context.Context) {
 
 	fingerprint := Fingerprint(gvrs)
 	now := time.Now().UTC()
-	if !r.state.needsSweep(fingerprint, now, r.sweepInterval) {
+	if !r.state.needsSweep(fingerprint, now, r.sweepInterval, force) {
 		return
 	}
 

@@ -70,6 +70,17 @@ type effectiveConfigSetter interface {
 	SetOnEffectiveConfig(func(*config.Config) ([]string, error))
 }
 
+// sweepRequester is the narrow, structural view of the capability reporter
+// the swap callback needs: *capability.Reporter, when the state collector is
+// enabled and buildCollectors constructs one. Collector itself does not
+// expose RequestSweep -- log and metrics collectors have no sweep to force
+// -- so the callback finds it by asserting each of the already-built
+// collectors against this interface instead of buildCollectors returning the
+// reporter by name.
+type sweepRequester interface {
+	RequestSweep()
+}
+
 // logQueryPolicyWarnings logs the query policy's compile-time warnings, if
 // any. It is called both after the boot-time compile and after every live
 // swap so the two paths report identically -- see policy.NewHolder and
@@ -446,6 +457,18 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		return fmt.Errorf("stream manager: %T does not expose the effective-config hook; "+
 			"platform-managed config would never apply to the live query policy", streamMgr)
 	}
+	// The capability reporter appears as a Collector only when
+	// cfg.Collect.State.Enabled built one (see buildCollectors); capSweeper
+	// stays nil when it did not, in which case a swap below has nothing to
+	// nudge.
+	var capSweeper sweepRequester
+	for _, coll := range collectors {
+		if sweeper, ok := coll.(sweepRequester); ok {
+			capSweeper = sweeper
+			break
+		}
+	}
+
 	s.SetOnEffectiveConfig(func(effective *config.Config) ([]string, error) {
 		warnings, err := queryPolicy.Swap(effective)
 		if err != nil {
@@ -465,6 +488,15 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 			return nil, err
 		}
 		logQueryPolicyWarnings(log, warnings)
+		if capSweeper != nil {
+			// Otherwise the explorer catalog waits out the reporter's own
+			// discovery tick (5m) or safety sweep (1h) before it reflects
+			// this swap, even though the executor already answers the new
+			// policy on its very next request. Only reached on a
+			// successful Swap above: a rejected config changed no policy,
+			// so there is nothing new for the catalog to report.
+			capSweeper.RequestSweep()
+		}
 		return warnings, nil
 	})
 

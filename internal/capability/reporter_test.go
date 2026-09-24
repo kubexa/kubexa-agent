@@ -30,6 +30,29 @@ func (w *captureWriter) all() []*agentv1.AgentMessage {
 	return append([]*agentv1.AgentMessage{}, w.msgs...)
 }
 
+// notifyingWriter is a captureWriter that also signals every Write, so a test
+// can wait on the actual publish instead of sleeping a fixed duration and
+// hoping one landed inside it.
+type notifyingWriter struct {
+	captureWriter
+	published chan struct{}
+}
+
+func newNotifyingWriter() *notifyingWriter {
+	return &notifyingWriter{published: make(chan struct{}, 8)}
+}
+
+func (w *notifyingWriter) Write(ctx context.Context, msg *agentv1.AgentMessage) error {
+	if err := w.captureWriter.Write(ctx, msg); err != nil {
+		return err
+	}
+	select {
+	case w.published <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
 type failingWriter struct{ calls int }
 
 func (w *failingWriter) Write(context.Context, *agentv1.AgentMessage) error {
@@ -76,7 +99,7 @@ func TestNeedsSweepSkipsWhenFingerprintUnchanged(t *testing.T) {
 	now := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
 	s := sweepState{lastFingerprint: "sha256:a", lastSweep: now, ran: true}
 
-	if s.needsSweep("sha256:a", now.Add(5*time.Minute), time.Hour) {
+	if s.needsSweep("sha256:a", now.Add(5*time.Minute), time.Hour, false) {
 		t.Fatal("needsSweep = true for an unchanged fingerprint inside the safety interval")
 	}
 }
@@ -85,7 +108,7 @@ func TestNeedsSweepOnFingerprintChange(t *testing.T) {
 	now := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
 	s := sweepState{lastFingerprint: "sha256:a", lastSweep: now}
 
-	if !s.needsSweep("sha256:b", now.Add(time.Minute), time.Hour) {
+	if !s.needsSweep("sha256:b", now.Add(time.Minute), time.Hour, false) {
 		t.Fatal("needsSweep = false after the GVR set changed")
 	}
 }
@@ -97,7 +120,7 @@ func TestNeedsSweepAfterSafetyInterval(t *testing.T) {
 	now := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
 	s := sweepState{lastFingerprint: "sha256:a", lastSweep: now}
 
-	if !s.needsSweep("sha256:a", now.Add(61*time.Minute), time.Hour) {
+	if !s.needsSweep("sha256:a", now.Add(61*time.Minute), time.Hour, false) {
 		t.Fatal("needsSweep = false past the safety interval with unchanged discovery")
 	}
 }
@@ -105,7 +128,7 @@ func TestNeedsSweepAfterSafetyInterval(t *testing.T) {
 // A never-run reporter always sweeps, whatever the fingerprint.
 func TestNeedsSweepOnFirstRun(t *testing.T) {
 	var s sweepState
-	if !s.needsSweep("sha256:a", time.Now(), time.Hour) {
+	if !s.needsSweep("sha256:a", time.Now(), time.Hour, false) {
 		t.Fatal("needsSweep = false on the first run")
 	}
 }
@@ -159,7 +182,7 @@ func TestFailedPublishLeavesSweepStateUnset(t *testing.T) {
 	if r.state.ran {
 		t.Fatal("state.ran = true after a failed publish; the next tick would not retry")
 	}
-	if !r.state.needsSweep("sha256:a", time.Now(), time.Hour) {
+	if !r.state.needsSweep("sha256:a", time.Now(), time.Hour, false) {
 		t.Fatal("needsSweep = false after a failed publish; the catalog would be stuck until the safety sweep")
 	}
 }
@@ -223,4 +246,97 @@ func TestStopReturnsContextErrorInsteadOfBlocking(t *testing.T) {
 
 	close(block)
 	r.wg.Wait()
+}
+
+// A nudge makes the next cycle sweep even though the fingerprint is unchanged
+// and the interval has not elapsed -- otherwise a policy swap is invisible to
+// the explorer for up to defaultSweepInterval. The discovery interval below
+// is set to an hour specifically so that only the nudge, never a tick, could
+// produce the second publish this test waits on.
+func TestRequestSweepForcesTheNextCycle(t *testing.T) {
+	w := newNotifyingWriter()
+	r, err := NewReporter(Options{
+		Clientset:         fake.NewSimpleClientset(),
+		Writer:            w,
+		DiscoveryInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewReporter: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+		defer stopCancel()
+		_ = r.Stop(stopCtx)
+	}()
+
+	// Wait for the initial, on-Start sweep before nudging, so the second
+	// publish we wait for below is unambiguously the nudge's doing.
+	select {
+	case <-w.published:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial sweep never published")
+	}
+
+	r.RequestSweep()
+
+	// The fingerprint has not changed and the next tick is an hour away, so
+	// nothing but the nudge can produce another publish inside this
+	// timeout. Waiting on the publish itself (rather than sleeping a fixed
+	// duration) is what actually proves the loop woke up, not just that a
+	// flag got set.
+	select {
+	case <-w.published:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RequestSweep did not force a prompt sweep; the explorer would lag a policy swap for up to the discovery interval")
+	}
+}
+
+// A nudge must not wedge: calling it with no cycle running (or in a burst)
+// must never block, and it must never grow an unbounded backlog -- a second
+// nudge arriving before the first is consumed collapses into the one sweep
+// already pending, per the buffered-size-1, non-blocking send RequestSweep
+// uses.
+func TestRequestSweepIsIdempotentAndNonBlocking(t *testing.T) {
+	r, err := NewReporter(Options{
+		Clientset: fake.NewSimpleClientset(),
+		Writer:    &captureWriter{},
+	})
+	if err != nil {
+		t.Fatalf("NewReporter: %v", err)
+	}
+
+	// No cycle is running (Start was never called). A burst of nudges must
+	// still return immediately rather than blocking on an unread channel.
+	done := make(chan struct{})
+	go func() {
+		r.RequestSweep()
+		r.RequestSweep()
+		r.RequestSweep()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RequestSweep blocked with no cycle running; a nudge must be dropped, not queued")
+	}
+
+	// However many times it was called, at most one nudge is pending: the
+	// burst collapsed into a single sweep instead of an unbounded backlog.
+	if n := len(r.nudge); n != 1 {
+		t.Fatalf("pending nudges = %d, want 1 (a burst must collapse, not queue)", n)
+	}
+
+	<-r.nudge
+	select {
+	case <-r.nudge:
+		t.Fatal("a second nudge was queued behind the first; RequestSweep must coalesce, not queue")
+	default:
+	}
 }
