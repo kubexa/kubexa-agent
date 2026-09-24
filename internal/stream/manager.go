@@ -164,14 +164,26 @@ type streamManager struct {
 	// cfg is never written after New, so it always stays available as the
 	// value a released block restores.
 	managed atomic.Pointer[managedState]
-	// onEffectiveConfig is called with the new effective config every time
-	// applyManaged installs one. A scalar field, not a registry: this
-	// codebase has already left two features inert behind a callback slot
-	// that kept only the last registration, so this field's singular name is
-	// the promise there is exactly one consumer. Task 4 sets it to swap the
-	// live query policy. Nil-checked -- most tests, and any build that never
-	// wires a consumer, leave it unset.
-	onEffectiveConfig func(*config.Config)
+	// onEffectiveConfig is called with each newly-applied effective config,
+	// before applyManaged's single Store, and its return decides whether
+	// that config is reported as applied at all: an error means the config
+	// could not actually be put into effect (Task 5, Ruling B -- ApplyBlocks
+	// accepting a value its real consumer refuses is a mirrored-constraint
+	// gap), and rejects the whole set exactly like an ApplyBlocks error
+	// does. A scalar field, not a registry: this codebase has already left
+	// two features inert behind a callback slot that kept only the last
+	// registration, so this field's singular name is the promise there is
+	// exactly one consumer. Task 4 sets it to swap the live query policy.
+	//
+	// atomic.Pointer, not a plain field: SetOnEffectiveConfig runs on
+	// whatever goroutine calls it (cmd/agent's serve, before go
+	// streamMgr.Run) while applyManaged reads it from the stream goroutine.
+	// It was safe as a plain field only by the accident that nothing sets it
+	// after Run starts; changing its type here (Task 5, Ruling C) makes that
+	// safety a property of the field instead of a fact about today's one
+	// caller. Nil-checked -- most tests, and any build that never wires a
+	// consumer, leave it unset.
+	onEffectiveConfig atomic.Pointer[func(*config.Config) ([]string, error)]
 	// rules is the resolved ingest-rule set. The manager owns it because it is
 	// the only component that sees the gateway's messages; the log collector
 	// reads it on the collection path and drainBufferedQueue on the send path.
@@ -879,6 +891,38 @@ const overloadedQueueFraction = 0.8
 // ack lost to a cut would pin its WAL segment for the process's lifetime.
 const inflightAckDeadline = 10 * time.Minute
 
+// buildHeartbeat assembles the heartbeat payload. Split out of heartbeatLoop
+// so what the agent reports can be asserted without a stream or a ticker --
+// heartbeatLoop needs a live agentv1.AgentService_ConnectClient and a ticker,
+// which would otherwise mean a fake stream and a clock just to see what one
+// message says.
+//
+// The three ManagedState fields are an echo of what applyManaged last
+// stored, never recomputed here: the revision is the last APPLIED one (a
+// rejected revision never advances it), config_error names why the most
+// recent attempt (if any) was refused, and config_warnings carries what the
+// real consumer -- the live query policy swap -- returned, so the person who
+// pushed the config sees it, not only the operator reading the agent's log.
+//
+// The two redaction flags are read from EffectiveConfig(), not the file
+// config -- they must reflect whatever the agent is actually running -- and
+// are ALWAYS set with proto.Bool: this agent always knows both, and leaving
+// them nil is reserved for an agent too old to report them at all (spec
+// §3.3's unmeasured/measured-zero distinction).
+func (m *streamManager) buildHeartbeat() *agentv1.Heartbeat {
+	revision, configErr, warnings := m.ManagedState()
+	effective := m.EffectiveConfig()
+	return &agentv1.Heartbeat{
+		TimestampUnixMs:       time.Now().UnixMilli(),
+		Health:                m.healthSnapshot(),
+		AppliedConfigRevision: revision,
+		ConfigError:           configErr,
+		ConfigWarnings:        warnings,
+		CollectRedactSecrets:  proto.Bool(effective.Collect.State.RedactSecrets),
+		QueryRedactSecrets:    proto.Bool(effective.QueryRedactSecrets()),
+	}
+}
+
 // heartbeatLoop reports the agent's health on the interval the gateway asked
 // for. Nothing sent one before this: agent.v1.Heartbeat has existed since the
 // protocol was written and the gateway's handler only ever saw messages from
@@ -903,10 +947,7 @@ func (m *streamManager) heartbeatLoop(ctx context.Context, stream agentv1.AgentS
 			msg := &agentv1.AgentMessage{
 				MessageId: uuid.NewString(),
 				Payload: &agentv1.AgentMessage_Heartbeat{
-					Heartbeat: &agentv1.Heartbeat{
-						TimestampUnixMs: time.Now().UnixMilli(),
-						Health:          m.healthSnapshot(),
-					},
+					Heartbeat: m.buildHeartbeat(),
 				},
 			}
 			// Sent straight down the stream rather than through the queue: a
@@ -1886,15 +1927,16 @@ func (m *streamManager) EffectiveConfig() *config.Config {
 }
 
 // SetOnEffectiveConfig registers the callback applyManaged invokes with the
-// newly-applied effective config after each managed-block set. New returns
-// Manager, the narrow interface used everywhere the manager only needs to
-// run and send -- it deliberately does not expose the field this sets. A
-// caller that needs the hook (cmd/agent, wiring the live query policy swap)
-// type-asserts its Manager value to the small interface this method
-// satisfies. fn may be nil, which leaves the swap unwired -- the same as
-// never calling this at all.
-func (m *streamManager) SetOnEffectiveConfig(fn func(*config.Config)) {
-	m.onEffectiveConfig = fn
+// newly-applied effective config after each managed-block set, before that
+// config is stored as the applied one. New returns Manager, the narrow
+// interface used everywhere the manager only needs to run and send -- it
+// deliberately does not expose the field this sets. A caller that needs the
+// hook (cmd/agent, wiring the live query policy swap) type-asserts its
+// Manager value to the small interface this method satisfies. fn may be
+// nil, which leaves the swap unwired -- the same as never calling this at
+// all.
+func (m *streamManager) SetOnEffectiveConfig(fn func(*config.Config) ([]string, error)) {
+	m.onEffectiveConfig.Store(&fn)
 }
 
 // applyManaged overlays a complete managed-block set. A nil set means the
@@ -1937,14 +1979,36 @@ func (m *streamManager) applyManaged(set *agentv1.ManagedBlocks) {
 		)
 		return
 	}
-	m.managed.Store(&managedState{cfg: cfg, revision: revision})
+	// The real consumer gets the last word before this config is reported as
+	// applied at all: ApplyBlocks validates the block schema, but a value
+	// that schema allows can still be one the consumer -- the live query
+	// policy compiler, wired by cmd/agent -- refuses (Ruling B: "pods/" and
+	// its siblings pass ApplyBlocks and fail Compile). An error here rejects
+	// the WHOLE set exactly like an ApplyBlocks error does, keeping the
+	// previous cfg, revision and warnings intact: a set the agent cannot
+	// actually run must never be reported as running.
+	var warnings []string
+	if fn := m.onEffectiveConfig.Load(); fn != nil && *fn != nil {
+		w, err := (*fn)(cfg)
+		if err != nil {
+			next := &managedState{err: err.Error()}
+			if prev := m.managed.Load(); prev != nil {
+				next.cfg, next.revision, next.warnings = prev.cfg, prev.revision, prev.warnings
+			}
+			m.managed.Store(next)
+			m.log.Error("managed config could not be put into effect; keeping the running config",
+				logger.F("attempted_revision", revision),
+				logger.F("error", err.Error()),
+			)
+			return
+		}
+		warnings = w
+	}
+	m.managed.Store(&managedState{cfg: cfg, revision: revision, warnings: warnings})
 	m.log.Info("applied managed config blocks",
 		logger.F("revision", revision),
 		logger.F("blocks", len(blocks)),
 	)
-	if m.onEffectiveConfig != nil {
-		m.onEffectiveConfig(cfg) // Task 4 hooks the query policy swap here
-	}
 }
 
 // ManagedState reports what this agent has applied and why it refused

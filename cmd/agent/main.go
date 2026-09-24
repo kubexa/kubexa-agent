@@ -67,7 +67,7 @@ type Collector interface {
 // constructor, rather than a redeclared copy that could quietly drift from
 // the real one.
 type effectiveConfigSetter interface {
-	SetOnEffectiveConfig(func(*config.Config))
+	SetOnEffectiveConfig(func(*config.Config) ([]string, error))
 }
 
 // logQueryPolicyWarnings logs the query policy's compile-time warnings, if
@@ -446,20 +446,26 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		return fmt.Errorf("stream manager: %T does not expose the effective-config hook; "+
 			"platform-managed config would never apply to the live query policy", streamMgr)
 	}
-	s.SetOnEffectiveConfig(func(effective *config.Config) {
+	s.SetOnEffectiveConfig(func(effective *config.Config) ([]string, error) {
 		warnings, err := queryPolicy.Swap(effective)
 		if err != nil {
-			// The stream manager only calls onEffectiveConfig with a
-			// config ApplyBlocks already validated, so this should not
-			// happen in practice; if it ever does, the previous policy
-			// stays in effect (Holder.Swap leaves it untouched on
-			// error) and this is the operator's only signal something
-			// is wrong.
+			// ApplyBlocks validates the block schema, but a value that
+			// schema allows can still be one Compile refuses (e.g.
+			// "pods/": a valid k8sresource.Parse result with a zero GVR
+			// field) -- reachable, not theoretical. Returning the error
+			// here, rather than only logging it, makes applyManaged
+			// reject the WHOLE managed-block set instead of reporting a
+			// revision as applied while the agent keeps running the
+			// previous one (Holder.Swap leaves it untouched on error).
+			// The log still serves the cluster operator; the returned
+			// error is what reaches the person who pushed the config, on
+			// the heartbeat.
 			log.Error("live query policy swap rejected; keeping the previous policy",
 				logger.F("error", err.Error()))
-			return
+			return nil, err
 		}
 		logQueryPolicyWarnings(log, warnings)
+		return warnings, nil
 	})
 
 	healthAddr := cfg.Observability.HealthAddr
