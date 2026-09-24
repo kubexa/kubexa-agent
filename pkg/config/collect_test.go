@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -184,6 +185,42 @@ func TestValidateStateRuleResources(t *testing.T) {
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() = nil, want error for invalid resource")
+	}
+}
+
+// TestValidateBlockRefusesAZeroGVRStateResource pins m-5: k8sresource.Parse
+// tolerates a malformed GVR like "v1/" or "pods/" by returning a zero
+// Descriptor with a NIL error (parse.go's descriptorForGVR), and
+// StateNamespaceRule.validate used to call only ParseResourceKind, which
+// forwards that nil straight through. query.go's validateQuery already
+// rejects the same shape for query.rules (query.go:379); this mirrors it
+// under collect.state's own key so ValidateBlock("collect.state", ...)
+// refuses a rule the owner believes is in force and is not, instead of
+// accepting it whenever query.rules is non-empty and QueryRules never
+// inherits it -- exactly the shape Task 7 closed under a different key.
+func TestValidateBlockRefusesAZeroGVRStateResource(t *testing.T) {
+	bad := []string{"v1/", "pods/", "apps/v1/", "/", "//", "a//c"}
+	for _, resource := range bad {
+		t.Run(resource, func(t *testing.T) {
+			body := fmt.Sprintf("enabled: true\nrules:\n  - resources: [%q]\n", resource)
+			err := config.ValidateBlock("collect.state", []byte(body))
+			if err == nil {
+				t.Fatalf("ValidateBlock accepted zero-GVR resource %q", resource)
+			}
+			if !strings.Contains(err.Error(), "collect.state") {
+				t.Fatalf("error must name collect.state; got %v", err)
+			}
+		})
+	}
+
+	valid := []string{"v1/pods", "apps/v1/deployments"}
+	for _, resource := range valid {
+		t.Run(resource, func(t *testing.T) {
+			body := fmt.Sprintf("enabled: true\nrules:\n  - resources: [%q]\n", resource)
+			if err := config.ValidateBlock("collect.state", []byte(body)); err != nil {
+				t.Fatalf("ValidateBlock refused a valid resource %q: %v", resource, err)
+			}
+		})
 	}
 }
 

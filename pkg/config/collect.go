@@ -618,8 +618,23 @@ func (r *StateNamespaceRule) validate(index int) []string {
 		violations = append(violations, prefix+".resources must contain at least one resource")
 	}
 	for j, resource := range r.Resources {
-		if _, err := ParseResourceKind(resource); err != nil {
+		d, err := ParseStateResource(resource)
+		if err != nil {
 			violations = append(violations, fmt.Sprintf("%s.resources[%d]: %v", prefix, j, err))
+			continue
+		}
+		// ParseStateResource (k8sresource.Parse) tolerates a malformed GVR
+		// like "v1/" or "pods/" by returning a zero Descriptor with a NIL
+		// error -- descriptorForGVR in k8sresource/parse.go returns early
+		// once either half is empty. query.go's validateQuery rejects the
+		// identical shape for query.rules (query.go:365-380); mirrored here
+		// so a rule under collect.state is refused under ITS OWN key rather
+		// than reaching Compile unvalidated whenever query.rules is
+		// non-empty and this block's own validator is the only thing
+		// ValidateBlock runs -- a rule the owner believes is in force and
+		// is not, the exact failure this validator exists to catch.
+		if d.GVR.Resource == "" || d.GVR.Version == "" {
+			violations = append(violations, fmt.Sprintf("%s.resources[%d]: unsupported resource %q", prefix, j, resource))
 		}
 	}
 	return violations

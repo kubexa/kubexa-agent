@@ -498,6 +498,29 @@ func managedBlocksMsg(t *testing.T, revision int64, blocks map[string]string) *a
 	}
 }
 
+// TestApplyHandshakeConfigSettlesOnAHandshakeWithNoConfig pins m-3: the
+// early return for hs.GetConfig() == nil (a gateway that manages nothing for
+// this cluster, the common case) must still settle the boot wait. That is
+// exactly why settleConfig is called via `defer` rather than at the end of
+// the function -- a mutation that settles only when a config is present
+// would make every such agent pay the full managedConfigBootWait on every
+// start, silently, since nothing else ever closes the channel.
+func TestApplyHandshakeConfigSettlesOnAHandshakeWithNoConfig(t *testing.T) {
+	m := newManagedTestManager(t)
+	m.configSettled = make(chan struct{})
+
+	m.applyHandshakeConfig(&agentv1.HandshakeResponse{
+		Accepted:  true,
+		SessionId: "s1",
+	})
+
+	select {
+	case <-m.ConfigSettled():
+	default:
+		t.Fatal("a handshake carrying no config must still settle the boot wait")
+	}
+}
+
 // TestManagedBlocksApplyFromTheHandshake: a managed block in the handshake's
 // config snapshot must land in EffectiveConfig, and must never touch the
 // immutable file config it was overlaid on.
@@ -837,6 +860,66 @@ func newBootedManagedTestManager(t *testing.T) *streamManager {
 	m := newManagedTestManager(t)
 	m.SetCollectorConfig(m.cfg)
 	return m
+}
+
+// TestTheHeartbeatIsBuiltFromASingleSnapshot pins M-A.
+//
+// The reviewer reproduced the torn read with a test-only hook instrumenting
+// production code, which this task's own TDD rule (and the general shape of
+// this codebase's tests) rules out here. The race window itself -- a few
+// atomic loads and one healthSnapshot call -- is too small to trigger
+// reliably from plain goroutine interleaving without that hook, so a racing
+// version of this test would either flake or pass by luck on the very code
+// it exists to catch; a flaky pin is worse than a structural one.
+//
+// Structurally instead: buildHeartbeatFrom takes ONE *managedState and every
+// field it derives must come from THAT value, never from a fresh read of
+// m.managed. m.managed is left holding a DIFFERENT, recognizable state
+// throughout (revision 999, a stale error, a stale warning, and a config
+// whose buffer.batch_size differs from the snapshot's) -- so any field that
+// leaked back to reading m.managed directly, instead of the snapshot
+// argument, would show up here as the wrong value.
+func TestTheHeartbeatIsBuiltFromASingleSnapshot(t *testing.T) {
+	m := newManagedTestManager(t)
+
+	// collect.metrics is EffectRestart (never EffectLive), so a difference
+	// here is exactly what should flip RestartRequired -- buffer or query
+	// would not, since RestartRequiredBlocks skips EffectLive blocks
+	// entirely regardless of their value.
+	built := testConfig()
+	built.Collect.Metrics.PodInterval = 30 * time.Second
+	m.SetCollectorConfig(built)
+
+	stale := testConfig()
+	stale.Collect.Metrics.PodInterval = 30 * time.Second // matches built: if this leaked in, RestartRequired would read false
+	m.managed.Store(&managedState{cfg: stale, revision: 999, err: "stale-error", warnings: []string{"stale-warning"}})
+
+	snapCfg := testConfig()
+	snapCfg.Collect.Metrics.PodInterval = 45 * time.Second // differs from built: the snapshot's own config demands a restart
+	snapshot := &managedState{cfg: snapCfg, revision: 5, err: "", warnings: []string{"snapshot-warning"}}
+
+	hb := m.buildHeartbeatFrom(snapshot)
+
+	if hb.GetAppliedConfigRevision() != 5 {
+		t.Errorf("AppliedConfigRevision = %d, want 5 from the snapshot (m.managed still holds 999)",
+			hb.GetAppliedConfigRevision())
+	}
+	if hb.GetConfigError() != "" {
+		t.Errorf("ConfigError = %q, want empty from the snapshot (m.managed still holds %q)",
+			hb.GetConfigError(), "stale-error")
+	}
+	if got := hb.GetConfigWarnings(); len(got) != 1 || got[0] != "snapshot-warning" {
+		t.Errorf("ConfigWarnings = %v, want [snapshot-warning] from the snapshot", got)
+	}
+	if want := snapCfg.Collect.State.RedactSecrets; hb.GetCollectRedactSecrets() != want {
+		t.Errorf("CollectRedactSecrets = %v, want %v from the snapshot's config",
+			hb.GetCollectRedactSecrets(), want)
+	}
+	if !hb.GetRestartRequired() {
+		t.Error("RestartRequired = false, want true: the snapshot's own config (pod_interval 45s) " +
+			"differs from built (30s) -- a snapshot-derived answer must see that; m.managed's " +
+			"stale config (pod_interval 30s, matching built) would wrongly answer false")
+	}
 }
 
 // TestHeartbeatReportsRestartRequiredForACollectBlock is C1's symptom, at

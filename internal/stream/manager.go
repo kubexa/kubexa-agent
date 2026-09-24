@@ -206,7 +206,7 @@ type streamManager struct {
 	// torn-read shape collapsing three atomics into managedState removed.
 	//
 	// Nil until boot reports: before that, nothing has been built, so nothing
-	// can be stale (see restartRequired).
+	// can be stale (see restartRequiredFor).
 	collectorCfg atomic.Pointer[config.Config]
 	// rules is the resolved ingest-rule set. The manager owns it because it is
 	// the only component that sees the gateway's messages; the log collector
@@ -959,21 +959,41 @@ const inflightAckDeadline = 10 * time.Minute
 // which would otherwise mean a fake stream and a clock just to see what one
 // message says.
 //
-// The three ManagedState fields are an echo of what applyManaged last
-// stored, never recomputed here: the revision is the last APPLIED one (a
-// rejected revision never advances it), config_error names why the most
+// It loads m.managed exactly ONCE, via managedSnapshot, and hands that one
+// value to buildHeartbeatFrom: applyManaged runs on the receive/handshake
+// goroutine and can store a new state between any two reads, and
+// managedState's own doc comment explains why that must never happen mid-
+// heartbeat -- a reader could observe a new effective config paired with a
+// stale revision, or a success paired with a leftover error, exactly the
+// combinations the platform's screen must never show a cluster owner. The
+// atomic makes each value consistent with itself; only a single load makes
+// the heartbeat's fields consistent with EACH OTHER.
+func (m *streamManager) buildHeartbeat() *agentv1.Heartbeat {
+	return m.buildHeartbeatFrom(m.managedSnapshot())
+}
+
+// buildHeartbeatFrom derives every managed-config field of one heartbeat
+// from st, the single snapshot buildHeartbeat loaded. Split out so the
+// single-snapshot property can be pinned directly (see
+// TestTheHeartbeatIsBuiltFromASingleSnapshot): st is the only source for the
+// revision, the error, the warnings, the redaction flags and
+// RestartRequired, and none of them may read m.managed again.
+//
+// The three ManagedState-derived fields are an echo of what applyManaged
+// last stored, never recomputed here: the revision is the last APPLIED one
+// (a rejected revision never advances it), config_error names why the most
 // recent attempt (if any) was refused, and config_warnings carries what the
 // real consumer -- the live query policy swap -- returned, so the person who
 // pushed the config sees it, not only the operator reading the agent's log.
 //
-// The two redaction flags are read from EffectiveConfig(), not the file
+// The two redaction flags are read from st's effective config, not the file
 // config -- they must reflect whatever the agent is actually running -- and
 // are ALWAYS set with proto.Bool: this agent always knows both, and leaving
 // them nil is reserved for an agent too old to report them at all (spec
 // §3.3's unmeasured/measured-zero distinction).
-func (m *streamManager) buildHeartbeat() *agentv1.Heartbeat {
-	revision, configErr, warnings := m.ManagedState()
-	effective := m.EffectiveConfig()
+func (m *streamManager) buildHeartbeatFrom(st *managedState) *agentv1.Heartbeat {
+	revision, configErr, warnings := managedStateFields(st)
+	effective := m.effectiveConfigFor(st)
 	return &agentv1.Heartbeat{
 		TimestampUnixMs:       time.Now().UnixMilli(),
 		Health:                m.healthSnapshot(),
@@ -982,7 +1002,7 @@ func (m *streamManager) buildHeartbeat() *agentv1.Heartbeat {
 		ConfigWarnings:        warnings,
 		CollectRedactSecrets:  proto.Bool(effective.Collect.State.RedactSecrets),
 		QueryRedactSecrets:    proto.Bool(effective.QueryRedactSecrets()),
-		RestartRequired:       m.restartRequired(),
+		RestartRequired:       m.restartRequiredFor(st),
 	}
 }
 
@@ -2019,8 +2039,29 @@ type managedState struct {
 // directly for anything a managed block can change -- that field is the
 // immutable on-disk config, kept only so a released block has a value to
 // restore.
+//
+// Legitimate one-at-a-time callers keep using this: it is only the
+// HEARTBEAT (buildHeartbeat) that must not, because it asks this same
+// question alongside ManagedState and restartRequiredFor and needs all
+// three answered from the same load. See managedSnapshot.
 func (m *streamManager) EffectiveConfig() *config.Config {
-	if st := m.managed.Load(); st != nil && st.cfg != nil {
+	return m.effectiveConfigFor(m.managed.Load())
+}
+
+// managedSnapshot returns the single managed state a caller that needs MORE
+// THAN ONE fact from it should load once and reuse -- currently only
+// buildHeartbeat. Every other accessor below (EffectiveConfig, ManagedState)
+// loads m.managed itself and stays a legitimate one-at-a-time question; this
+// one exists so buildHeartbeat does not have to be three of them in a row.
+func (m *streamManager) managedSnapshot() *managedState {
+	return m.managed.Load()
+}
+
+// effectiveConfigFor is EffectiveConfig's derivation, taking the snapshot a
+// caller already holds instead of loading m.managed again -- see
+// managedSnapshot.
+func (m *streamManager) effectiveConfigFor(st *managedState) *config.Config {
+	if st != nil && st.cfg != nil {
 		return st.cfg
 	}
 	return m.cfg
@@ -2033,9 +2074,10 @@ func (m *streamManager) EffectiveConfig() *config.Config {
 // a failed assertion is a boot error there rather than a silent skip.
 //
 // Without it the agent cannot tell "applied" from "applied, but not in
-// effect until a restart" -- restartRequired answers false for everything,
-// which is the reporting failure this whole task exists to close. nil is
-// ignored: it would be indistinguishable from "boot never reported".
+// effect until a restart" -- restartRequiredFor answers false for
+// everything, which is the reporting failure this whole task exists to
+// close. nil is ignored: it would be indistinguishable from "boot never
+// reported".
 func (m *streamManager) SetCollectorConfig(cfg *config.Config) {
 	if cfg == nil {
 		return
@@ -2054,20 +2096,28 @@ func (m *streamManager) collectorConfig() *config.Config {
 	return m.cfg
 }
 
-// restartRequired reports whether the revision this agent has applied
-// carries a block it cannot put into effect without restarting.
+// restartRequiredFor reports whether the revision this agent has applied
+// carries a block it cannot put into effect without restarting, for the
+// managed-state snapshot st.
 //
 // It is a comparison between what the collectors were BUILT from and what is
 // applied now -- not a list of block names -- so re-pushing an unchanged
 // restart-only block asks for nothing, and a change to a live block never
 // does. False before boot reports a collector config: nothing has been built
 // yet, so nothing is stale.
-func (m *streamManager) restartRequired() bool {
+//
+// It takes st rather than loading m.managed itself because its one caller,
+// buildHeartbeatFrom, already holds the single snapshot the whole heartbeat
+// must be built from -- see managedSnapshot. Asking "is a restart required"
+// by loading m.managed again here would defeat that: applyManaged can store
+// a new state in the gap, pairing this answer with a revision the heartbeat
+// reports differently elsewhere.
+func (m *streamManager) restartRequiredFor(st *managedState) bool {
 	built := m.collectorCfg.Load()
 	if built == nil {
 		return false
 	}
-	return len(config.RestartRequiredBlocks(built, m.EffectiveConfig())) > 0
+	return len(config.RestartRequiredBlocks(built, m.effectiveConfigFor(st))) > 0
 }
 
 // ConfigSettled returns a channel closed once this agent has completed its
@@ -2273,11 +2323,19 @@ func hashManagedBlocks(blocks map[string][]byte) string {
 }
 
 // ManagedState reports what this agent has applied and why it refused
-// anything, for the heartbeat. The revision is the last APPLIED one: a
-// rejected revision must never be reported as applied, or the screen says
-// "applied" for a config the agent is not running.
+// anything. The revision is the last APPLIED one: a rejected revision must
+// never be reported as applied, or the screen says "applied" for a config
+// the agent is not running.
 func (m *streamManager) ManagedState() (int64, string, []string) {
-	st := m.managed.Load()
+	return managedStateFields(m.managed.Load())
+}
+
+// managedStateFields is ManagedState's derivation, taking the snapshot a
+// caller already holds instead of loading m.managed again -- see
+// managedSnapshot. A free function, not a method: it reads only st, nothing
+// off the receiver, which is what makes it safe for buildHeartbeatFrom to
+// call it without also loading m.managed.
+func managedStateFields(st *managedState) (int64, string, []string) {
 	if st == nil {
 		return 0, "", nil
 	}
