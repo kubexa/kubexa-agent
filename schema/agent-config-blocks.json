@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "properties": {
     "buffer": {
       "additionalProperties": false,
@@ -82,16 +83,10 @@
           "type": "boolean"
         },
         "node_interval": {
-          "type": [
-            "string",
-            "integer"
-          ]
+          "type": "string"
         },
         "pod_interval": {
-          "type": [
-            "string",
-            "integer"
-          ]
+          "type": "string"
         },
         "rules": {
           "items": {
@@ -115,10 +110,7 @@
                 "type": "string"
               },
               "node_interval": {
-                "type": [
-                  "string",
-                  "integer"
-                ]
+                "type": "string"
               },
               "node_names": {
                 "items": {
@@ -127,10 +119,7 @@
                 "type": "array"
               },
               "pod_interval": {
-                "type": [
-                  "string",
-                  "integer"
-                ]
+                "type": "string"
               },
               "pod_names": {
                 "items": {
@@ -159,10 +148,7 @@
           "type": "boolean"
         },
         "resync_period": {
-          "type": [
-            "string",
-            "integer"
-          ]
+          "type": "string"
         },
         "rules": {
           "items": {
@@ -186,10 +172,7 @@
                 "type": "array"
               },
               "resync_period": {
-                "type": [
-                  "string",
-                  "integer"
-                ]
+                "type": "string"
               }
             },
             "type": "object"
