@@ -246,8 +246,69 @@ type: application
 # finished job as lost. The gateway keeps only the latest snapshot per job,
 # so a re-announcement is idempotent. Pairs with backend 0.5.46.
 #
-version: 0.10.3
-appVersion: "0.10.3"
+# 0.11.0 moves the image to 0.11.0: the Kubexa platform can own a small,
+# fixed set of this agent's config blocks. The owner edits them in the app,
+# the platform pushes them as the agent's OWN yaml over the config channel
+# the handshake already carries, and the agent reports back on every
+# heartbeat what it actually applied.
+#
+# NOTHING CHANGES ON AN EXISTING INSTALL until the platform actually owns a
+# block for that cluster. With no owned blocks the agent runs exactly the
+# config in this chart's values, as before. The platform half ships
+# separately; a gateway that does not push managed blocks leaves this image
+# inert, so 0.11.0 is safe to install ahead of it.
+#
+# Five blocks can be owned: collect.logs, collect.state, collect.metrics,
+# query and buffer -- and within them only an explicit allowlist of keys.
+# The allowlist is deliberately NARROWER than the agent's own structs, and
+# that is the point of the feature rather than an omission:
+#   - redact_secrets (on collect.state and on query) is NOT settable from
+#     the platform, ever. It is the cluster owner's guarantee that Secret
+#     values never leave this cluster, and that guarantee has to hold IN THE
+#     AGENT, not only in the platform's own route -- a second gate is worth
+#     nothing if the party it gates can open it. Both flags ride the
+#     heartbeat so the owner can see what is in force.
+#   - mutate.*, rbac and exec.* are not owned at all: write and console
+#     authority stays in this chart's values and in the ServiceAccount.
+#   - buffer's spill_dir, max_disk_bytes, max_memory_bytes and
+#     flush_interval, and collect.metrics's custom_endpoints, cadvisor,
+#     kube_state_metrics and kube_metrics stay with the operator too --
+#     they describe the node this pod runs on, not a policy.
+# A key outside the allowlist rejects the WHOLE block rather than being
+# dropped: a partially applied block could silently lose the very key the
+# owner was editing.
+#
+# What an operator sees on the heartbeat, all new: the applied revision, a
+# config error if the agent refused a set, any warnings the config produced
+# (today: a wildcard query rule with redaction off, the widest read policy
+# this agent can hold), both redaction flags, and restart_required.
+#
+# READ THIS ONE IF YOU PUSH collect.* : restart_required means "part of this
+# revision is still pending", not "nothing has happened". Two blocks are
+# half-live. collect.state's rules feed the LIVE query read policy whenever
+# query.rules is empty -- which is this chart's default, since query.rules
+# ships commented out -- so a pushed collect.state changes what a live query
+# may read on the very next request, while the informers keep running the
+# old rules until a restart. collect.logs.enabled stops log DELIVERY the
+# instant it goes false, while the tailer keeps running until a restart.
+# Both are reported restart_required, and both are already partly in effect.
+#
+# Also: boot now starts the stream first and waits up to 10 s for the
+# managed config before building collectors, so an agent whose blocks are
+# owned does not first run the file config and then need a restart. A
+# handshake that carries no config settles that wait immediately, so an
+# agent nobody manages pays nothing for it. An unchanged set arriving on a
+# reconnect does no work at all -- this deployment's stream is cut roughly
+# every 150 s by design, and re-applying would mean a full capability sweep
+# against the customer's API server every couple of minutes.
+#
+# An explicitly empty rule list is now REFUSED in every block that has one
+# (`rules: []` and a valueless `rules:` alike). It used to widen to the
+# permissive default, which is the opposite of what it reads like. Omit the
+# key to keep the current rules, or set enabled: false to collect nothing.
+#
+version: 0.11.0
+appVersion: "0.11.0"
 keywords:
   - kubexa
   - observability
