@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -115,6 +116,134 @@ func TestApplyBlocksDoesNotMutateBase(t *testing.T) {
 	}
 	if base.Buffer.BatchSize != 100 {
 		t.Fatal("base must be left untouched; releasing a block restores it")
+	}
+}
+
+func TestApplyBlocksDoesNotMutateBaseThroughASharedPointer(t *testing.T) {
+	// cfg := *base is a shallow struct copy: pointer-typed fields (like
+	// QueryConfig.Enabled) still point at base's own memory. yaml.v3 decodes
+	// into an existing non-nil pointer by writing THROUGH it rather than
+	// allocating a new one, so applying a query block with enabled: false
+	// used to flip base's own Query.Enabled -- releasing the block would then
+	// restore the platform's value, not the operator's file value.
+	base := validBase(t)
+	enabled := true
+	base.Query.Enabled = &enabled
+
+	if _, err := config.ApplyBlocks(base, map[string][]byte{"query": []byte("enabled: false\n")}); err != nil {
+		t.Fatal(err)
+	}
+	if base.Query.Enabled == nil || !*base.Query.Enabled {
+		t.Fatal("base.Query.Enabled must not be mutated through a shared pointer")
+	}
+}
+
+// yamlDashFieldPaths returns the dotted field path (e.g. "Agent.ClusterID")
+// of every field of t, at any depth, tagged yaml:"-". It exists so the test
+// below does not have to name each such field: a second one added years from
+// now is covered automatically, which a test naming only ClusterID would not
+// be.
+func yamlDashFieldPaths(t reflect.Type, prefix string) []string {
+	var paths []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.PkgPath != "" { // unexported; ApplyBlocks cannot reach it either
+			continue
+		}
+		path := f.Name
+		if prefix != "" {
+			path = prefix + "." + f.Name
+		}
+		if f.Tag.Get("yaml") == "-" {
+			paths = append(paths, path)
+		}
+		if f.Type.Kind() == reflect.Struct {
+			paths = append(paths, yamlDashFieldPaths(f.Type, path)...)
+		}
+	}
+	return paths
+}
+
+func fieldByPath(v reflect.Value, path string) reflect.Value {
+	for _, part := range strings.Split(path, ".") {
+		v = v.FieldByName(part)
+	}
+	return v
+}
+
+func TestApplyBlocksPreservesEveryFieldYAMLDoesNotCarry(t *testing.T) {
+	paths := yamlDashFieldPaths(reflect.TypeOf(config.Config{}), "")
+	if len(paths) == 0 {
+		t.Fatal("expected at least one yaml:\"-\" field (Agent.ClusterID) to walk")
+	}
+
+	base := validBase(t)
+	rv := reflect.ValueOf(base).Elem()
+	want := make(map[string]any, len(paths))
+	for _, p := range paths {
+		fv := fieldByPath(rv, p)
+		if !fv.CanSet() {
+			t.Fatalf("field %s is not settable via reflection", p)
+		}
+		switch fv.Kind() {
+		case reflect.String:
+			fv.SetString("sentinel-" + p)
+		case reflect.Bool:
+			fv.SetBool(!fv.Bool())
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			fv.SetInt(987654321)
+		default:
+			t.Fatalf("field %s has kind %s; extend this test to set and compare it", p, fv.Kind())
+		}
+		want[p] = fv.Interface()
+	}
+
+	cfg, err := config.ApplyBlocks(base, map[string][]byte{"query": []byte("enabled: true\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rv2 := reflect.ValueOf(cfg).Elem()
+	for _, p := range paths {
+		got := fieldByPath(rv2, p).Interface()
+		if got != want[p] {
+			t.Fatalf("field %s = %v, want %v (base's value, preserved)", p, got, want[p])
+		}
+	}
+}
+
+func TestValidateBlockRefusesRedactSecretsInCollectState(t *testing.T) {
+	// redact_secrets is the cluster owner's guarantee that Secret values do
+	// not leave their cluster. It must not become settable through this
+	// block just because StateCollectConfig has a field for it: the whole
+	// point of the agent enforcing its own allowlist is that the platform
+	// cannot open this from its own side.
+	err := config.ValidateBlock("collect.state", []byte("redact_secrets: true\n"))
+	if err == nil {
+		t.Fatal("redact_secrets must not be editable via collect.state")
+	}
+	if !strings.Contains(err.Error(), "redact_secrets") {
+		t.Fatalf("the error must name the key; got %v", err)
+	}
+}
+
+func TestValidateBlockRefusesRedactSecretsInQuery(t *testing.T) {
+	err := config.ValidateBlock("query", []byte("redact_secrets: true\n"))
+	if err == nil {
+		t.Fatal("redact_secrets must not be editable via query")
+	}
+	if !strings.Contains(err.Error(), "redact_secrets") {
+		t.Fatalf("the error must name the key; got %v", err)
+	}
+}
+
+func TestValidateBlockRefusesCustomEndpointsInCollectMetrics(t *testing.T) {
+	err := config.ValidateBlock("collect.metrics", []byte("custom_endpoints: []\n"))
+	if err == nil {
+		t.Fatal("custom_endpoints must not be editable via collect.metrics")
+	}
+	if !strings.Contains(err.Error(), "custom_endpoints") {
+		t.Fatalf("the error must name the key; got %v", err)
 	}
 }
 
