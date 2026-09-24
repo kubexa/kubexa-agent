@@ -244,18 +244,20 @@ func TestBuildMutationResponderFactoryCalledOnlyWhenEnabled(t *testing.T) {
 	})
 }
 
-// compiledQueryPolicy compiles a valid, non-nil query policy -- the "what a
-// real serve() call site would hand buildCapabilityReporterOptions" shape,
-// distinct in TYPE (internal/query/policy.Policy) from the mutate policy
-// compiledMutatePolicy builds, for the same reason that function's own
-// comment gives.
-func compiledQueryPolicy(t *testing.T) *policy.Policy {
+// compiledQueryPolicy compiles a valid, non-nil query policy holder -- the
+// "what a real serve() call site would hand buildCapabilityReporterOptions"
+// shape, distinct in TYPE (internal/query/policy.Holder) from the mutate
+// policy compiledMutatePolicy builds, for the same reason that function's own
+// comment gives. A Holder, not a bare Policy, because buildCapabilityReporterOptions
+// now takes the live holder so the reporter's verdicts follow a managed-config
+// swap instead of freezing at their boot values.
+func compiledQueryPolicy(t *testing.T) *policy.Holder {
 	t.Helper()
-	p, err := policy.Compile(&config.Config{})
+	h, _, err := policy.NewHolder(&config.Config{})
 	if err != nil {
-		t.Fatalf("policy.Compile: %v", err)
+		t.Fatalf("policy.NewHolder: %v", err)
 	}
-	return p
+	return h
 }
 
 // compiledExecPolicy compiles a valid, non-nil exec policy -- the "what a

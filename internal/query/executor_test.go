@@ -58,13 +58,13 @@ func newExecutor(t *testing.T, cfgYAML string, dyn dynamic.Interface) *Executor 
 	if err := yaml.Unmarshal([]byte(cfgYAML), &cfg); err != nil {
 		t.Fatalf("unmarshal config: %v", err)
 	}
-	p, err := policy.Compile(&cfg)
+	h, _, err := policy.NewHolder(&cfg)
 	if err != nil {
 		t.Fatalf("compile policy: %v", err)
 	}
 	e, err := New(Options{
 		Clients: k8s.QueryClients{Dynamic: dyn},
-		Policy:  p,
+		Policy:  h,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

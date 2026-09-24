@@ -42,8 +42,12 @@ const (
 
 // Options configures an Executor. Only Clients and Policy are required.
 type Options struct {
-	Clients      k8s.QueryClients
-	Policy       *policy.Policy
+	Clients k8s.QueryClients
+	// Policy is a Holder, not a Policy: the holder is what lets a managed
+	// config block pushed at runtime take effect on the very next request,
+	// instead of only at the process that was running when Execute was
+	// wired up. See policy.Holder's doc comment.
+	Policy       *policy.Holder
 	Logger       *logger.Logger
 	Registerer   prometheus.Registerer
 	MaxInFlight  int
@@ -55,7 +59,7 @@ type Options struct {
 // Executor answers one ResourceQuery at a time against the Kubernetes API.
 type Executor struct {
 	clients  k8s.QueryClients
-	policy   *policy.Policy
+	policy   *policy.Holder
 	log      *logger.Logger
 	metrics  *recorders
 	gate     *gate
@@ -128,7 +132,12 @@ func (e *Executor) execute(ctx context.Context, q *agentv1.ResourceQuery) *agent
 	// The policy gate runs before anything else touches the network. A refused
 	// query must never reach the customer's API server; executor_test.go
 	// asserts the API client recorded zero calls for a denied request.
-	decision := e.policy.Decide(ref, verb, q.GetNamespace(), q.GetName())
+	//
+	// Current() is read once per request, not cached on the Executor: the
+	// query path is request-scoped, so a Swap needs no coordination with
+	// anything already in flight -- the next request simply reads the next
+	// policy.
+	decision := e.policy.Current().Decide(ref, verb, q.GetNamespace(), q.GetName())
 	if !decision.Allowed {
 		// unknownResource, not ref.Resource. A denied query's resource is
 		// whatever the wire asked for, bounded by nothing -- Decide rejects a

@@ -56,6 +56,23 @@ type Collector interface {
 	Name() string
 }
 
+// logQueryPolicyWarnings logs the query policy's compile-time warnings, if
+// any. It is called both after the boot-time compile and after every live
+// swap so the two paths report identically -- see policy.NewHolder and
+// policy.Holder.Swap, which both derive these warnings from the same
+// compileWithWarnings function.
+func logQueryPolicyWarnings(log *logger.Logger, warnings []string) {
+	// A wildcard rule permits every resource, secrets among them. Paired with
+	// visible Secret values it is the widest read policy the agent can hold,
+	// and an operator must not have to discover that from a screen.
+	if len(warnings) > 0 {
+		log.Warn("live query policy permits every resource and Secret values are not redacted",
+			logger.F("rules", strings.Join(warnings, ",")),
+			logger.F("remedy", "set query.redact_secrets: true, or name resources explicitly"),
+		)
+	}
+}
+
 func main() {
 	os.Exit(run())
 }
@@ -177,23 +194,18 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		logger.F("metrics_enabled", cfg.Collect.Metrics.Enabled),
 	)
 
-	// Compiled once and shared: the executor enforces it per request, and the
-	// capability reporter publishes its per-GVR verdict to the UI.
-	queryPolicy, err := policy.Compile(cfg)
+	// Compiled once at boot and held live thereafter: the executor enforces
+	// it per request, and the capability reporter publishes its per-GVR
+	// verdict to the UI. Both read the SAME holder, so a managed config
+	// block pushed from the platform at runtime (stream manager's
+	// onEffectiveConfig, wired below) reaches both instead of only the one
+	// that happened to get a *Policy value at boot.
+	queryPolicy, queryPolicyWarnings, err := policy.NewHolder(cfg)
 	if err != nil {
 		_ = q.Close()
 		return fmt.Errorf("query policy: %w", err)
 	}
-
-	// A wildcard rule permits every resource, secrets among them. Paired with
-	// visible Secret values it is the widest read policy the agent can hold,
-	// and an operator must not have to discover that from a screen.
-	if ids := queryPolicy.UnredactedWildcardRuleIDs(); len(ids) > 0 {
-		log.Warn("live query policy permits every resource and Secret values are not redacted",
-			logger.F("rules", strings.Join(ids, ",")),
-			logger.F("remedy", "set query.redact_secrets: true, or name resources explicitly"),
-		)
-	}
+	logQueryPolicyWarnings(log, queryPolicyWarnings)
 
 	// The live-query path gets its own client pair for the same reason the
 	// capability probe does: an ad-hoc user query must not drain the
@@ -391,6 +403,41 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		return fmt.Errorf("stream manager: %w", err)
 	}
 	log.Info("stream manager initialized")
+
+	// Wire the live query policy to the platform's managed config: every time
+	// the stream manager applies a new managed-block set, swap the compiled
+	// query policy to match, so the executor's per-request Decide and the
+	// capability reporter's per-GVR verdicts both follow it instead of
+	// staying pinned to what cfg said at boot. queryPolicy.Swap and
+	// policy.NewHolder above both go through policy's compileWithWarnings,
+	// so a wildcard rule arriving this way logs the same warning it would
+	// have logged at boot.
+	//
+	// stream.Manager (streamMgr's static type) deliberately does not expose
+	// this hook -- most callers, and the mock in internal/health, only need
+	// Run/Send/Connected/SessionID/IsThrottled -- so it is reached by
+	// asserting streamMgr against the narrow interface the concrete manager
+	// actually implements.
+	type effectiveConfigSetter interface {
+		SetOnEffectiveConfig(func(*config.Config))
+	}
+	if s, ok := streamMgr.(effectiveConfigSetter); ok {
+		s.SetOnEffectiveConfig(func(effective *config.Config) {
+			warnings, err := queryPolicy.Swap(effective)
+			if err != nil {
+				// The stream manager only calls onEffectiveConfig with a
+				// config ApplyBlocks already validated, so this should not
+				// happen in practice; if it ever does, the previous policy
+				// stays in effect (Holder.Swap leaves it untouched on
+				// error) and this is the operator's only signal something
+				// is wrong.
+				log.Error("live query policy swap rejected; keeping the previous policy",
+					logger.F("error", err.Error()))
+				return
+			}
+			logQueryPolicyWarnings(log, warnings)
+		})
+	}
 
 	healthAddr := cfg.Observability.HealthAddr
 	metricsAddr := cfg.Observability.MetricsAddr
@@ -833,7 +880,11 @@ func buildCapabilityReporterOptions(
 	cfg *config.Config,
 	probeCS kubernetes.Interface,
 	q queue.Queue,
-	queryPolicy *policy.Policy,
+	// queryPolicy is the live Holder, not a *policy.Policy snapshot: Holder
+	// satisfies capability.PolicySource directly (AllowsAnyList/AllowsAnyGet
+	// delegate to Current()), so the reporter's per-GVR verdicts follow a
+	// managed-config swap instead of freezing at their boot values.
+	queryPolicy *policy.Holder,
 	mutatePolicy *mutatepolicy.Policy,
 	execPolicy *execpolicy.Policy,
 	nodeExecPolicy *execpolicy.NodePolicy,
@@ -896,7 +947,7 @@ func buildCollectors(
 	q queue.Queue,
 	reg prometheus.Registerer,
 	log *logger.Logger,
-	queryPolicy *policy.Policy,
+	queryPolicy *policy.Holder,
 	mutatePolicy *mutatepolicy.Policy,
 	execPolicy *execpolicy.Policy,
 	nodeExecPolicy *execpolicy.NodePolicy,
