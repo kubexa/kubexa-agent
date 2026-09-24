@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,18 +163,50 @@ func TestReconcilerHolderIsNotReadyBeforeCollectorsExist(t *testing.T) {
 	}
 }
 
-// countingReconciler records what the holder forwards once it is populated.
+// errFakeNotStarted mirrors, verbatim, what *state.Collector's reconcile
+// returns while its runCtx is nil (internal/collector/state/reconciler.go).
+var errFakeNotStarted = errors.New("reconcile: collector has not been started")
+
+// countingReconciler is both a Collector and a stream.WatchReconciler,
+// because the real one is: *state.Collector carries the reconciler AND is
+// started through the collector list.
+//
+// It REFUSES every reconcile until Start has run, which is the contract the
+// real collector actually has -- Start is what sets the runCtx its informers
+// are parented on. An earlier version of this double accepted anything, and
+// that is precisely what let a replay that production refuses pass five
+// tests: the fake and the code agreed with each other while disagreeing with
+// the collector. calls counts every attempt; applied counts only the ones
+// that reached a started collector.
 type countingReconciler struct {
-	calls int
-	last  []k8sresource.Descriptor
-	err   error
+	started bool
+	calls   int
+	applied int
+	last    []k8sresource.Descriptor
+	err     error
 }
+
+func (c *countingReconciler) Name() string                { return "fake-state-collector" }
+func (c *countingReconciler) Stop(context.Context) error  { return nil }
+func (c *countingReconciler) Start(context.Context) error { c.started = true; return nil }
 
 func (c *countingReconciler) Reconcile(_ context.Context, desired []k8sresource.Descriptor) error {
 	c.calls++
 	c.last = desired
+	if !c.started {
+		return errFakeNotStarted
+	}
+	c.applied++
 	return c.err
 }
+
+// plainCollector satisfies Collector and nothing else -- the log collector's
+// shape, for the wiring test.
+type plainCollector struct{}
+
+func (plainCollector) Name() string                { return "fake-log-collector" }
+func (plainCollector) Start(context.Context) error { return nil }
+func (plainCollector) Stop(context.Context) error  { return nil }
 
 // TestReconcilerHolderForwardsOnceTheCollectorExists closes the other half:
 // the holder must be a pass-through, not a swallow-all, or demand-driven
@@ -180,6 +214,7 @@ func (c *countingReconciler) Reconcile(_ context.Context, desired []k8sresource.
 func TestReconcilerHolderForwardsOnceTheCollectorExists(t *testing.T) {
 	h := &reconcilerHolder{}
 	real := &countingReconciler{err: errors.New("from the collector")}
+	_ = real.Start(context.Background())
 	if err := h.Set(context.Background(), real); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
@@ -295,6 +330,7 @@ func TestABindFailureDuringTheBootWaitExitsWithTheRealError(t *testing.T) {
 		func() error { return bindErr },
 		func() error { return nil },
 		context.Canceled, // what startCollectors returns once the group cancelled ctx
+		logger.New("boot-test"),
 	)
 	if !errors.Is(err, bindErr) {
 		t.Fatalf("error = %v, want the run group's own %v", err, bindErr)
@@ -311,14 +347,14 @@ func TestABindFailureDuringTheBootWaitExitsWithTheRealError(t *testing.T) {
 func TestABootFailureWithAHealthyRunGroupKeepsItsOwnCause(t *testing.T) {
 	buildErr := errors.New("log collector: checkpoint dir is not writable")
 
-	err := unwindBootFailure(func() {}, func() error { return nil }, func() error { return nil }, buildErr)
+	err := unwindBootFailure(func() {}, func() error { return nil }, func() error { return nil }, buildErr, logger.New("boot-test"))
 	if !errors.Is(err, buildErr) {
 		t.Fatalf("error = %v, want %v", err, buildErr)
 	}
 
 	// A SIGTERM inside the wait: the group returns the same context error and
 	// the process must exit 0, not 1.
-	err = unwindBootFailure(func() {}, func() error { return context.Canceled }, func() error { return nil }, context.Canceled)
+	err = unwindBootFailure(func() {}, func() error { return context.Canceled }, func() error { return nil }, context.Canceled, logger.New("boot-test"))
 	if !isContextClosed(err) {
 		t.Fatalf("error = %v, want a clean stop for a SIGTERM during the boot wait", err)
 	}
@@ -335,6 +371,7 @@ func TestABootFailureAlwaysClosesTheQueue(t *testing.T) {
 			func() error { return groupErr },
 			func() error { closed = true; return nil },
 			errors.New("boom"),
+			logger.New("boot-test"),
 		)
 		if !closed {
 			t.Fatalf("the queue was not closed when the run group returned %v", groupErr)
@@ -359,11 +396,12 @@ func TestReconcilerHolderReplaysTheSetItRefused(t *testing.T) {
 	}
 
 	real := &countingReconciler{}
+	_ = real.Start(context.Background())
 	if err := h.Set(context.Background(), real); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	if real.calls != 1 {
-		t.Fatalf("Reconcile calls after Set = %d, want 1 (the refused set must be replayed)", real.calls)
+	if real.applied != 1 {
+		t.Fatalf("applied reconciles after Set = %d, want 1 (the refused set must be replayed)", real.applied)
 	}
 	if len(real.last) != 1 || real.last[0].GVR.Resource != "pods" {
 		t.Fatalf("the replayed desired set was not the refused one: %v", real.last)
@@ -382,11 +420,12 @@ func TestReconcilerHolderReplaysOnlyTheLatestRefusedSet(t *testing.T) {
 	_ = h.Reconcile(context.Background(), newer)
 
 	real := &countingReconciler{}
+	_ = real.Start(context.Background())
 	if err := h.Set(context.Background(), real); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	if real.calls != 1 {
-		t.Fatalf("Reconcile calls = %d, want exactly 1 replay", real.calls)
+	if real.applied != 1 {
+		t.Fatalf("applied reconciles = %d, want exactly 1 replay", real.applied)
 	}
 	if len(real.last) != 1 || real.last[0].GVR.Resource != "services" {
 		t.Fatalf("replayed %v, want the LATEST refused set", real.last)
@@ -434,7 +473,140 @@ func TestReconcilerHolderSurfacesAFailedReplay(t *testing.T) {
 	})
 
 	boom := errors.New("informer start failed")
-	if err := h.Set(context.Background(), &countingReconciler{err: boom}); !errors.Is(err, boom) {
+	failing := &countingReconciler{err: boom}
+	_ = failing.Start(context.Background())
+	if err := h.Set(context.Background(), failing); !errors.Is(err, boom) {
 		t.Fatalf("Set = %v, want the replayed Reconcile's own error", err)
+	}
+}
+
+// TestTheReplayReachesAStartedCollector is the test that was missing, and
+// its absence is why the replay shipped inert.
+//
+// *state.Collector refuses every reconcile until Start has set its runCtx
+// (internal/collector/state/reconciler.go: "reconcile: collector has not
+// been started"). Resolving the holder before that means the replayed set is
+// refused AND cleared by Set -- exactly the behaviour the replay was added
+// to fix, plus a log line. So the ordering is what this asserts: the
+// collector is started first, and only then is the holder resolved.
+func TestTheReplayReachesAStartedCollector(t *testing.T) {
+	h := &reconcilerHolder{}
+	desired := []k8sresource.Descriptor{{GVR: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}}
+	if err := h.Reconcile(context.Background(), desired); !errors.Is(err, errReconcilerNotReady) {
+		t.Fatalf("setup: error = %v, want errReconcilerNotReady", err)
+	}
+
+	coll := &countingReconciler{}
+	err := startCollector(context.Background(), coll, func(ctx context.Context) error {
+		return h.Set(ctx, coll)
+	}, logger.New("boot-test"))
+	if err != nil {
+		t.Fatalf("startCollector: %v", err)
+	}
+
+	if coll.applied != 1 {
+		t.Fatalf("applied reconciles = %d (calls = %d), want 1: the replay was refused by a "+
+			"collector that had not been started, and Set has already cleared the pending set",
+			coll.applied, coll.calls)
+	}
+	if len(coll.last) != 1 || coll.last[0].GVR.Resource != "pods" {
+		t.Fatalf("the replayed desired set was not the refused one: %v", coll.last)
+	}
+}
+
+// TestAReconcileArrivingBeforeTheCollectorStartsIsRemembered is the second
+// face of the same ordering bug: with the holder resolved too early, a LIVE
+// reconcile in the gap got the collector's hard "not started" error from an
+// already-resolved holder, so it was neither applied nor remembered.
+// Resolving after Start means that reconcile is refused by the HOLDER, which
+// remembers it.
+func TestAReconcileArrivingBeforeTheCollectorStartsIsRemembered(t *testing.T) {
+	h := &reconcilerHolder{}
+	coll := &countingReconciler{}
+	desired := []k8sresource.Descriptor{{GVR: schema.GroupVersionResource{Version: "v1", Resource: "services"}}}
+
+	// The gateway pushes a watch config while the collector is mid-Start.
+	err := startCollector(context.Background(), coll, func(ctx context.Context) error {
+		return h.Set(ctx, coll)
+	}, logger.New("boot-test"))
+	if err != nil {
+		t.Fatalf("startCollector: %v", err)
+	}
+	// ... and one that arrives after resolution is simply forwarded.
+	if err := h.Reconcile(context.Background(), desired); err != nil {
+		t.Fatalf("Reconcile after the collector started = %v, want nil", err)
+	}
+	if coll.applied != 1 {
+		t.Fatalf("applied = %d, want 1", coll.applied)
+	}
+}
+
+// TestStartCollectorDoesNotResolveAFailedStart: a collector whose Start
+// failed cannot reconcile anything, so the holder must stay unresolved --
+// and keep refusing, and keep remembering.
+func TestStartCollectorDoesNotResolveAFailedStart(t *testing.T) {
+	resolved := false
+	err := startCollector(context.Background(), failingCollector{}, func(context.Context) error {
+		resolved = true
+		return nil
+	}, logger.New("boot-test"))
+	if err == nil {
+		t.Fatal("startCollector must return the collector's Start error")
+	}
+	if resolved {
+		t.Fatal("a collector that failed to start must not resolve the reconciler holder")
+	}
+}
+
+type failingCollector struct{}
+
+func (failingCollector) Name() string               { return "fake-failing-collector" }
+func (failingCollector) Stop(context.Context) error { return nil }
+func (failingCollector) Start(_ context.Context) error {
+	return errors.New("checkpoint dir is not writable")
+}
+
+// TestCollectorWiringFindsWhichCollectorCarriesTheReconciler: the INDEX
+// matters, not just the interface value -- the holder may only be resolved
+// after that specific collector's Start has returned.
+func TestCollectorWiringFindsWhichCollectorCarriesTheReconciler(t *testing.T) {
+	rec := &countingReconciler{}
+	w := collectorWiring([]Collector{plainCollector{}, rec})
+	if w.reconcilerIdx != 1 {
+		t.Fatalf("reconcilerIdx = %d, want 1", w.reconcilerIdx)
+	}
+	if w.reconciler == nil {
+		t.Fatal("reconciler must be the collector that carries it")
+	}
+
+	// An agent with collect.state disabled: no collector carries one, and
+	// serve() must resolve the holder to "none" itself, since no Start ever
+	// will.
+	none := collectorWiring([]Collector{plainCollector{}})
+	if none.reconcilerIdx != -1 || none.reconciler != nil {
+		t.Fatalf("wiring = %+v, want no reconciler and index -1", none)
+	}
+}
+
+// TestABootFailureLogsTheCauseItDoesNotReturn: when the run group's error
+// wins, the buildCollectors failure is the line an operator needs and must
+// not vanish with it.
+func TestABootFailureLogsTheCauseItDoesNotReturn(t *testing.T) {
+	var out bytes.Buffer
+	log := logger.New("boot-test", logger.WithWriter(&out))
+	cause := errors.New("log collector: checkpoint dir is not writable")
+
+	err := unwindBootFailure(
+		func() {},
+		func() error { return errors.New("health server: bind") },
+		func() error { return nil },
+		cause,
+		log,
+	)
+	if errors.Is(err, cause) {
+		t.Fatal("setup: the group error must win")
+	}
+	if !strings.Contains(out.String(), "checkpoint dir is not writable") {
+		t.Fatalf("the cause was discarded; log was:\n%s", out.String())
 	}
 }
