@@ -37,3 +37,36 @@ func TestEveryManagedBlockHasAPrototype(t *testing.T) {
 		}
 	}
 }
+
+// TestManagedBlockAppliesLiveCoversEveryManagedKey guards the same gap as
+// the two tests above, for the live/restart-only classification: a sixth
+// block landing without an entry would read as restart-only by map default
+// (the zero value is false) and silently ask for a restart nobody needs, or
+// -- if the default ever flipped -- report a block as live that nothing
+// applies. Both are the "reported as working" failure restart_required
+// exists to close, so a missing entry must fail here.
+func TestManagedBlockAppliesLiveCoversEveryManagedKey(t *testing.T) {
+	for _, key := range managedBlockKeys {
+		if _, ok := managedBlockAppliesLive[key]; !ok {
+			t.Errorf("managedBlockAppliesLive has no entry for managed block %q", key)
+		}
+	}
+	for key := range managedBlockAppliesLive {
+		if !IsManagedBlockKey(key) {
+			t.Errorf("managedBlockAppliesLive has an entry for %q, which is not a managed block", key)
+		}
+	}
+}
+
+// TestManagedBlockYAMLRendersEveryManagedKey pins that the comparison
+// RestartRequiredBlocks makes actually looks at each block: a key that fell
+// out of managedBlockYAML's switch renders nil, nil equals nil, and the
+// block would silently never ask for a restart again.
+func TestManagedBlockYAMLRendersEveryManagedKey(t *testing.T) {
+	cfg := Default()
+	for _, key := range managedBlockKeys {
+		if len(managedBlockYAML(cfg, key)) == 0 {
+			t.Errorf("managedBlockYAML(%q) rendered nothing; RestartRequiredBlocks would never see it change", key)
+		}
+	}
+}

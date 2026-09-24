@@ -825,3 +825,172 @@ func TestAFailedSwapDoesNotAdvanceTheAppliedRevision(t *testing.T) {
 		t.Fatalf("heartbeat ConfigError must be set after a rejected swap")
 	}
 }
+
+// newBootedManagedTestManager is newManagedTestManager after boot has
+// reported what the collectors were built from: the file config, which is
+// what serve() passes when no managed set arrived inside the boot wait. It
+// is the starting point for every restart_required assertion -- without a
+// collector config there is nothing built to be stale, and the heartbeat
+// answers false for any revision at all.
+func newBootedManagedTestManager(t *testing.T) *streamManager {
+	t.Helper()
+	m := newManagedTestManager(t)
+	m.SetCollectorConfig(m.cfg)
+	return m
+}
+
+// TestHeartbeatReportsRestartRequiredForACollectBlock is C1's symptom, at
+// the point it becomes visible: the collectors were built before this
+// revision arrived, so collect.logs is stored and validated but NOT in
+// effect. Reporting it as applied and nothing else is the "control that
+// changes nothing, reported as working" this feature exists to prevent.
+func TestHeartbeatReportsRestartRequiredForACollectBlock(t *testing.T) {
+	m := newBootedManagedTestManager(t)
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 11, map[string]string{
+		"collect.logs": "enabled: true\ntail_lines: 42\n",
+	}))
+
+	hb := m.buildHeartbeat()
+	if hb.GetAppliedConfigRevision() != 11 {
+		t.Fatalf("AppliedConfigRevision = %d, want 11", hb.GetAppliedConfigRevision())
+	}
+	if !hb.GetRestartRequired() {
+		t.Fatal("RestartRequired = false; collect.logs is baked into the log collector at " +
+			"construction, so revision 11 is applied but not in effect")
+	}
+}
+
+// TestHeartbeatDoesNotReportRestartRequiredForQueryOnly is the other half:
+// the query block IS live (the policy holder swaps on every applied set), so
+// asking for a restart would be just as untrue in the other direction -- a
+// screen stuck on "waiting for agent restart" for a change that is already
+// answering requests.
+func TestHeartbeatDoesNotReportRestartRequiredForQueryOnly(t *testing.T) {
+	m := newBootedManagedTestManager(t)
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 12, map[string]string{
+		"query": "enabled: true\nrules:\n  - resources: [pods]\n",
+	}))
+
+	hb := m.buildHeartbeat()
+	if hb.GetAppliedConfigRevision() != 12 {
+		t.Fatalf("AppliedConfigRevision = %d, want 12", hb.GetAppliedConfigRevision())
+	}
+	if hb.GetRestartRequired() {
+		t.Fatal("RestartRequired = true for a query-only revision, which is live")
+	}
+}
+
+// TestHeartbeatRestartRequiredFollowsTheBlockClassification is the sibling
+// of pkg/config's TestEveryManagedBlockIsClassifiedByWhenItTakesEffect: both
+// spell the two categories out as literals, so a block that MOVES between
+// them fails here until the heartbeat's answer moves with it. Deriving the
+// expectation from ManagedBlockAppliesLive instead would agree with any
+// classification, including a wrong one, which is exactly the shape of test
+// that let four inert blocks report as applied.
+//
+// Each case pushes a value that DIFFERS from the file config the collectors
+// were built from -- a block pushed with the value already in effect asks
+// for no restart, which its own test covers in pkg/config.
+func TestHeartbeatRestartRequiredFollowsTheBlockClassification(t *testing.T) {
+	cases := []struct {
+		key             string
+		yaml            string
+		wantRestart     bool
+		whyNotRestarted string
+	}{
+		{"collect.logs", "enabled: true\ntail_lines: 42\n", true, ""},
+		{"collect.state", "enabled: true\nresync_period: 17m\n", true, ""},
+		{"collect.metrics", "enabled: true\npod_interval: 47s\n", true, ""},
+		{"query", "enabled: true\nrules:\n  - resources: [pods]\n", false,
+			"the query policy holder swaps on every applied set"},
+		{"buffer", "batch_size: 250\n", false,
+			"the drain loop re-reads the effective batch size on every batch"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			m := newBootedManagedTestManager(t)
+			m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 20, map[string]string{
+				tc.key: tc.yaml,
+			}))
+
+			hb := m.buildHeartbeat()
+			if hb.GetConfigError() != "" {
+				t.Fatalf("setup: the block was rejected: %s", hb.GetConfigError())
+			}
+			if hb.GetAppliedConfigRevision() != 20 {
+				t.Fatalf("setup: AppliedConfigRevision = %d, want 20", hb.GetAppliedConfigRevision())
+			}
+			if got := hb.GetRestartRequired(); got != tc.wantRestart {
+				t.Fatalf("RestartRequired = %v, want %v for %s (%s)",
+					got, tc.wantRestart, tc.key, tc.whyNotRestarted)
+			}
+		})
+	}
+}
+
+// TestRestartRequiredIsFalseBeforeTheCollectorsAreBuilt: during the boot
+// wait the collectors do not exist yet, so a set applied in that window is
+// exactly what they are about to be built FROM. Reporting "restart
+// required" there would tell the operator to restart an agent that is
+// already about to run their config.
+func TestRestartRequiredIsFalseBeforeTheCollectorsAreBuilt(t *testing.T) {
+	m := newManagedTestManager(t) // no SetCollectorConfig: boot has not got there
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 3, map[string]string{
+		"collect.logs": "enabled: true\ntail_lines: 42\n",
+	}))
+
+	if hb := m.buildHeartbeat(); hb.GetRestartRequired() {
+		t.Fatal("RestartRequired = true before any collector was built")
+	}
+}
+
+// TestBufferBatchSizeFollowsAPush is one of the two live reads Ruling C
+// names: drainBufferedQueue read m.cfg directly, which EffectiveConfig()'s
+// own doc comment forbids for anything a managed block can change. Without
+// this the buffer block is stored, validated, reported as applied -- and the
+// drain keeps dequeuing the file config's batch size forever.
+func TestBufferBatchSizeFollowsAPush(t *testing.T) {
+	m := newManagedTestManager(t)
+	m.cfg.Buffer.BatchSize = 100
+
+	if got := m.drainBatchSize(); got != 100 {
+		t.Fatalf("setup: drainBatchSize = %d, want the file config's 100", got)
+	}
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 4, map[string]string{
+		"buffer": "batch_size: 250\n",
+	}))
+
+	if got := m.drainBatchSize(); got != 250 {
+		t.Fatalf("drainBatchSize = %d, want 250 from the effective config", got)
+	}
+	if m.cfg.Buffer.BatchSize != 100 {
+		t.Fatalf("the file config must stay immutable: BatchSize = %d", m.cfg.Buffer.BatchSize)
+	}
+}
+
+// TestHandshakeCapabilitiesReportWhatTheCollectorsWereBuiltFrom: the
+// handshake advertises which collectors this agent runs, and once boot has
+// built them from the effective config, the file config is no longer that
+// answer. A reconnect that kept advertising logs=true after the platform
+// disabled collect.logs at boot would be the same untruth restart_required
+// exists to close, one message earlier.
+func TestHandshakeCapabilitiesReportWhatTheCollectorsWereBuiltFrom(t *testing.T) {
+	m := newManagedTestManager(t)
+	m.cfg.Collect.Logs.Enabled = true
+
+	if !m.agentCaps().GetLogs() {
+		t.Fatal("setup: caps must follow the file config before boot reports a collector config")
+	}
+
+	built := *m.cfg
+	built.Collect.Logs.Enabled = false
+	m.SetCollectorConfig(&built)
+
+	if m.agentCaps().GetLogs() {
+		t.Fatal("caps.Logs = true while the log collector was never built")
+	}
+}

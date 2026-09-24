@@ -1145,8 +1145,24 @@ type Heartbeat struct {
 	// screen tells a cluster owner their Secret values leave the cluster.
 	CollectRedactSecrets *bool `protobuf:"varint,6,opt,name=collect_redact_secrets,json=collectRedactSecrets,proto3,oneof" json:"collect_redact_secrets,omitempty"` // collect.state.redact_secrets
 	QueryRedactSecrets   *bool `protobuf:"varint,7,opt,name=query_redact_secrets,json=queryRedactSecrets,proto3,oneof" json:"query_redact_secrets,omitempty"`       // query.redact_secrets, after inheritance
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// restart_required is true when the applied revision contains a block this
+	// process cannot put into effect without restarting. The screen's three
+	// states (applied / waiting for agent restart / rejected) are otherwise
+	// indistinguishable, and reporting "applied" for a setting that changed
+	// nothing is the failure this feature exists to prevent.
+	//
+	// The AGENT decides this, not the backend: only the agent knows which
+	// config its long-lived collectors were actually built from, and it
+	// answers by comparing that config against the one it has applied -- not
+	// by matching block NAMES, so re-pushing a restart-only block whose value
+	// has not changed does not ask for a pointless restart.
+	//
+	// A plain bool, not optional: this field ships in the same agent release
+	// as the managed blocks themselves, so no agent that reports an applied
+	// revision at all is too old to set it.
+	RestartRequired bool `protobuf:"varint,8,opt,name=restart_required,json=restartRequired,proto3" json:"restart_required,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -1224,6 +1240,13 @@ func (x *Heartbeat) GetCollectRedactSecrets() bool {
 func (x *Heartbeat) GetQueryRedactSecrets() bool {
 	if x != nil && x.QueryRedactSecrets != nil {
 		return *x.QueryRedactSecrets
+	}
+	return false
+}
+
+func (x *Heartbeat) GetRestartRequired() bool {
+	if x != nil {
+		return x.RestartRequired
 	}
 	return false
 }
@@ -4505,7 +4528,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x06mutate\x18\x04 \x01(\bR\x06mutate\x12\x19\n" +
 	"\bexec_pod\x18\x05 \x01(\bR\aexecPod\x12\x1b\n" +
 	"\texec_node\x18\x06 \x01(\bR\bexecNode\x12\x19\n" +
-	"\bnode_ops\x18\a \x01(\bR\anodeOps\"\x90\x03\n" +
+	"\bnode_ops\x18\a \x01(\bR\anodeOps\"\xbb\x03\n" +
 	"\tHeartbeat\x12*\n" +
 	"\x11timestamp_unix_ms\x18\x01 \x01(\x03R\x0ftimestampUnixMs\x12-\n" +
 	"\x06health\x18\x02 \x01(\v2\x15.agent.v1.AgentHealthR\x06health\x126\n" +
@@ -4513,7 +4536,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\fconfig_error\x18\x04 \x01(\tR\vconfigError\x12'\n" +
 	"\x0fconfig_warnings\x18\x05 \x03(\tR\x0econfigWarnings\x129\n" +
 	"\x16collect_redact_secrets\x18\x06 \x01(\bH\x00R\x14collectRedactSecrets\x88\x01\x01\x125\n" +
-	"\x14query_redact_secrets\x18\a \x01(\bH\x01R\x12queryRedactSecrets\x88\x01\x01B\x19\n" +
+	"\x14query_redact_secrets\x18\a \x01(\bH\x01R\x12queryRedactSecrets\x88\x01\x01\x12)\n" +
+	"\x10restart_required\x18\b \x01(\bR\x0frestartRequiredB\x19\n" +
 	"\x17_collect_redact_secretsB\x17\n" +
 	"\x15_query_redact_secrets\"\xe0\x02\n" +
 	"\vAgentHealth\x12\x1f\n" +

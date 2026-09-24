@@ -2113,3 +2113,96 @@ func TestASecondShutdownMessageIsHarmless(t *testing.T) {
 		t.Fatalf("ShutdownReason() = %q, want the FIRST reason %q", got, "first reason")
 	}
 }
+
+// TestLogsEnabledFollowsAPush is the second of Ruling C's two live reads,
+// through the real path: the gateway's handshake carries a managed
+// collect.logs block that turns collection off, and a log already sitting in
+// the spill queue must not be exported. Before this, shouldDeliverQueuedMessage
+// read the immutable FILE config, so the managed block was stored, validated,
+// reported as applied -- and every stale log went out anyway.
+//
+// It is the handshake, not a push, because that is the ordering that makes
+// the bug reachable: the managed set arrives with the session, and the drain
+// starts in the same session.
+func TestLogsEnabledFollowsAPush(t *testing.T) {
+	t.Parallel()
+
+	var received sync.Map
+	srv := &mockGateway{
+		onConnect: func(stream grpc.BidiStreamingServer[agentv1.AgentMessage, agentv1.GatewayMessage]) error {
+			msg, err := stream.Recv()
+			if err != nil {
+				return err
+			}
+			if msg.GetHandshake() == nil {
+				return status.Error(codes.InvalidArgument, "expected handshake")
+			}
+			if err := stream.Send(&agentv1.GatewayMessage{
+				Payload: &agentv1.GatewayMessage_Handshake{
+					Handshake: &agentv1.HandshakeResponse{
+						Accepted:  true,
+						SessionId: "sess-managed-logs",
+						Config: &agentv1.ConfigSnapshot{
+							Managed: &agentv1.ManagedBlocks{
+								Revision: 31,
+								Blocks: []*agentv1.ManagedBlock{
+									{Key: "collect.logs", Yaml: "enabled: false\n"},
+								},
+							},
+						},
+					},
+				},
+			}); err != nil {
+				return err
+			}
+
+			for {
+				msg, err := stream.Recv()
+				if err != nil {
+					return err
+				}
+				received.Store(msg.GetMessageId(), msg)
+			}
+		},
+	}
+	_, lis := startBufGRPCServer(t, srv)
+
+	cfg := testConfig()
+	// The FILE config says collect: the managed block is the only thing
+	// turning it off, so a drain reading m.cfg would deliver the item below.
+	cfg.Collect.Logs.Enabled = true
+	q := newTestQueue(t)
+	sm, _ := newTestManager(t, cfg, q, lis)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = sm.Run(ctx) }()
+
+	waitFor(t, 3*time.Second, func() bool { return sm.Connected() })
+
+	logMsg := &agentv1.AgentMessage{
+		MessageId: "queued-log-managed-off",
+		Payload: &agentv1.AgentMessage_Logs{
+			Logs: &agentv1.LogBatch{
+				Entries: []*agentv1.LogEntry{
+					{Namespace: "stage", PodName: "be-1", Message: "the platform turned logs off"},
+				},
+			},
+		},
+	}
+	payload, err := proto.Marshal(logMsg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := q.Enqueue(context.Background(), queue.Item{ID: logMsg.MessageId, Payload: payload}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	waitFor(t, 3*time.Second, func() bool { return q.Depth() == 0 })
+
+	if _, ok := received.Load("queued-log-managed-off"); ok {
+		t.Fatal("a log was delivered while the managed collect.logs block has enabled: false")
+	}
+
+	cancel()
+}

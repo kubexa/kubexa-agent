@@ -67,6 +67,133 @@ var managedBlockAllowedKeys = map[string]map[string]bool{
 	},
 }
 
+// managedBlockAppliesLive classifies every managed block by WHEN a running
+// agent can put it into effect. It is a hand-written set, not a derivation,
+// and that is the point: "live" is a claim about every consumer of a block
+// re-reading EffectiveConfig() on each use, which no amount of reflection
+// over the struct can check. A derivation that drifted would hand the
+// platform a confident wrong answer, which is worse than the honest list.
+//
+//   - true (live): the agent applies the block without a restart. query is
+//     swapped into the compiled policy holder on every applied set; buffer's
+//     only settable key, batch_size, is re-read by the drain loop on every
+//     batch.
+//   - false (restart-only): the block is baked into a component at
+//     CONSTRUCTION. The collectors are built once, from the config resolved
+//     at boot, so collect.logs/state/metrics -- their rules, intervals,
+//     resync_period and enabled flags alike -- only change when the process
+//     restarts.
+//
+// TestEveryManagedBlockIsClassifiedByWhenItTakesEffect (blocks_test.go)
+// pins this map against a literal, and
+// TestHeartbeatRestartRequiredFollowsTheBlockClassification
+// (internal/stream) pins that the heartbeat's restart_required follows it.
+// Moving a block between the categories fails both until the reporting
+// moves with it.
+var managedBlockAppliesLive = map[string]bool{
+	"collect.logs":    false,
+	"collect.state":   false,
+	"collect.metrics": false,
+	"query":           true,
+	"buffer":          true,
+}
+
+// ManagedBlockAppliesLive reports whether a running agent puts key's block
+// into effect without a restart. ok is false for any key outside the managed
+// set.
+func ManagedBlockAppliesLive(key string) (live bool, ok bool) {
+	live, ok = managedBlockAppliesLive[key]
+	return live, ok
+}
+
+// RestartRequiredBlocks names every restart-only managed block whose value
+// in effective differs from the one in built -- that is, every block the
+// agent has ACCEPTED but cannot actually be running until it restarts. The
+// result is in managedBlockKeys order and empty when the two agree.
+//
+// built is the config the long-lived components were constructed from, not
+// the file config: once boot resolves a managed set before building the
+// collectors, the two are different, and the file config would report a
+// restart for a block the collectors already run.
+//
+// It compares VALUES, never the set of block keys present. The platform
+// re-sends the whole managed set on every revision, so a key-based answer
+// would demand a restart for every edit to any other block, and an operator
+// who restarts and sees the flag come back has been told a falsehood twice.
+//
+// Both sides are normalized and compared through their YAML rendering
+// rather than reflect.DeepEqual, and neither is a nicety: an ApplyBlocks
+// result has been normalized and round-tripped, so against a base that has
+// not been it differs by injected default rule IDs and by nil-versus-empty
+// slices -- differences that mean nothing and would report a restart for
+// every revision, forever. Normalizing here rather than demanding it of the
+// caller keeps that failure out of reach of anyone holding a config this
+// package did not hand them.
+//
+// A nil on either side answers nothing: before boot reports what it built,
+// no component exists to be stale.
+func RestartRequiredBlocks(built, effective *Config) []string {
+	if built == nil || effective == nil {
+		return nil
+	}
+	built, effective = normalizedCopy(built), normalizedCopy(effective)
+	var out []string
+	for _, key := range managedBlockKeys {
+		if live := managedBlockAppliesLive[key]; live {
+			continue
+		}
+		if !bytes.Equal(managedBlockYAML(built, key), managedBlockYAML(effective, key)) {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+// normalizedCopy returns a normalized deep copy of cfg, leaving cfg itself
+// untouched -- Normalize writes rule IDs in place, and the file config this
+// is called on is the one value the agent keeps immutable so a released
+// block has something to restore.
+//
+// On the (marshalling) error cloneConfig can return, it falls back to cfg
+// itself rather than to nil: a comparison of two un-normalized configs can
+// be noisy, but answering "nothing to restart" because a copy failed would
+// be the silent wrong answer this whole field exists to stop.
+func normalizedCopy(cfg *Config) *Config {
+	clone, err := cloneConfig(cfg)
+	if err != nil {
+		return cfg
+	}
+	clone.Normalize()
+	return clone
+}
+
+// managedBlockYAML renders key's block out of cfg for comparison. A key
+// outside the managed set, and a value yaml cannot marshal, both render as
+// nil -- two of which compare equal, so an unknown key reports no change
+// rather than a spurious restart.
+func managedBlockYAML(cfg *Config, key string) []byte {
+	var v any
+	switch key {
+	case "collect.logs":
+		v = cfg.Collect.Logs
+	case "collect.state":
+		v = cfg.Collect.State
+	case "collect.metrics":
+		v = cfg.Collect.Metrics
+	case "query":
+		v = cfg.Query
+	case "buffer":
+		v = cfg.Buffer
+	default:
+		return nil
+	}
+	out, err := yaml.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
 // ManagedBlockKeys returns the closed set, in display order.
 func ManagedBlockKeys() []string {
 	out := make([]string, len(managedBlockKeys))

@@ -184,6 +184,28 @@ type streamManager struct {
 	// caller. Nil-checked -- most tests, and any build that never wires a
 	// consumer, leave it unset.
 	onEffectiveConfig atomic.Pointer[func(*config.Config) ([]string, error)]
+	// configSettled is closed once the first handshake has been processed,
+	// managed blocks and all, so boot can build the collectors from the
+	// platform's config rather than racing it. Closed rather than sent on,
+	// for the same reason shutdownCh is: the signal is level-triggered and a
+	// reader that arrives late still sees it.
+	configSettled     chan struct{}
+	configSettledOnce sync.Once
+	// collectorCfg is the config the long-lived components -- the collectors
+	// -- were actually built from. Written exactly once, by cmd/agent, right
+	// after it builds them and before it starts them; read by the heartbeat
+	// and by the handshake's capability flags.
+	//
+	// It is deliberately NOT part of managedState: that value is one OUTCOME
+	// of applyManaged, written once per attempt from the stream goroutine,
+	// and this answers a different question from a different writer -- what
+	// boot managed to build. Folding the two together would mean writing
+	// managedState from two goroutines for two reasons, which is exactly the
+	// torn-read shape collapsing three atomics into managedState removed.
+	//
+	// Nil until boot reports: before that, nothing has been built, so nothing
+	// can be stale (see restartRequired).
+	collectorCfg atomic.Pointer[config.Config]
 	// rules is the resolved ingest-rule set. The manager owns it because it is
 	// the only component that sees the gateway's messages; the log collector
 	// reads it on the collection path and drainBufferedQueue on the send path.
@@ -397,6 +419,7 @@ func New(
 		nodeJobClock:      time.Now,
 		nodeJobRetention:  nodeJobRetention,
 		shutdownCh:        make(chan struct{}),
+		configSettled:     make(chan struct{}),
 	}
 	// The manager is the store's only writer and Set panics on a nil receiver,
 	// so a caller that passes none gets a private store rather than a crash on
@@ -721,6 +744,27 @@ func (m *streamManager) defaultDial(ctx context.Context) (*grpc.ClientConn, agen
 	return conn, agentv1.NewAgentServiceClient(conn), nil
 }
 
+// agentCaps is what the handshake advertises this agent actually runs.
+//
+// Split out of handshake() so it can be asserted without a gateway: the
+// collect flags come from the config the COLLECTORS were built from, not
+// from the file config, and the two diverge the moment boot resolves a
+// managed set (see collectorConfig). The mutate/exec flags stay on the file
+// config because no managed block can change them -- they are outside the
+// closed set on purpose.
+func (m *streamManager) agentCaps() *agentv1.AgentCapabilities {
+	collect := m.collectorConfig()
+	return &agentv1.AgentCapabilities{
+		Logs:     collect.Collect.Logs.Enabled,
+		State:    collect.Collect.State.Enabled,
+		Metrics:  collect.Collect.Metrics.Enabled,
+		Mutate:   m.cfg.MutateEnabled(),
+		ExecPod:  m.cfg.ExecPodEnabled(),
+		ExecNode: nodeConsoleReady(m.execResponder),
+		NodeOps:  m.nodeJobs != nil,
+	}
+}
+
 func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentService_ConnectClient) (string, error) {
 	preferred, supported := protoversion.AgentHandshake()
 	req := &agentv1.AgentMessage{
@@ -732,15 +776,7 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 				SupportedProtoVersions: supported,
 				ClusterId:              m.cfg.Agent.ClusterID,
 				TenantToken:            m.cfg.Agent.TenantToken,
-				Caps: &agentv1.AgentCapabilities{
-					Logs:     m.cfg.Collect.Logs.Enabled,
-					State:    m.cfg.Collect.State.Enabled,
-					Metrics:  m.cfg.Collect.Metrics.Enabled,
-					Mutate:   m.cfg.MutateEnabled(),
-					ExecPod:  m.cfg.ExecPodEnabled(),
-					ExecNode: nodeConsoleReady(m.execResponder),
-					NodeOps:  m.nodeJobs != nil,
-				},
+				Caps:                   m.agentCaps(),
 			},
 		},
 	}
@@ -808,6 +844,12 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 // configSnap is only replaced when the handshake actually carries a snapshot,
 // because a nil there means "no config", not "empty config".
 func (m *streamManager) applyHandshakeConfig(hs *agentv1.HandshakeResponse) {
+	// Deferred, not called at the end: this function returns early for a
+	// handshake carrying no config, and boot must stop waiting for a
+	// managed set that is never coming just as promptly as for one that
+	// arrived. It runs AFTER applyManaged on the path that has one, which
+	// is what makes EffectiveConfig() valid to read the moment it fires.
+	defer m.settleConfig()
 	// Stored on EVERY handshake, not just one carrying a config snapshot: an
 	// agent upgraded ahead of its gateway must fall back to settling on Send,
 	// and that fallback has to hold even when the handshake below has nothing
@@ -938,6 +980,7 @@ func (m *streamManager) buildHeartbeat() *agentv1.Heartbeat {
 		ConfigWarnings:        warnings,
 		CollectRedactSecrets:  proto.Bool(effective.Collect.State.RedactSecrets),
 		QueryRedactSecrets:    proto.Bool(effective.QueryRedactSecrets()),
+		RestartRequired:       m.restartRequired(),
 	}
 }
 
@@ -1625,13 +1668,30 @@ func (m *streamManager) waitForInflightRoom(ctx context.Context, counter infligh
 	return nil
 }
 
-func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
-	batchSize := m.cfg.Buffer.BatchSize
-	if batchSize <= 0 {
-		batchSize = 100
+// drainBatchSize is how many items one drain iteration dequeues.
+//
+// It reads the EFFECTIVE config, never m.cfg: buffer.batch_size is a managed
+// block, and EffectiveConfig's own doc comment forbids reading the file
+// config for anything a managed block can change. drainBufferedQueue calls
+// it once per batch rather than once per session, which is what lets buffer
+// be classified as a LIVE block (pkg/config's managedBlockAppliesLive): a
+// session can stay up for days, and a batch size that only changed on
+// reconnect would be a control that mostly changes nothing.
+//
+// Split out of drainBufferedQueue so the value can be asserted without a
+// gateway, a queue and a live session.
+func (m *streamManager) drainBatchSize() int {
+	n := m.EffectiveConfig().Buffer.BatchSize
+	if n <= 0 {
+		n = 100
 	}
+	return n
+}
+
+func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
 	counter, bounded := m.queue.(inflightCounter)
 	for ctx.Err() == nil && m.ready.Load() {
+		batchSize := m.drainBatchSize()
 		if bounded && m.deliveryAcks.Load() {
 			if err := m.waitForInflightRoom(ctx, counter, batchSize); err != nil {
 				return
@@ -1664,7 +1724,11 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				terminalIDs = append(terminalIDs, item.ID)
 				continue
 			}
-			if !shouldDeliverQueuedMessage(m.cfg, &msg) {
+			// The EFFECTIVE config, not m.cfg: a managed collect.logs block
+			// that turned collection off must stop stale spill data from
+			// going out, or the block is stored, validated, reported as
+			// applied -- and every queued log is exported anyway.
+			if !shouldDeliverQueuedMessage(m.EffectiveConfig(), &msg) {
 				skippedLogs++
 				terminalIDs = append(terminalIDs, item.ID)
 				continue
@@ -1943,6 +2007,78 @@ func (m *streamManager) EffectiveConfig() *config.Config {
 		return st.cfg
 	}
 	return m.cfg
+}
+
+// SetCollectorConfig records the config the collectors were actually built
+// from. cmd/agent calls it once, after buildCollectors and before the
+// collectors start; it is reached by asserting the Manager value against a
+// narrow structural interface, the same shape SetOnEffectiveConfig uses, and
+// a failed assertion is a boot error there rather than a silent skip.
+//
+// Without it the agent cannot tell "applied" from "applied, but not in
+// effect until a restart" -- restartRequired answers false for everything,
+// which is the reporting failure this whole task exists to close. nil is
+// ignored: it would be indistinguishable from "boot never reported".
+func (m *streamManager) SetCollectorConfig(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	m.collectorCfg.Store(cfg)
+}
+
+// collectorConfig returns the config the collectors were built from, falling
+// back to the file config before boot has reported one. The fallback is not
+// a guess: until boot reports, no collector exists, and the file config is
+// what serve() would have built them from had it got there.
+func (m *streamManager) collectorConfig() *config.Config {
+	if c := m.collectorCfg.Load(); c != nil {
+		return c
+	}
+	return m.cfg
+}
+
+// restartRequired reports whether the revision this agent has applied
+// carries a block it cannot put into effect without restarting.
+//
+// It is a comparison between what the collectors were BUILT from and what is
+// applied now -- not a list of block names -- so re-pushing an unchanged
+// restart-only block asks for nothing, and a change to a live block never
+// does. False before boot reports a collector config: nothing has been built
+// yet, so nothing is stale.
+func (m *streamManager) restartRequired() bool {
+	built := m.collectorCfg.Load()
+	if built == nil {
+		return false
+	}
+	return len(config.RestartRequiredBlocks(built, m.EffectiveConfig())) > 0
+}
+
+// ConfigSettled returns a channel closed once this agent has completed its
+// first gateway handshake and applied whatever managed blocks it carried --
+// successfully or not. cmd/agent waits on it, briefly, before building the
+// collectors, so they are built from the platform's config instead of from
+// the file config the handshake was about to override.
+//
+// It fires on the handshake, not on the first managed set specifically,
+// because a gateway that manages nothing for this cluster sends no blocks at
+// all: waiting for a set that is never coming would spend the whole boot
+// budget on every unmanaged agent. A gateway that is unreachable closes it
+// never, which is exactly the case the caller's timeout exists for.
+//
+// Nil for a manager built as a struct literal in a test; a receive on a nil
+// channel blocks forever, which is the same "no gateway ever answered" the
+// caller already handles.
+func (m *streamManager) ConfigSettled() <-chan struct{} {
+	return m.configSettled
+}
+
+// settleConfig closes the ConfigSettled channel, exactly once and only when
+// New built one.
+func (m *streamManager) settleConfig() {
+	if m.configSettled == nil {
+		return
+	}
+	m.configSettledOnce.Do(func() { close(m.configSettled) })
 }
 
 // ShutdownRequested returns a channel that is closed when the gateway has
