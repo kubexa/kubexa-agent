@@ -361,8 +361,19 @@ func (c *Config) validateQuery() []string {
 					label, name, ResourceWildcard))
 				continue
 			}
-			if _, err := k8sresource.Parse(name); err != nil {
+			d, err := k8sresource.Parse(name)
+			if err != nil {
 				violations = append(violations, fmt.Sprintf("query rule %s: %v", label, err))
+				continue
+			}
+			// Parse tolerates a malformed GVR by returning a zero Descriptor
+			// rather than an error (see parse.go descriptorForGVR). A zero
+			// Ref would match nothing, so reject it here instead of shipping
+			// a rule the owner believes is in force -- matching
+			// internal/query/policy/policy.go's Compile check exactly, so
+			// what passes here also compiles.
+			if d.GVR.Resource == "" || d.GVR.Version == "" {
+				violations = append(violations, fmt.Sprintf("query rule %s: unsupported resource %q", label, name))
 			}
 		}
 		if err := validatePattern(rule.Namespace); err != nil {

@@ -68,11 +68,11 @@ func tableExecutorFor(t *testing.T, clients *k8s.QueryClients, cfgYAML string) *
 	if err := yaml.Unmarshal([]byte(cfgYAML), &cfg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	p, err := policy.Compile(&cfg)
+	h, _, err := policy.NewHolder(&cfg)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	e, err := New(Options{Clients: *clients, Policy: p})
+	e, err := New(Options{Clients: *clients, Policy: h})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
