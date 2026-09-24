@@ -280,6 +280,45 @@ func checkAllowedKeys(key string, body []byte) error {
 	return fmt.Errorf("%s: %s", key, strings.Join(violations, "; "))
 }
 
+// checkEmptyRules refuses a `rules` key that is present but carries nothing.
+// An empty list is ambiguous -- "no rules" and "use the defaults" are both
+// readable -- and every consumer currently picks the widest reading:
+// QueryRules inherits collect.state's rules at len()==0 (query.go:304), and
+// normalize() refills an empty list with a permissive default for logs
+// (collect.go:76-79) and state (collect.go:119-126). Omitting the key already
+// means "unchanged" under the patch rule and `enabled: false` already means
+// "collect nothing", so refusing this spelling loses nothing expressible.
+//
+// Two YAML spellings resolve to the same nil slice and the same widening:
+// `rules: []` parses as a SequenceNode with no Content, and a bare `rules:`
+// with no value parses as a null ScalarNode. Refusing only the sequence form
+// would leave the quieter, easier-to-write-by-accident spelling open.
+//
+// A body that does not parse as a mapping is let through here, same as
+// checkAllowedKeys and for the same reason: the later splice/unmarshal pass
+// already produces a clearer error naming the actual YAML problem, and
+// duplicating that failure here would only double the error, not the
+// coverage.
+func checkEmptyRules(key string, body []byte) error {
+	var raw map[string]yaml.Node
+	if err := yaml.Unmarshal(body, &raw); err != nil {
+		return nil
+	}
+	node, present := raw["rules"]
+	if !present {
+		return nil
+	}
+	empty := (node.Kind == yaml.SequenceNode && len(node.Content) == 0) ||
+		(node.Kind == yaml.ScalarNode && node.Tag == "!!null")
+	if !empty {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s: rules: [] is ambiguous -- omit the key to keep the current rules, or set enabled: false to disable this block",
+		key,
+	)
+}
+
 // spliceBlock nests body under key's path, producing a document that Config
 // can bind. "collect.logs" becomes `collect:\n  logs:\n    <body>`.
 func spliceBlock(key string, body []byte) ([]byte, error) {
@@ -325,6 +364,9 @@ func ValidateBlock(key string, body []byte) error {
 		return fmt.Errorf("unknown config block %q", key)
 	}
 	if err := checkAllowedKeys(key, body); err != nil {
+		return err
+	}
+	if err := checkEmptyRules(key, body); err != nil {
 		return err
 	}
 	doc, err := spliceBlock(key, body)
