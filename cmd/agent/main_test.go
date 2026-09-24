@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -244,18 +245,20 @@ func TestBuildMutationResponderFactoryCalledOnlyWhenEnabled(t *testing.T) {
 	})
 }
 
-// compiledQueryPolicy compiles a valid, non-nil query policy -- the "what a
-// real serve() call site would hand buildCapabilityReporterOptions" shape,
-// distinct in TYPE (internal/query/policy.Policy) from the mutate policy
-// compiledMutatePolicy builds, for the same reason that function's own
-// comment gives.
-func compiledQueryPolicy(t *testing.T) *policy.Policy {
+// compiledQueryPolicy compiles a valid, non-nil query policy holder -- the
+// "what a real serve() call site would hand buildCapabilityReporterOptions"
+// shape, distinct in TYPE (internal/query/policy.Holder) from the mutate
+// policy compiledMutatePolicy builds, for the same reason that function's own
+// comment gives. A Holder, not a bare Policy, because buildCapabilityReporterOptions
+// now takes the live holder so the reporter's verdicts follow a managed-config
+// swap instead of freezing at their boot values.
+func compiledQueryPolicy(t *testing.T) *policy.Holder {
 	t.Helper()
-	p, err := policy.Compile(&config.Config{})
+	h, _, err := policy.NewHolder(&config.Config{})
 	if err != nil {
-		t.Fatalf("policy.Compile: %v", err)
+		t.Fatalf("policy.NewHolder: %v", err)
 	}
-	return p
+	return h
 }
 
 // compiledExecPolicy compiles a valid, non-nil exec policy -- the "what a
@@ -667,4 +670,80 @@ func TestBuildExecResponderWiresNodeOptions(t *testing.T) {
 			}
 		}
 	})
+}
+
+// countingSweeper is a sweepRequester fake that counts calls instead of
+// running a real reporter's sweep, so a test can assert exactly how many
+// times -- zero or one -- a callback invoked RequestSweep.
+type countingSweeper struct{ calls int }
+
+func (s *countingSweeper) RequestSweep() { s.calls++ }
+
+// invalidQueryConfig is a *config.Config whose one query rule Compile
+// refuses: k8sresource.Parse("pods/") returns a valid Descriptor with a zero
+// GVR field (Resource == ""), which Compile rejects as "unsupported
+// resource" rather than silently compiling a rule that matches nothing. This
+// is the exact "schema-valid but Compile-invalid" shape
+// newEffectiveConfigCallback's own comment names -- reachable from
+// ApplyBlocks, not theoretical.
+func invalidQueryConfig() *config.Config {
+	return &config.Config{
+		Query: config.QueryConfig{
+			Rules: []config.QueryRule{{ID: "bad", Resources: []string{"pods/"}}},
+		},
+	}
+}
+
+// TestNewEffectiveConfigCallbackSwapFailureNeverNudges pins the half of the
+// ordering a code read alone cannot verify: a rejected config must reach the
+// caller as an error, with no warnings and -- the actual gap this test
+// closes -- WITHOUT ever calling RequestSweep. A rejected Swap changed no
+// policy (Holder.Swap leaves the previous one in effect), so a catalog sweep
+// here would publish verdicts for a policy the agent never adopted. If a
+// later edit moves the RequestSweep call above this error return, this test
+// must be the one that goes red.
+func TestNewEffectiveConfigCallbackSwapFailureNeverNudges(t *testing.T) {
+	holder := compiledQueryPolicy(t)
+	sweeper := &countingSweeper{}
+	cb := newEffectiveConfigCallback(holder, sweeper, logger.New("test"))
+
+	warnings, err := cb(invalidQueryConfig())
+
+	if err == nil {
+		t.Fatal("want an error for a query rule Compile refuses, got nil")
+	}
+	if warnings != nil {
+		t.Fatalf("warnings = %v, want nil on a rejected swap", warnings)
+	}
+	if sweeper.calls != 0 {
+		t.Fatalf("RequestSweep calls = %d, want 0: a rejected swap changed no policy, "+
+			"so there is nothing new for the capability catalog to report", sweeper.calls)
+	}
+}
+
+// TestNewEffectiveConfigCallbackNudgesAfterASuccessfulSwap is the mirror: a
+// swap that succeeds must call RequestSweep exactly once -- so the explorer
+// catalog is refreshed rather than waiting out the reporter's own discovery
+// tick or safety sweep -- and must return the swap's own warnings unchanged.
+func TestNewEffectiveConfigCallbackNudgesAfterASuccessfulSwap(t *testing.T) {
+	holder := compiledQueryPolicy(t)
+	sweeper := &countingSweeper{}
+	cb := newEffectiveConfigCallback(holder, sweeper, logger.New("test"))
+
+	wantWarnings, swapErr := holder.Swap(config.Default())
+	if swapErr != nil {
+		t.Fatalf("precondition: policy.Holder.Swap(config.Default()): %v", swapErr)
+	}
+
+	gotWarnings, err := cb(config.Default())
+
+	if err != nil {
+		t.Fatalf("callback returned an error for a config Compile accepts: %v", err)
+	}
+	if !slices.Equal(gotWarnings, wantWarnings) {
+		t.Fatalf("warnings = %v, want the swap's own warnings %v", gotWarnings, wantWarnings)
+	}
+	if sweeper.calls != 1 {
+		t.Fatalf("RequestSweep calls = %d, want exactly 1 after a successful swap", sweeper.calls)
+	}
 }

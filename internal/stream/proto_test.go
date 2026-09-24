@@ -99,3 +99,54 @@ func TestLogEntryTruncatedRoundTrip(t *testing.T) {
 		t.Fatal("truncated flag lost")
 	}
 }
+
+func TestManagedBlocksIsAPatchField(t *testing.T) {
+	// A watchers-only update must leave managed nil, and a managed-only
+	// update must leave watchers empty. This is the rule agent.proto's
+	// comment calls load-bearing; both directions are asserted because the
+	// failure it prevents is each sender erasing the other.
+	watchersOnly := &agentv1.ConfigSnapshot{
+		Watchers: []*agentv1.WatcherConfig{{Id: "w1"}},
+	}
+	if watchersOnly.GetManaged() != nil {
+		t.Fatal("a watchers-only snapshot must carry no managed blocks")
+	}
+
+	managedOnly := &agentv1.ConfigSnapshot{
+		Managed: &agentv1.ManagedBlocks{Blocks: []*agentv1.ManagedBlock{
+			{Key: "query", Yaml: "enabled: true\n"},
+		}},
+	}
+	if len(managedOnly.GetWatchers()) != 0 {
+		t.Fatal("a managed-only snapshot must carry no watchers")
+	}
+	if got := managedOnly.GetManaged().GetBlocks()[0].GetKey(); got != "query" {
+		t.Fatalf("key = %q, want %q", got, "query")
+	}
+}
+
+func TestHeartbeatCarriesTheConfigEcho(t *testing.T) {
+	hb := &agentv1.Heartbeat{
+		AppliedConfigRevision: 7,
+		ConfigError:           "collect.logs: field podNames not found in type config.LogNamespaceRule",
+		ConfigWarnings:        []string{"line 3: field podNames not found in type config.LogNamespaceRule"},
+	}
+	if hb.GetAppliedConfigRevision() != 7 || hb.GetConfigError() == "" || len(hb.GetConfigWarnings()) != 1 {
+		t.Fatal("heartbeat must carry revision, error and warnings")
+	}
+}
+
+func TestRedactSecretsIsReportedWithPresence(t *testing.T) {
+	// Not reported must stay distinguishable from reported-false. A bool
+	// would make an agent too old to set the field indistinguishable from an
+	// agent with redaction OFF -- and the screen would tell the owner their
+	// Secret values are protected, or not protected, on no evidence.
+	silent := &agentv1.Heartbeat{}
+	if silent.CollectRedactSecrets != nil || silent.QueryRedactSecrets != nil {
+		t.Fatal("an agent that does not report must leave both unset")
+	}
+	off := &agentv1.Heartbeat{CollectRedactSecrets: proto.Bool(false)}
+	if off.CollectRedactSecrets == nil || off.GetCollectRedactSecrets() {
+		t.Fatal("reported-false must be present and false")
+	}
+}

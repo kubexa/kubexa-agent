@@ -71,6 +71,40 @@ message AgentCapabilities {
 message Heartbeat {
   int64       timestamp_unix_ms = 1;
   AgentHealth health            = 2;
+
+  // The platform's config revision this agent has actually applied, and why
+  // it could not. Zero means "no managed blocks applied" -- which is also
+  // what an agent too old to know this field reports, and the two are
+  // deliberately the same case: neither has applied anything.
+  int64           applied_config_revision = 3;
+  string          config_error            = 4;
+  repeated string config_warnings         = 5;
+
+  // The two redaction flags the platform may DISPLAY but never change
+  // (spec §3.3). They are `optional` rather than plain bools because an
+  // agent too old to set them must not be read as an agent with redaction
+  // off: that is the unmeasured/measured-zero distinction this proto
+  // already preserves for scrape health, and here it decides whether the
+  // screen tells a cluster owner their Secret values leave the cluster.
+  optional bool collect_redact_secrets = 6; // collect.state.redact_secrets
+  optional bool query_redact_secrets   = 7; // query.redact_secrets, after inheritance
+
+  // restart_required is true when the applied revision contains a block this
+  // process cannot put into effect without restarting. The screen's three
+  // states (applied / waiting for agent restart / rejected) are otherwise
+  // indistinguishable, and reporting "applied" for a setting that changed
+  // nothing is the failure this feature exists to prevent.
+  //
+  // The AGENT decides this, not the backend: only the agent knows which
+  // config its long-lived collectors were actually built from, and it
+  // answers by comparing that config against the one it has applied -- not
+  // by matching block NAMES, so re-pushing a restart-only block whose value
+  // has not changed does not ask for a pointless restart.
+  //
+  // A plain bool, not optional: this field ships in the same agent release
+  // as the managed blocks themselves, so no agent that reports an applied
+  // revision at all is too old to set it.
+  bool restart_required = 8;
 }
 
 message AgentHealth {
@@ -230,6 +264,35 @@ message ConfigSnapshot {
   int32                        batch_size             = 5;
   int32                        flush_interval_ms      = 6;
   IngestRules                  ingest_rules           = 7;
+  ManagedBlocks                managed                = 8;
+}
+
+// ManagedBlock is one configuration block the PLATFORM owns for this
+// cluster, carried as YAML in the agent's own schema rather than as a
+// typed mirror. The mirror is what produced LogCollectorConfig above,
+// which has drifted from config.LogNamespaceRule (no field_selector, no
+// pod_names, no labels) and which nothing reads. One schema -- the
+// agent's -- cannot drift from itself.
+message ManagedBlock {
+  string key  = 1; // collect.logs | collect.state | collect.metrics | query | buffer
+  string yaml = 2; // the block's value, agent snake_case, WITHOUT the key line
+}
+
+// ManagedBlocks is message-typed on purpose: by ConfigSnapshot's patch rule
+// above, nil means unchanged, so the clusterwatch reconciler and the
+// ingest-rules pusher cannot erase it. A NON-NIL value is the COMPLETE set
+// of blocks the platform owns; a block absent from it has been released
+// back to the agent's own config file.
+message ManagedBlocks {
+  repeated ManagedBlock blocks   = 1;
+  // The platform's revision for THIS set. It lives here rather than on
+  // ConfigUpdate because the set arrives by two routes -- the handshake's
+  // ConfigSnapshot and a pushed ConfigUpdate -- and only the latter carries
+  // a version field. An agent that picks its blocks up at the handshake
+  // must still be able to say which revision it is running, so the number
+  // travels with the set itself. The backend's counter starts at 1, so 0 on
+  // a non-nil set has exactly one meaning: no managed blocks applied.
+  int64                 revision = 2;
 }
 
 // IngestRules are the limits the platform's log pipeline actually enforces,

@@ -3,6 +3,8 @@ package stream
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -151,6 +153,61 @@ type streamManager struct {
 	sessionID   atomic.Value // string
 	ready       atomic.Bool
 	configSnap  atomic.Pointer[agentv1.ConfigSnapshot]
+	// managed is the effective config the platform's managed blocks produce,
+	// together with the revision and outcome that produced it, stored and
+	// loaded as ONE value. EffectiveConfig and ManagedState each load it
+	// once: a heartbeat reading the config and the revision through two
+	// separate atomics could observe a new effective config paired with the
+	// previous revision -- exactly the combination the platform's screen
+	// reports to the user -- so the two must never be settable
+	// independently. Nil until the first managed-block set is applied
+	// (successfully or not); EffectiveConfig falls back to cfg itself for
+	// that case, so no caller needs to know whether any block is managed.
+	// cfg is never written after New, so it always stays available as the
+	// value a released block restores.
+	managed atomic.Pointer[managedState]
+	// onEffectiveConfig is called with each newly-applied effective config,
+	// before applyManaged's single Store, and its return decides whether
+	// that config is reported as applied at all: an error means the config
+	// could not actually be put into effect (Task 5, Ruling B -- ApplyBlocks
+	// accepting a value its real consumer refuses is a mirrored-constraint
+	// gap), and rejects the whole set exactly like an ApplyBlocks error
+	// does. A scalar field, not a registry: this codebase has already left
+	// two features inert behind a callback slot that kept only the last
+	// registration, so this field's singular name is the promise there is
+	// exactly one consumer. Task 4 sets it to swap the live query policy.
+	//
+	// atomic.Pointer, not a plain field: SetOnEffectiveConfig runs on
+	// whatever goroutine calls it (cmd/agent's serve, before go
+	// streamMgr.Run) while applyManaged reads it from the stream goroutine.
+	// It was safe as a plain field only by the accident that nothing sets it
+	// after Run starts; changing its type here (Task 5, Ruling C) makes that
+	// safety a property of the field instead of a fact about today's one
+	// caller. Nil-checked -- most tests, and any build that never wires a
+	// consumer, leave it unset.
+	onEffectiveConfig atomic.Pointer[func(*config.Config) ([]string, error)]
+	// configSettled is closed once the first handshake has been processed,
+	// managed blocks and all, so boot can build the collectors from the
+	// platform's config rather than racing it. Closed rather than sent on,
+	// for the same reason shutdownCh is: the signal is level-triggered and a
+	// reader that arrives late still sees it.
+	configSettled     chan struct{}
+	configSettledOnce sync.Once
+	// collectorCfg is the config the long-lived components -- the collectors
+	// -- were actually built from. Written exactly once, by cmd/agent, right
+	// after it builds them and before it starts them; read by the heartbeat
+	// and by the handshake's capability flags.
+	//
+	// It is deliberately NOT part of managedState: that value is one OUTCOME
+	// of applyManaged, written once per attempt from the stream goroutine,
+	// and this answers a different question from a different writer -- what
+	// boot managed to build. Folding the two together would mean writing
+	// managedState from two goroutines for two reasons, which is exactly the
+	// torn-read shape collapsing three atomics into managedState removed.
+	//
+	// Nil until boot reports: before that, nothing has been built, so nothing
+	// can be stale (see restartRequiredFor).
+	collectorCfg atomic.Pointer[config.Config]
 	// rules is the resolved ingest-rule set. The manager owns it because it is
 	// the only component that sees the gateway's messages; the log collector
 	// reads it on the collection path and drainBufferedQueue on the send path.
@@ -188,6 +245,23 @@ type streamManager struct {
 	// construction and read-only afterward. Nil is valid -- a node_job is
 	// dropped and the handshake advertises node_ops=false.
 	nodeJobs NodeJobResponder
+
+	// shutdownCh is closed exactly once -- guarded by shutdownOnce -- when
+	// the gateway sends a Shutdown message. Closing it rather than sending
+	// on it makes the signal level-triggered: any number of observers, and
+	// a read that happens after the close, all see it fired. cmd/agent
+	// watches it and calls the same signal.NotifyContext stop() a real
+	// SIGTERM invokes, so a platform-requested restart drains through the
+	// one exit path the agent already has instead of a second
+	// implementation only Shutdown would ever exercise (see main.go).
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
+	// shutdownReason holds the gateway's stated reason for the FIRST
+	// Shutdown message received in this session. shutdownOnce guards both
+	// the close of shutdownCh and this store together, so a retried or
+	// duplicate Shutdown never overwrites the reason an operator sees
+	// logged when the drain begins.
+	shutdownReason atomic.Value // string
 
 	// nodeJobLast retains the latest NodeJobEvent per job id, recorded by
 	// handleNodeJob's emit closure before it ever tries to send. A stream can
@@ -346,6 +420,8 @@ func New(
 		nodeJobLast:       make(map[string]nodeJobRetained),
 		nodeJobClock:      time.Now,
 		nodeJobRetention:  nodeJobRetention,
+		shutdownCh:        make(chan struct{}),
+		configSettled:     make(chan struct{}),
 	}
 	// The manager is the store's only writer and Set panics on a nil receiver,
 	// so a caller that passes none gets a private store rather than a crash on
@@ -670,6 +746,27 @@ func (m *streamManager) defaultDial(ctx context.Context) (*grpc.ClientConn, agen
 	return conn, agentv1.NewAgentServiceClient(conn), nil
 }
 
+// agentCaps is what the handshake advertises this agent actually runs.
+//
+// Split out of handshake() so it can be asserted without a gateway: the
+// collect flags come from the config the COLLECTORS were built from, not
+// from the file config, and the two diverge the moment boot resolves a
+// managed set (see collectorConfig). The mutate/exec flags stay on the file
+// config because no managed block can change them -- they are outside the
+// closed set on purpose.
+func (m *streamManager) agentCaps() *agentv1.AgentCapabilities {
+	collect := m.collectorConfig()
+	return &agentv1.AgentCapabilities{
+		Logs:     collect.Collect.Logs.Enabled,
+		State:    collect.Collect.State.Enabled,
+		Metrics:  collect.Collect.Metrics.Enabled,
+		Mutate:   m.cfg.MutateEnabled(),
+		ExecPod:  m.cfg.ExecPodEnabled(),
+		ExecNode: nodeConsoleReady(m.execResponder),
+		NodeOps:  m.nodeJobs != nil,
+	}
+}
+
 func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentService_ConnectClient) (string, error) {
 	preferred, supported := protoversion.AgentHandshake()
 	req := &agentv1.AgentMessage{
@@ -681,15 +778,7 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 				SupportedProtoVersions: supported,
 				ClusterId:              m.cfg.Agent.ClusterID,
 				TenantToken:            m.cfg.Agent.TenantToken,
-				Caps: &agentv1.AgentCapabilities{
-					Logs:     m.cfg.Collect.Logs.Enabled,
-					State:    m.cfg.Collect.State.Enabled,
-					Metrics:  m.cfg.Collect.Metrics.Enabled,
-					Mutate:   m.cfg.MutateEnabled(),
-					ExecPod:  m.cfg.ExecPodEnabled(),
-					ExecNode: nodeConsoleReady(m.execResponder),
-					NodeOps:  m.nodeJobs != nil,
-				},
+				Caps:                   m.agentCaps(),
 			},
 		},
 	}
@@ -757,6 +846,12 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 // configSnap is only replaced when the handshake actually carries a snapshot,
 // because a nil there means "no config", not "empty config".
 func (m *streamManager) applyHandshakeConfig(hs *agentv1.HandshakeResponse) {
+	// Deferred, not called at the end: this function returns early for a
+	// handshake carrying no config, and boot must stop waiting for a
+	// managed set that is never coming just as promptly as for one that
+	// arrived. It runs AFTER applyManaged on the path that has one, which
+	// is what makes EffectiveConfig() valid to read the moment it fires.
+	defer m.settleConfig()
 	// Stored on EVERY handshake, not just one carrying a config snapshot: an
 	// agent upgraded ahead of its gateway must fall back to settling on Send,
 	// and that fallback has to hold even when the handshake below has nothing
@@ -776,6 +871,13 @@ func (m *streamManager) applyHandshakeConfig(hs *agentv1.HandshakeResponse) {
 		logger.F("max_line_bytes", m.rules.Get().MaxLineBytes),
 		logger.F("delivery_acks", hs.GetDeliveryAcks()),
 	)
+	// The revision travels inside ManagedBlocks itself now, not on the
+	// handshake: an agent that picks its blocks up here (a restart or
+	// reconnect re-adopting the platform's set) must still report the
+	// revision it last had applied, not 0 -- HandshakeResponse carries no
+	// config_version at all, so a value derived from this call site alone
+	// could only ever be wrong.
+	m.applyManaged(hs.GetConfig().GetManaged())
 }
 
 func (m *streamManager) startSessionWorkers(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
@@ -851,6 +953,59 @@ const overloadedQueueFraction = 0.8
 // ack lost to a cut would pin its WAL segment for the process's lifetime.
 const inflightAckDeadline = 10 * time.Minute
 
+// buildHeartbeat assembles the heartbeat payload. Split out of heartbeatLoop
+// so what the agent reports can be asserted without a stream or a ticker --
+// heartbeatLoop needs a live agentv1.AgentService_ConnectClient and a ticker,
+// which would otherwise mean a fake stream and a clock just to see what one
+// message says.
+//
+// It loads m.managed exactly ONCE, via managedSnapshot, and hands that one
+// value to buildHeartbeatFrom: applyManaged runs on the receive/handshake
+// goroutine and can store a new state between any two reads, and
+// managedState's own doc comment explains why that must never happen mid-
+// heartbeat -- a reader could observe a new effective config paired with a
+// stale revision, or a success paired with a leftover error, exactly the
+// combinations the platform's screen must never show a cluster owner. The
+// atomic makes each value consistent with itself; only a single load makes
+// the heartbeat's fields consistent with EACH OTHER.
+func (m *streamManager) buildHeartbeat() *agentv1.Heartbeat {
+	return m.buildHeartbeatFrom(m.managedSnapshot())
+}
+
+// buildHeartbeatFrom derives every managed-config field of one heartbeat
+// from st, the single snapshot buildHeartbeat loaded. Split out so the
+// single-snapshot property can be pinned directly (see
+// TestTheHeartbeatIsBuiltFromASingleSnapshot): st is the only source for the
+// revision, the error, the warnings, the redaction flags and
+// RestartRequired, and none of them may read m.managed again.
+//
+// The three ManagedState-derived fields are an echo of what applyManaged
+// last stored, never recomputed here: the revision is the last APPLIED one
+// (a rejected revision never advances it), config_error names why the most
+// recent attempt (if any) was refused, and config_warnings carries what the
+// real consumer -- the live query policy swap -- returned, so the person who
+// pushed the config sees it, not only the operator reading the agent's log.
+//
+// The two redaction flags are read from st's effective config, not the file
+// config -- they must reflect whatever the agent is actually running -- and
+// are ALWAYS set with proto.Bool: this agent always knows both, and leaving
+// them nil is reserved for an agent too old to report them at all (spec
+// §3.3's unmeasured/measured-zero distinction).
+func (m *streamManager) buildHeartbeatFrom(st *managedState) *agentv1.Heartbeat {
+	revision, configErr, warnings := managedStateFields(st)
+	effective := m.effectiveConfigFor(st)
+	return &agentv1.Heartbeat{
+		TimestampUnixMs:       time.Now().UnixMilli(),
+		Health:                m.healthSnapshot(),
+		AppliedConfigRevision: revision,
+		ConfigError:           configErr,
+		ConfigWarnings:        warnings,
+		CollectRedactSecrets:  proto.Bool(effective.Collect.State.RedactSecrets),
+		QueryRedactSecrets:    proto.Bool(effective.QueryRedactSecrets()),
+		RestartRequired:       m.restartRequiredFor(st),
+	}
+}
+
 // heartbeatLoop reports the agent's health on the interval the gateway asked
 // for. Nothing sent one before this: agent.v1.Heartbeat has existed since the
 // protocol was written and the gateway's handler only ever saw messages from
@@ -875,10 +1030,7 @@ func (m *streamManager) heartbeatLoop(ctx context.Context, stream agentv1.AgentS
 			msg := &agentv1.AgentMessage{
 				MessageId: uuid.NewString(),
 				Payload: &agentv1.AgentMessage_Heartbeat{
-					Heartbeat: &agentv1.Heartbeat{
-						TimestampUnixMs: time.Now().UnixMilli(),
-						Health:          m.healthSnapshot(),
-					},
+					Heartbeat: m.buildHeartbeat(),
 				},
 			}
 			// Sent straight down the stream rather than through the queue: a
@@ -1144,10 +1296,17 @@ func (m *streamManager) handleGatewayMessage(ctx context.Context, msg *agentv1.G
 		if len(p.Config.GetConfig().GetWatchers()) > 0 {
 			m.reconcileWatchConfig(ctx, p.Config.GetConfig())
 		}
+		// ConfigUpdate.config_version is NOT the managed-block revision: it
+		// belongs to whichever sender set it (the ingest-rules pusher uses
+		// its own scheme), and it is absent on the handshake's ConfigSnapshot
+		// entirely. The managed revision instead travels inside
+		// ManagedBlocks itself, so it reaches the agent by both routes.
+		m.applyManaged(p.Config.GetConfig().GetManaged())
 	case *agentv1.GatewayMessage_Shutdown:
 		m.log.Warn("gateway requested shutdown",
 			logger.F("reason", p.Shutdown.GetReason()),
 		)
+		m.fireShutdown(p.Shutdown.GetReason())
 	case *agentv1.GatewayMessage_Ack:
 		// Gated so an old-mode agent (no delivery_acks) never takes the queue
 		// mutex or runs WAL compaction for an ack it doesn't need: the false
@@ -1531,13 +1690,30 @@ func (m *streamManager) waitForInflightRoom(ctx context.Context, counter infligh
 	return nil
 }
 
-func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
-	batchSize := m.cfg.Buffer.BatchSize
-	if batchSize <= 0 {
-		batchSize = 100
+// drainBatchSize is how many items one drain iteration dequeues.
+//
+// It reads the EFFECTIVE config, never m.cfg: buffer.batch_size is a managed
+// block, and EffectiveConfig's own doc comment forbids reading the file
+// config for anything a managed block can change. drainBufferedQueue calls
+// it once per batch rather than once per session, which is what lets buffer
+// be classified as an EffectLive block (pkg/config's managedBlockEffect): a
+// session can stay up for days, and a batch size that only changed on
+// reconnect would be a control that mostly changes nothing.
+//
+// Split out of drainBufferedQueue so the value can be asserted without a
+// gateway, a queue and a live session.
+func (m *streamManager) drainBatchSize() int {
+	n := m.EffectiveConfig().Buffer.BatchSize
+	if n <= 0 {
+		n = 100
 	}
+	return n
+}
+
+func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
 	counter, bounded := m.queue.(inflightCounter)
 	for ctx.Err() == nil && m.ready.Load() {
+		batchSize := m.drainBatchSize()
 		if bounded && m.deliveryAcks.Load() {
 			if err := m.waitForInflightRoom(ctx, counter, batchSize); err != nil {
 				return
@@ -1570,7 +1746,11 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				terminalIDs = append(terminalIDs, item.ID)
 				continue
 			}
-			if !shouldDeliverQueuedMessage(m.cfg, &msg) {
+			// The EFFECTIVE config, not m.cfg: a managed collect.logs block
+			// that turned collection off must stop stale spill data from
+			// going out, or the block is stored, validated, reported as
+			// applied -- and every queued log is exported anyway.
+			if !shouldDeliverQueuedMessage(m.EffectiveConfig(), &msg) {
 				skippedLogs++
 				terminalIDs = append(terminalIDs, item.ID)
 				continue
@@ -1820,4 +2000,344 @@ func (m *streamManager) ConfigSnapshot() *agentv1.ConfigSnapshot {
 		return nil
 	}
 	return m.configSnap.Load()
+}
+
+// managedState is everything one managed-block application produced,
+// stored and loaded as a single immutable value: the effective config it
+// overlaid (nil if this attempt failed and none has ever succeeded), the
+// revision it applied FROM (the last one that actually succeeded, never the
+// one being attempted when that attempt fails), and the outcome to report
+// on the heartbeat. Splitting these across independent atomics would let a
+// reader observe a new effective config paired with a stale revision, or a
+// success paired with a leftover error -- exactly the combinations the
+// platform's screen must never show a cluster owner.
+//
+// identity is the fifth field, and it exists purely to make an unchanged set
+// cheap: it is a hash of the sorted key/body pairs of the last set that
+// actually SUCCEEDED, so applyManaged can tell "the gateway sent the same
+// blocks again" (a certainty on every reconnect, since this deployment's
+// stream is cut and re-established roughly every 150 seconds by design) from
+// "something changed" before paying for ApplyBlocks, the effective-config
+// hook, and the policy swap it drives. It is never the identity of a set
+// that is merely being ATTEMPTED -- both error paths in applyManaged carry
+// it forward from prev exactly like cfg/revision/warnings, so a failed
+// attempt never gets remembered as "the last thing we saw" and a retry of
+// the same failed set is never mistaken for a no-op. That, together with the
+// skip check itself requiring err == "", is what keeps one transient failure
+// from becoming a permanent one.
+type managedState struct {
+	cfg      *config.Config
+	revision int64
+	err      string
+	warnings []string
+	identity string
+}
+
+// EffectiveConfig returns the config the agent is actually running: cfg
+// overlaid with the platform's managed blocks when any have been applied
+// successfully, or cfg itself otherwise. Callers must never read m.cfg
+// directly for anything a managed block can change -- that field is the
+// immutable on-disk config, kept only so a released block has a value to
+// restore.
+//
+// Legitimate one-at-a-time callers keep using this: it is only the
+// HEARTBEAT (buildHeartbeat) that must not, because it asks this same
+// question alongside ManagedState and restartRequiredFor and needs all
+// three answered from the same load. See managedSnapshot.
+func (m *streamManager) EffectiveConfig() *config.Config {
+	return m.effectiveConfigFor(m.managed.Load())
+}
+
+// managedSnapshot returns the single managed state a caller that needs MORE
+// THAN ONE fact from it should load once and reuse -- currently only
+// buildHeartbeat. Every other accessor below (EffectiveConfig, ManagedState)
+// loads m.managed itself and stays a legitimate one-at-a-time question; this
+// one exists so buildHeartbeat does not have to be three of them in a row.
+func (m *streamManager) managedSnapshot() *managedState {
+	return m.managed.Load()
+}
+
+// effectiveConfigFor is EffectiveConfig's derivation, taking the snapshot a
+// caller already holds instead of loading m.managed again -- see
+// managedSnapshot.
+func (m *streamManager) effectiveConfigFor(st *managedState) *config.Config {
+	if st != nil && st.cfg != nil {
+		return st.cfg
+	}
+	return m.cfg
+}
+
+// SetCollectorConfig records the config the collectors were actually built
+// from. cmd/agent calls it once, after buildCollectors and before the
+// collectors start; it is reached by asserting the Manager value against a
+// narrow structural interface, the same shape SetOnEffectiveConfig uses, and
+// a failed assertion is a boot error there rather than a silent skip.
+//
+// Without it the agent cannot tell "applied" from "applied, but not in
+// effect until a restart" -- restartRequiredFor answers false for
+// everything, which is the reporting failure this whole task exists to
+// close. nil is ignored: it would be indistinguishable from "boot never
+// reported".
+func (m *streamManager) SetCollectorConfig(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	m.collectorCfg.Store(cfg)
+}
+
+// collectorConfig returns the config the collectors were built from, falling
+// back to the file config before boot has reported one. The fallback is not
+// a guess: until boot reports, no collector exists, and the file config is
+// what serve() would have built them from had it got there.
+func (m *streamManager) collectorConfig() *config.Config {
+	if c := m.collectorCfg.Load(); c != nil {
+		return c
+	}
+	return m.cfg
+}
+
+// restartRequiredFor reports whether the revision this agent has applied
+// carries a block it cannot put into effect without restarting, for the
+// managed-state snapshot st.
+//
+// It is a comparison between what the collectors were BUILT from and what is
+// applied now -- not a list of block names -- so re-pushing an unchanged
+// restart-only block asks for nothing, and a change to a live block never
+// does. False before boot reports a collector config: nothing has been built
+// yet, so nothing is stale.
+//
+// It takes st rather than loading m.managed itself because its one caller,
+// buildHeartbeatFrom, already holds the single snapshot the whole heartbeat
+// must be built from -- see managedSnapshot. Asking "is a restart required"
+// by loading m.managed again here would defeat that: applyManaged can store
+// a new state in the gap, pairing this answer with a revision the heartbeat
+// reports differently elsewhere.
+func (m *streamManager) restartRequiredFor(st *managedState) bool {
+	built := m.collectorCfg.Load()
+	if built == nil {
+		return false
+	}
+	return len(config.RestartRequiredBlocks(built, m.effectiveConfigFor(st))) > 0
+}
+
+// ConfigSettled returns a channel closed once this agent has completed its
+// first gateway handshake and applied whatever managed blocks it carried --
+// successfully or not. cmd/agent waits on it, briefly, before building the
+// collectors, so they are built from the platform's config instead of from
+// the file config the handshake was about to override.
+//
+// It fires on the handshake, not on the first managed set specifically,
+// because a gateway that manages nothing for this cluster sends no blocks at
+// all: waiting for a set that is never coming would spend the whole boot
+// budget on every unmanaged agent. A gateway that is unreachable closes it
+// never, which is exactly the case the caller's timeout exists for.
+//
+// Nil for a manager built as a struct literal in a test; a receive on a nil
+// channel blocks forever, which is the same "no gateway ever answered" the
+// caller already handles.
+func (m *streamManager) ConfigSettled() <-chan struct{} {
+	return m.configSettled
+}
+
+// settleConfig closes the ConfigSettled channel, exactly once and only when
+// New built one.
+func (m *streamManager) settleConfig() {
+	if m.configSettled == nil {
+		return
+	}
+	m.configSettledOnce.Do(func() { close(m.configSettled) })
+}
+
+// ShutdownRequested returns a channel that is closed when the gateway has
+// asked this agent to restart via a Shutdown message. It is level-triggered
+// (closed, not sent-on), so it is safe for more than one goroutine to select
+// on it and safe to read after it has already fired: a mid-drain read still
+// observes the close. cmd/agent asserts its Manager value against the
+// shutdownSignaler interface to reach this method, the same shape
+// effectiveConfigSetter uses for SetOnEffectiveConfig, so that a caller that
+// only needs Run/Send/Connected/SessionID/IsThrottled -- and the mock in
+// internal/health -- is unaffected.
+func (m *streamManager) ShutdownRequested() <-chan struct{} {
+	return m.shutdownCh
+}
+
+// ShutdownReason returns the reason the gateway gave in the Shutdown message
+// that first fired ShutdownRequested's channel, or "" if none has arrived
+// yet. Only the first Shutdown's reason is kept -- see fireShutdown.
+func (m *streamManager) ShutdownReason() string {
+	if v, ok := m.shutdownReason.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// fireShutdown records reason and closes shutdownCh, both exactly once. A
+// gateway that retries the Shutdown message, or sends two Shutdown messages
+// in one session, must not panic the agent on a double close -- and must
+// not have the operator-facing reason silently replaced by whatever the
+// retry happened to say.
+func (m *streamManager) fireShutdown(reason string) {
+	m.shutdownOnce.Do(func() {
+		m.shutdownReason.Store(reason)
+		close(m.shutdownCh)
+	})
+}
+
+// SetOnEffectiveConfig registers the callback applyManaged invokes with the
+// newly-applied effective config after each managed-block set, before that
+// config is stored as the applied one. New returns Manager, the narrow
+// interface used everywhere the manager only needs to run and send -- it
+// deliberately does not expose the field this sets. A caller that needs the
+// hook (cmd/agent, wiring the live query policy swap) type-asserts its
+// Manager value to the small interface this method satisfies. fn may be
+// nil, which leaves the swap unwired -- the same as never calling this at
+// all.
+func (m *streamManager) SetOnEffectiveConfig(fn func(*config.Config) ([]string, error)) {
+	m.onEffectiveConfig.Store(&fn)
+}
+
+// applyManaged overlays a complete managed-block set. A nil set means the
+// sender said nothing about managed blocks and the current overlay stands --
+// that is ConfigSnapshot's patch rule, and it is what keeps the clusterwatch
+// reconciler and the ingest-rules pusher from erasing this field.
+//
+// The revision travels inside set itself (ManagedBlocks.revision), not as a
+// parameter: the set reaches the agent by two routes -- the handshake's
+// ConfigSnapshot and a pushed ConfigUpdate -- and only carrying it on the
+// set lets an agent that (re)adopts it from a handshake still report which
+// revision it is running, rather than losing that number to 0 on every
+// restart or reconnect.
+//
+// It is all-or-nothing and it never returns an error to its caller: a config
+// the agent cannot apply must not take the agent down, so the failure is
+// recorded and reported on the next heartbeat instead, and the previously
+// effective config -- and its revision -- keep being reported as what is
+// actually running.
+func (m *streamManager) applyManaged(set *agentv1.ManagedBlocks) {
+	if set == nil {
+		return
+	}
+	revision := set.GetRevision()
+	blocks := make(map[string][]byte, len(set.GetBlocks()))
+	for _, b := range set.GetBlocks() {
+		blocks[b.GetKey()] = []byte(b.GetYaml())
+	}
+	// The skip check sits here, before ApplyBlocks, because that is where
+	// the whole cost of a reconnect lives: a per-block YAML round trip and
+	// clone, then (on success) the policy swap and the capability sweep's
+	// force=true nudge -- a full SelfSubjectAccessReview pass against the
+	// customer's API server. This deployment's stream is cut and
+	// re-established roughly every 150 seconds by design, so an owned block
+	// that never changes would otherwise pay that cost several hundred
+	// times a day, forever.
+	//
+	// Identity is revision AND body hash together, not either alone.
+	// Revision alone would apply a body-only change relabeled with the same
+	// number (a controller bug, but not one to compound by ignoring it).
+	// Body hash alone would skip a set whose bodies are byte-identical but
+	// whose revision advanced -- and the heartbeat echoes the revision, so
+	// that skip would report a revision the platform has already
+	// superseded ("applied: 6" on a screen the platform just told to expect
+	// 7). And the last outcome must have SUCCEEDED: skipping a set whose
+	// previous attempt failed would let one transient hook error (a live
+	// policy compiler hiccup, say) freeze config_error for the rest of the
+	// process's life, since every later identical handshake would then
+	// match the failed attempt and skip instead of retrying it.
+	identity := hashManagedBlocks(blocks)
+	if prev := m.managed.Load(); prev != nil && prev.err == "" && prev.revision == revision && prev.identity == identity {
+		return
+	}
+	cfg, err := config.ApplyBlocks(m.cfg, blocks)
+	if err != nil {
+		next := &managedState{err: err.Error()}
+		if prev := m.managed.Load(); prev != nil {
+			next.cfg = prev.cfg
+			next.revision = prev.revision
+			next.warnings = prev.warnings
+			next.identity = prev.identity
+		}
+		m.managed.Store(next)
+		m.log.Error("managed config rejected; keeping the running config",
+			logger.F("attempted_revision", revision),
+			logger.F("error", err.Error()),
+		)
+		return
+	}
+	// The real consumer gets the last word before this config is reported as
+	// applied at all: ApplyBlocks validates the block schema, but a value
+	// that schema allows can still be one the consumer -- the live query
+	// policy compiler, wired by cmd/agent -- refuses (Ruling B: "pods/" and
+	// its siblings pass ApplyBlocks and fail Compile). An error here rejects
+	// the WHOLE set exactly like an ApplyBlocks error does, keeping the
+	// previous cfg, revision and warnings intact: a set the agent cannot
+	// actually run must never be reported as running.
+	var warnings []string
+	if fn := m.onEffectiveConfig.Load(); fn != nil && *fn != nil {
+		w, err := (*fn)(cfg)
+		if err != nil {
+			next := &managedState{err: err.Error()}
+			if prev := m.managed.Load(); prev != nil {
+				next.cfg, next.revision, next.warnings = prev.cfg, prev.revision, prev.warnings
+				next.identity = prev.identity
+			}
+			m.managed.Store(next)
+			m.log.Error("managed config could not be put into effect; keeping the running config",
+				logger.F("attempted_revision", revision),
+				logger.F("error", err.Error()),
+			)
+			return
+		}
+		warnings = w
+	}
+	m.managed.Store(&managedState{cfg: cfg, revision: revision, warnings: warnings, identity: identity})
+	m.log.Info("applied managed config blocks",
+		logger.F("revision", revision),
+		logger.F("blocks", len(blocks)),
+	)
+}
+
+// hashManagedBlocks fingerprints a managed-block set by its content alone --
+// key and body, sorted by key so map iteration order never changes the
+// result. It deliberately does not include the revision: applyManaged
+// combines this with the revision itself for the skip check, but the two
+// are compared separately on purpose (see the comment there) rather than
+// folded into one hash, so a revision bump and a body change are always
+// distinguishable failure-independent facts about the set. The null byte
+// between key and body, and after the body, keeps {"a":"bc"} from hashing
+// the same as {"ab":"c"}.
+func hashManagedBlocks(blocks map[string][]byte) string {
+	keys := make([]string, 0, len(blocks))
+	for k := range blocks {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	h := sha256.New()
+	for _, k := range keys {
+		_, _ = h.Write([]byte(k))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(blocks[k])
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// ManagedState reports what this agent has applied and why it refused
+// anything. The revision is the last APPLIED one: a rejected revision must
+// never be reported as applied, or the screen says "applied" for a config
+// the agent is not running.
+func (m *streamManager) ManagedState() (int64, string, []string) {
+	return managedStateFields(m.managed.Load())
+}
+
+// managedStateFields is ManagedState's derivation, taking the snapshot a
+// caller already holds instead of loading m.managed again -- see
+// managedSnapshot. A free function, not a method: it reads only st, nothing
+// off the receiver, which is what makes it safe for buildHeartbeatFrom to
+// call it without also loading m.managed.
+func managedStateFields(st *managedState) (int64, string, []string) {
+	if st == nil {
+		return 0, "", nil
+	}
+	return st.revision, st.err, st.warnings
 }
