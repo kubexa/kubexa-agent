@@ -2166,8 +2166,16 @@ func (x *ManagedBlock) GetYaml() string {
 // of blocks the platform owns; a block absent from it has been released
 // back to the agent's own config file.
 type ManagedBlocks struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Blocks        []*ManagedBlock        `protobuf:"bytes,1,rep,name=blocks,proto3" json:"blocks,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Blocks []*ManagedBlock        `protobuf:"bytes,1,rep,name=blocks,proto3" json:"blocks,omitempty"`
+	// The platform's revision for THIS set. It lives here rather than on
+	// ConfigUpdate because the set arrives by two routes -- the handshake's
+	// ConfigSnapshot and a pushed ConfigUpdate -- and only the latter carries
+	// a version field. An agent that picks its blocks up at the handshake
+	// must still be able to say which revision it is running, so the number
+	// travels with the set itself. The backend's counter starts at 1, so 0 on
+	// a non-nil set has exactly one meaning: no managed blocks applied.
+	Revision      int64 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2207,6 +2215,13 @@ func (x *ManagedBlocks) GetBlocks() []*ManagedBlock {
 		return x.Blocks
 	}
 	return nil
+}
+
+func (x *ManagedBlocks) GetRevision() int64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
 }
 
 // IngestRules are the limits the platform's log pipeline actually enforces,
@@ -4567,9 +4582,10 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\amanaged\x18\b \x01(\v2\x17.agent.v1.ManagedBlocksR\amanaged\"4\n" +
 	"\fManagedBlock\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x12\n" +
-	"\x04yaml\x18\x02 \x01(\tR\x04yaml\"?\n" +
+	"\x04yaml\x18\x02 \x01(\tR\x04yaml\"[\n" +
 	"\rManagedBlocks\x12.\n" +
-	"\x06blocks\x18\x01 \x03(\v2\x16.agent.v1.ManagedBlockR\x06blocks\"\xf3\x01\n" +
+	"\x06blocks\x18\x01 \x03(\v2\x16.agent.v1.ManagedBlockR\x06blocks\x12\x1a\n" +
+	"\brevision\x18\x02 \x01(\x03R\brevision\"\xf3\x01\n" +
 	"\vIngestRules\x12$\n" +
 	"\x0emax_line_bytes\x18\x01 \x01(\x03R\fmaxLineBytes\x12)\n" +
 	"\x11max_sample_age_ms\x18\x02 \x01(\x03R\x0emaxSampleAgeMs\x12+\n" +
