@@ -262,6 +262,100 @@ func TestValidateBlockStillCatchesABlockLevelViolation(t *testing.T) {
 	}
 }
 
+// TestValidateBlockRefusesAnExplicitlyEmptyRulesList pins the fix for the
+// whole-branch review's Critical: `rules: []` used to be accepted and then
+// silently widened by two different consumers -- QueryRules inherits
+// collect.state's rules at len()==0, and normalize() refills an empty list
+// with a permissive default for logs and state. Both are worse than what the
+// operator asked for, so the block must be refused before either can run.
+//
+// Two YAML spellings resolve to the same nil slice and the same widening:
+// `rules: []` (an empty sequence) and a bare `rules:` with no value (a null
+// scalar). Only rejecting the first would leave the quieter spelling open.
+func TestValidateBlockRefusesAnExplicitlyEmptyRulesList(t *testing.T) {
+	blocks := []string{"collect.logs", "collect.state", "collect.metrics", "query"}
+	spellings := map[string]string{
+		"empty sequence": "rules: []\n",
+		"null scalar":    "rules:\n",
+	}
+	for _, key := range blocks {
+		for name, body := range spellings {
+			t.Run(key+"/"+name, func(t *testing.T) {
+				err := config.ValidateBlock(key, []byte(body))
+				if err == nil {
+					t.Fatalf("%s must be refused for %s", name, key)
+				}
+				if !strings.Contains(err.Error(), key) {
+					t.Fatalf("error must name the block %q; got %v", key, err)
+				}
+				if !strings.Contains(err.Error(), "enabled: false") {
+					t.Fatalf("error must state the remedy (enabled: false); got %v", err)
+				}
+			})
+		}
+	}
+}
+
+// TestValidateBlockOmittedRulesIsStillAccepted guards against an
+// overcorrection: refusing an empty rules key must not start refusing a body
+// that never mentions rules at all -- that spelling means "leave the current
+// rules alone" under the patch rule and must keep working.
+func TestValidateBlockOmittedRulesIsStillAccepted(t *testing.T) {
+	if err := config.ValidateBlock("collect.state", []byte("enabled: true\n")); err != nil {
+		t.Fatalf("an omitted rules key must still be accepted: %v", err)
+	}
+}
+
+// TestValidateBlockEnabledFalseWithNoRulesIsAccepted pins the ruling's other
+// half: enabled: false is the spelling for "collect nothing" and must keep
+// working with no rules key present at all, since the error message directs
+// the operator to exactly this as the remedy.
+func TestValidateBlockEnabledFalseWithNoRulesIsAccepted(t *testing.T) {
+	if err := config.ValidateBlock("collect.state", []byte("enabled: false\n")); err != nil {
+		t.Fatalf("enabled: false with no rules must still be accepted: %v", err)
+	}
+}
+
+// TestApplyBlocksOmittedRulesLeavesBaseRulesIntact is the ApplyBlocks-level
+// half of the fix: a block body that edits another key in the same block
+// (resync_period here) but says nothing about rules must not disturb the
+// base's own rules -- that is the merge guarantee TestApplyBlocksKeepsUNSENT-
+// KeysInTheSameBlock already pins for buffer, restated for the field this
+// Critical was actually about.
+func TestApplyBlocksOmittedRulesLeavesBaseRulesIntact(t *testing.T) {
+	base := validBase(t)
+	base.Collect.State.Rules = []config.StateNamespaceRule{
+		{Namespace: "prod", Resources: []string{"pods"}},
+	}
+	cfg, err := config.ApplyBlocks(base, map[string][]byte{
+		"collect.state": []byte("enabled: true\nresync_period: 45s\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Collect.State.Rules) != 1 || cfg.Collect.State.Rules[0].Namespace != "prod" {
+		t.Fatalf("rules = %+v, want the base's narrowed rule kept", cfg.Collect.State.Rules)
+	}
+}
+
+// TestApplyBlocksRefusesAnExplicitlyEmptyRulesList is the reported shape from
+// the review, at the ApplyBlocks level rather than ValidateBlock's: a
+// narrowed collect.state (secrets excluded, one namespace) must not be
+// replaceable by `rules: []` and come back cluster-wide on every resource,
+// including secrets that redact_secrets: false returns unredacted.
+func TestApplyBlocksRefusesAnExplicitlyEmptyRulesList(t *testing.T) {
+	base := validBase(t)
+	base.Collect.State.Rules = []config.StateNamespaceRule{
+		{Namespace: "default", Resources: []string{"pods"}},
+	}
+	_, err := config.ApplyBlocks(base, map[string][]byte{
+		"collect.state": []byte("enabled: true\nrules: []\n"),
+	})
+	if err == nil {
+		t.Fatal("rules: [] must be refused, not silently widen to the inherited default")
+	}
+}
+
 // validBase returns a config that passes Config.Validate, which ApplyBlocks
 // runs on the effective result. Built through LoadFromYAML so it cannot
 // drift from what a real agent loads.
