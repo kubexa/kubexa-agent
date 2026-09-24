@@ -1676,7 +1676,7 @@ func (m *streamManager) waitForInflightRoom(ctx context.Context, counter infligh
 // block, and EffectiveConfig's own doc comment forbids reading the file
 // config for anything a managed block can change. drainBufferedQueue calls
 // it once per batch rather than once per session, which is what lets buffer
-// be classified as a LIVE block (pkg/config's managedBlockAppliesLive): a
+// be classified as an EffectLive block (pkg/config's managedBlockEffect): a
 // session can stay up for days, and a batch size that only changed on
 // reconnect would be a control that mostly changes nothing.
 //

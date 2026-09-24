@@ -38,22 +38,22 @@ func TestEveryManagedBlockHasAPrototype(t *testing.T) {
 	}
 }
 
-// TestManagedBlockAppliesLiveCoversEveryManagedKey guards the same gap as
-// the two tests above, for the live/restart-only classification: a sixth
-// block landing without an entry would read as restart-only by map default
-// (the zero value is false) and silently ask for a restart nobody needs, or
-// -- if the default ever flipped -- report a block as live that nothing
-// applies. Both are the "reported as working" failure restart_required
-// exists to close, so a missing entry must fail here.
-func TestManagedBlockAppliesLiveCoversEveryManagedKey(t *testing.T) {
+// TestManagedBlockEffectCoversEveryManagedKey guards the same gap as the
+// two tests above, for the three-valued classification: a sixth block
+// landing without an entry would read as EffectLive by map default (the
+// zero value of BlockEffect) and silently report a block as fully in effect
+// when its construction-time half -- or all of it -- is still pending. That
+// is the exact "reported as working" failure restart_required exists to
+// close, so a missing entry must fail here.
+func TestManagedBlockEffectCoversEveryManagedKey(t *testing.T) {
 	for _, key := range managedBlockKeys {
-		if _, ok := managedBlockAppliesLive[key]; !ok {
-			t.Errorf("managedBlockAppliesLive has no entry for managed block %q", key)
+		if _, ok := managedBlockEffect[key]; !ok {
+			t.Errorf("managedBlockEffect has no entry for managed block %q", key)
 		}
 	}
-	for key := range managedBlockAppliesLive {
+	for key := range managedBlockEffect {
 		if !IsManagedBlockKey(key) {
-			t.Errorf("managedBlockAppliesLive has an entry for %q, which is not a managed block", key)
+			t.Errorf("managedBlockEffect has an entry for %q, which is not a managed block", key)
 		}
 	}
 }

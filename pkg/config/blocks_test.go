@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubexa/kubexa-agent/internal/query/policy"
 	"github.com/kubexa/kubexa-agent/pkg/config"
 )
 
@@ -370,6 +371,56 @@ func validBase(t *testing.T) *config.Config {
 	return cfg
 }
 
+// TestAPushedCollectStateChangesTheLiveQueryPolicy pins the coupling C-A
+// found: QueryRules() (query.go:304) inherits collect.state.rules whenever
+// query.rules is empty -- the shipped chart's default, since
+// helm/kubexa-agent/values.yaml leaves query.rules commented out -- so a
+// pushed collect.state block reaches the compiled query policy the moment
+// applyManaged swaps the holder, with no restart. If this test ever fails
+// because the inheritance was removed, the classification (effectPartial on
+// collect.state) must move with it, not this test.
+func TestAPushedCollectStateChangesTheLiveQueryPolicy(t *testing.T) {
+	base, err := config.LoadFromYAML([]byte(
+		"agent:\n  tenant_token: t\ngateway:\n  address: gw:443\n" +
+			"collect:\n  state:\n    enabled: true\n    rules:\n" +
+			"      - namespace: default\n        resources: [pods]\n",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	basePolicy, err := policy.Compile(base)
+	if err != nil {
+		t.Fatalf("Compile(base): %v", err)
+	}
+	secretsRef := policy.Ref{Version: "v1", Resource: "secrets"}
+	if d := basePolicy.Decide(secretsRef, policy.VerbList, "kube-system", ""); d.Allowed {
+		t.Fatal("setup: the narrow base must not already permit listing secrets")
+	}
+
+	widened, err := config.ApplyBlocks(base, map[string][]byte{
+		"collect.state": []byte("enabled: true\nrules:\n  - resources: [secrets]\n"),
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
+	}
+
+	widenedPolicy, err := policy.Compile(widened)
+	if err != nil {
+		t.Fatalf("Compile(widened): %v", err)
+	}
+	if d := widenedPolicy.Decide(secretsRef, policy.VerbList, "kube-system", ""); !d.Allowed {
+		t.Fatalf("a pushed collect.state must widen the live query policy with no restart; decision = %+v", d)
+	}
+
+	// The two facts together are the finding: the live query read already
+	// changed, and the agent still (correctly) says a restart is pending --
+	// because the informers really are still running the narrow rule.
+	if got := config.RestartRequiredBlocks(base, widened); !slices.Equal(got, []string{"collect.state"}) {
+		t.Fatalf("RestartRequiredBlocks = %v, want [collect.state]", got)
+	}
+}
+
 func TestManagedBlockKeysIsTheClosedSet(t *testing.T) {
 	want := []string{"collect.logs", "collect.state", "collect.metrics", "query", "buffer"}
 	if !slices.Equal(config.ManagedBlockKeys(), want) {
@@ -383,36 +434,36 @@ func TestManagedBlockKeysIsTheClosedSet(t *testing.T) {
 // TestEveryManagedBlockIsClassifiedByWhenItTakesEffect is the literal the
 // whole restart_required report rests on. It is spelled out here -- rather
 // than derived from the map it checks, which would agree with any value --
-// so that MOVING a block between the two categories cannot happen quietly:
-// the person moving it has to come here and say so, and its sibling in
+// so that MOVING a block between categories cannot happen quietly: the
+// person moving it has to come here and say so, and its sibling in
 // internal/stream (TestHeartbeatRestartRequiredFollowsTheBlockClassification)
 // fails until the heartbeat follows.
 //
-// Live means a running agent puts the block into effect with no restart:
-// every consumer of that block re-reads EffectiveConfig() on each use.
-// Restart-only means the block is baked into a component at construction --
-// the collectors are built once, from the config resolved at boot.
+// Updated deliberately (Task 7e, C-A/M-B): collect.logs and collect.state
+// are effectPartial, not effectRestart -- each feeds one live consumer and
+// one construction-time one, and reporting either as purely "restart-only"
+// was the defect a whole-branch review measured end to end.
 func TestEveryManagedBlockIsClassifiedByWhenItTakesEffect(t *testing.T) {
-	want := map[string]bool{
-		"collect.logs":    false,
-		"collect.state":   false,
-		"collect.metrics": false,
-		"query":           true,
-		"buffer":          true,
+	want := map[string]config.BlockEffect{
+		"collect.logs":    config.EffectPartial,
+		"collect.state":   config.EffectPartial,
+		"collect.metrics": config.EffectRestart,
+		"query":           config.EffectLive,
+		"buffer":          config.EffectLive,
 	}
 	for _, key := range config.ManagedBlockKeys() {
-		live, ok := config.ManagedBlockAppliesLive(key)
+		effect, ok := config.ManagedBlockEffect(key)
 		if !ok {
-			t.Errorf("managed block %q is not classified live or restart-only", key)
+			t.Errorf("managed block %q is not classified", key)
 			continue
 		}
-		if live != want[key] {
-			t.Errorf("ManagedBlockAppliesLive(%q) = %v, want %v -- if this block really "+
+		if effect != want[key] {
+			t.Errorf("ManagedBlockEffect(%q) = %v, want %v -- if this block really "+
 				"changed category, the heartbeat's restart_required must follow it",
-				key, live, want[key])
+				key, effect, want[key])
 		}
 	}
-	if _, ok := config.ManagedBlockAppliesLive("mutate"); ok {
+	if _, ok := config.ManagedBlockEffect("mutate"); ok {
 		t.Fatal("mutate is not a managed block and must not be classified")
 	}
 }

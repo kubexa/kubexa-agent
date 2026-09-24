@@ -67,22 +67,66 @@ var managedBlockAllowedKeys = map[string]map[string]bool{
 	},
 }
 
-// managedBlockAppliesLive classifies every managed block by WHEN a running
-// agent can put it into effect. It is a hand-written set, not a derivation,
-// and that is the point: "live" is a claim about every consumer of a block
+// BlockEffect says WHEN a running agent puts a managed block into effect.
+// It is three-valued because two of the five blocks feed more than one
+// consumer, and those consumers do not agree about timing.
+type BlockEffect int
+
+const (
+	// EffectLive: every consumer re-reads EffectiveConfig() on each use, so
+	// the block is in effect the moment it is applied.
+	EffectLive BlockEffect = iota
+	// EffectRestart: every consumer reads the value once, at construction.
+	EffectRestart
+	// EffectPartial: some consumers are live and some are construction-time.
+	// The agent reports restart_required for these -- something really is
+	// still pending -- but a screen that renders that as "nothing has taken
+	// effect yet" is wrong, and the live half is named in the comment on
+	// each entry below.
+	EffectPartial
+)
+
+// String renders a BlockEffect for test failures and log lines; the zero
+// value (EffectLive) must not print as "0" and read like an unset field.
+func (e BlockEffect) String() string {
+	switch e {
+	case EffectLive:
+		return "live"
+	case EffectRestart:
+		return "restart"
+	case EffectPartial:
+		return "partial"
+	default:
+		return fmt.Sprintf("BlockEffect(%d)", int(e))
+	}
+}
+
+// managedBlockEffect classifies every managed block by WHEN a running agent
+// can put it into effect. It is a hand-written set, not a derivation, and
+// that is the point: "live" is a claim about every consumer of a block
 // re-reading EffectiveConfig() on each use, which no amount of reflection
 // over the struct can check. A derivation that drifted would hand the
 // platform a confident wrong answer, which is worse than the honest list.
 //
-//   - true (live): the agent applies the block without a restart. query is
-//     swapped into the compiled policy holder on every applied set; buffer's
-//     only settable key, batch_size, is re-read by the drain loop on every
-//     batch.
-//   - false (restart-only): the block is baked into a component at
-//     CONSTRUCTION. The collectors are built once, from the config resolved
-//     at boot, so collect.logs/state/metrics -- their rules, intervals,
-//     resync_period and enabled flags alike -- only change when the process
-//     restarts.
+// A partial entry's live half is named here, with the line that proves it,
+// so the claim can be checked against the code instead of taken on faith:
+//
+//   - collect.logs: live half is shouldDeliverQueuedMessage
+//     (internal/stream/manager.go:1583), which drops queued log items the
+//     instant collect.logs.enabled goes false. Restart half: the tailer's
+//     rules, tail_lines, follow and exclude_namespaces are read once by
+//     logs.New.
+//   - collect.state: live half is Config.QueryRules() (query.go:304), which
+//     inherits these rules into the compiled query policy whenever
+//     query.rules is empty -- the shipped chart default -- and the policy
+//     holder is swapped on every applied set. Restart half: the informers.
+//   - collect.metrics: restart-only. The collectors are built once, from the
+//     config resolved at boot, so its rules, intervals and enabled flag
+//     alike only change when the process restarts.
+//   - query: live. The compiled policy holder is swapped on every applied
+//     set.
+//   - buffer: live. Its only settable key, batch_size, is re-read by the
+//     drain loop on every batch.
 //
 // TestEveryManagedBlockIsClassifiedByWhenItTakesEffect (blocks_test.go)
 // pins this map against a literal, and
@@ -90,26 +134,39 @@ var managedBlockAllowedKeys = map[string]map[string]bool{
 // (internal/stream) pins that the heartbeat's restart_required follows it.
 // Moving a block between the categories fails both until the reporting
 // moves with it.
-var managedBlockAppliesLive = map[string]bool{
-	"collect.logs":    false,
-	"collect.state":   false,
-	"collect.metrics": false,
-	"query":           true,
-	"buffer":          true,
+var managedBlockEffect = map[string]BlockEffect{
+	"collect.logs":    EffectPartial,
+	"collect.state":   EffectPartial,
+	"collect.metrics": EffectRestart,
+	"query":           EffectLive,
+	"buffer":          EffectLive,
 }
 
-// ManagedBlockAppliesLive reports whether a running agent puts key's block
-// into effect without a restart. ok is false for any key outside the managed
-// set.
-func ManagedBlockAppliesLive(key string) (live bool, ok bool) {
-	live, ok = managedBlockAppliesLive[key]
-	return live, ok
+// ManagedBlockEffect reports WHEN a running agent puts key's block into
+// effect. ok is false for any key outside the managed set. It is the
+// classification's only reader, including RestartRequiredBlocks below: give
+// the map exactly one reader, so a caller can never be answered by two
+// different views of the same classification drifting apart.
+func ManagedBlockEffect(key string) (effect BlockEffect, ok bool) {
+	effect, ok = managedBlockEffect[key]
+	return effect, ok
 }
 
-// RestartRequiredBlocks names every restart-only managed block whose value
-// in effective differs from the one in built -- that is, every block the
-// agent has ACCEPTED but cannot actually be running until it restarts. The
-// result is in managedBlockKeys order and empty when the two agree.
+// RestartRequiredBlocks names every managed block whose construction-time
+// half is stale -- an EffectRestart block whose value in effective differs
+// from the one in built, or an EffectPartial block doing the same -- that
+// is, every block the agent has ACCEPTED but cannot fully run until it
+// restarts. An EffectLive block never appears: nothing about it is waiting
+// on a restart. The result is in managedBlockKeys order and empty when the
+// two agree.
+//
+// A partial block's appearance here is not a bug shared with a restart-only
+// one: its live half (named on managedBlockEffect) already took effect, and
+// this list says nothing about that half. It says only that the
+// construction-time half -- the informers, the tailer -- is still running
+// the old value. The screen consuming this must not read it as "nothing has
+// taken effect yet" for a partial block; see managedBlockEffect's comment
+// and Task 17.
 //
 // built is the config the long-lived components were constructed from, not
 // the file config: once boot resolves a managed set before building the
@@ -139,7 +196,7 @@ func RestartRequiredBlocks(built, effective *Config) []string {
 	built, effective = normalizedCopy(built), normalizedCopy(effective)
 	var out []string
 	for _, key := range managedBlockKeys {
-		if live := managedBlockAppliesLive[key]; live {
+		if effect, _ := ManagedBlockEffect(key); effect == EffectLive {
 			continue
 		}
 		if !bytes.Equal(managedBlockYAML(built, key), managedBlockYAML(effective, key)) {
