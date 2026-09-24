@@ -183,6 +183,14 @@ var errReconcilerNotReady = errors.New("watch reconciler is not ready yet: the a
 // on the older of the two. Reconcile's only caller is the stream manager's
 // receive loop, which is already serial, so the lock costs nothing; Set runs
 // once, at boot.
+//
+// The forwarded call must stay NON-BLOCKING. Holding the lock across it
+// means a reconcile in flight blocks Set, and Set is on the boot path: a
+// demand-watch reconcile that ever waited on cache sync or the API server
+// would stall boot behind it, with no timeout. Today's demand path does
+// neither (the state collector's initial WaitForCacheSync happens in Start,
+// not in reconcile). If that changes, this lock has to be narrowed to the
+// pending set alone and the replay ordering solved another way.
 type reconcilerHolder struct {
 	mu          sync.Mutex
 	resolved    bool
@@ -376,16 +384,97 @@ func startCollectors(
 // process must still exit 0.
 //
 // The queue is closed on every path -- it holds an open write-ahead log.
-func unwindBootFailure(stop context.CancelFunc, wait func() error, closeQueue func() error, cause error) error {
+//
+// cause is LOGGED before the group's error is returned, never discarded: a
+// genuine buildCollectors failure ("log collector: checkpoint dir is not
+// writable") is the line an operator actually needs, and it would otherwise
+// vanish whenever the run group happened to fail too. It is logged rather
+// than joined onto the returned error on purpose -- errors.Join would put a
+// context.Canceled cause back inside the returned error, where
+// isContextClosed's errors.Is would find it and turn a hard bind failure
+// into exit 0 again.
+func unwindBootFailure(stop context.CancelFunc, wait func() error, closeQueue func() error, cause error, log *logger.Logger) error {
 	// The same cancel a SIGTERM uses, rather than returning out from under
 	// the running goroutines.
 	stop()
 	werr := wait()
 	_ = closeQueue()
 	if werr != nil && !isContextClosed(werr) {
+		if cause != nil && !isContextClosed(cause) {
+			log.Err(cause).Error("collectors could not be built; reporting the run group's failure instead")
+		}
 		return werr
 	}
 	return fmt.Errorf("collectors: %w", cause)
+}
+
+// collectorWiringResult is which collector answers which gateway concern.
+// reconcilerIdx is the INDEX of the collector carrying the watch
+// reconciler, not just the interface value, because the reconciler may only
+// be resolved after that specific collector has started -- see
+// startCollector.
+type collectorWiringResult struct {
+	reconciler    stream.WatchReconciler
+	reconcilerIdx int
+	scrape        stream.ScrapeHealthSource
+	sweeper       sweepRequester
+}
+
+// collectorWiring finds the first collector satisfying each of the three
+// interfaces the stream manager's holders stand in for. Each field stays nil
+// (and reconcilerIdx -1) when no collector satisfies it, which is the honest
+// answer for an agent built with that collection disabled.
+func collectorWiring(collectors []Collector) collectorWiringResult {
+	out := collectorWiringResult{reconcilerIdx: -1}
+	for i, coll := range collectors {
+		if out.reconciler == nil {
+			if r, ok := coll.(stream.WatchReconciler); ok {
+				out.reconciler, out.reconcilerIdx = r, i
+			}
+		}
+		if out.scrape == nil {
+			if sh, ok := coll.(stream.ScrapeHealthSource); ok {
+				out.scrape = sh
+			}
+		}
+		if out.sweeper == nil {
+			if sw, ok := coll.(sweepRequester); ok {
+				out.sweeper = sw
+			}
+		}
+	}
+	return out
+}
+
+// startCollector starts one collector and then, only for the collector that
+// carries the watch reconciler, runs afterStart.
+//
+// The ordering is the whole point and it is not cosmetic. *state.Collector
+// refuses every reconcile until Start has run -- Start is what sets the
+// runCtx its informers are parented on, and reconcile returns "collector
+// has not been started" without one (internal/collector/state/reconciler.go).
+// Resolving the holder before that means the replayed watch config is
+// refused AND cleared, which is the pre-holder behaviour plus a log line;
+// and a live reconcile landing in the gap gets that hard error from an
+// already-resolved holder, so it is not remembered for replay either.
+// Resolving after Start closes both.
+func startCollector(ctx context.Context, c Collector, afterStart func(context.Context) error, log *logger.Logger) error {
+	log.Info("starting collector", logger.F("collector", c.Name()))
+	if err := c.Start(ctx); err != nil {
+		return fmt.Errorf("collector %s start: %w", c.Name(), err)
+	}
+	if afterStart == nil {
+		return nil
+	}
+	// A failed replay is logged, not fatal: it leaves the agent exactly
+	// where it stood before this holder existed.
+	if err := afterStart(ctx); err != nil {
+		log.Warn("replaying the watch config that arrived before the collectors existed failed",
+			logger.F("collector", c.Name()),
+			logger.F("error", err.Error()),
+		)
+	}
+	return nil
 }
 
 // waitForManagedConfig blocks until the agent's first handshake has been
@@ -971,7 +1060,7 @@ func serve(parentCtx context.Context, stop context.CancelFunc, cfg *config.Confi
 		log,
 	)
 	if err != nil {
-		return unwindBootFailure(stop, g.Wait, q.Close, err)
+		return unwindBootFailure(stop, g.Wait, q.Close, err, log)
 	}
 	log.Info("collection settings in effect",
 		logger.F("logs_enabled", effectiveCfg.Collect.Logs.Enabled),
@@ -987,53 +1076,44 @@ func serve(parentCtx context.Context, stop context.CancelFunc, cfg *config.Confi
 	// are found by type assertion rather than by extra return values from
 	// buildCollectors, so that "which collector answers which gateway
 	// concern" stays a property of the collector's own type.
-	//
-	// Each holder is resolved EXACTLY ONCE, including to nil: an agent that
-	// builds no state collector has resolved "there is no reconciler", which
-	// is a different answer from "not ready yet" (see reconcilerHolder).
-	var (
-		foundReconciler stream.WatchReconciler
-		foundScrape     stream.ScrapeHealthSource
-		foundCapSweeper sweepRequester
-	)
+	wiring := collectorWiring(collectors)
 	for _, coll := range collectors {
-		if foundReconciler == nil {
-			if r, ok := coll.(stream.WatchReconciler); ok {
-				foundReconciler = r
-			}
-		}
-		if foundScrape == nil {
-			if sh, ok := coll.(stream.ScrapeHealthSource); ok {
-				foundScrape = sh
-			}
-		}
-		if foundCapSweeper == nil {
-			if sw, ok := coll.(sweepRequester); ok {
-				foundCapSweeper = sw
-			}
-		}
 		if ready, ok := coll.(health.StateWatcherReady); ok {
 			healthSrv.Register(health.NewStateWatcherChecker(ready))
 		}
 	}
-	// A watch config that arrived while the holder was unresolved is
-	// replayed here -- see reconcilerHolder: nothing else re-sends it, and
-	// the gateway's periodic reconciler skips a set it has already
-	// delivered.
-	if err := reconciler.Set(ctx, foundReconciler); err != nil {
-		log.Warn("replaying the watch config that arrived before the collectors existed failed",
-			logger.F("error", err.Error()),
-		)
-	}
-	scrapeHealth.Set(foundScrape)
-	capSweeper.Set(foundCapSweeper)
+	// Neither of these two has a started-only contract: the metrics
+	// collector seeds its scrape kinds at construction, and a sweep nudge
+	// is a signal the reporter picks up whenever it runs. The reconciler
+	// does -- see below.
+	scrapeHealth.Set(wiring.scrape)
+	capSweeper.Set(wiring.sweeper)
 
-	for _, c := range collectors {
+	// resolveReconciler is handed to the collector that CARRIES the
+	// reconciler, and runs only once that collector's Start has returned:
+	// see startCollector.
+	resolveReconciler := func(ctx context.Context) error {
+		return reconciler.Set(ctx, wiring.reconciler)
+	}
+	if wiring.reconcilerIdx < 0 {
+		// No collector carries one (collect.state disabled): resolve to
+		// "there is no reconciler" now, since no Start will ever do it.
+		// That is a resolution, not an absence -- a reconcile then
+		// succeeds and does nothing, as it did before the holder existed.
+		if err := resolveReconciler(ctx); err != nil {
+			log.Warn("resolving the watch reconciler failed", logger.F("error", err.Error()))
+		}
+	}
+
+	for i, c := range collectors {
 		c := c
+		var afterStart func(context.Context) error
+		if i == wiring.reconcilerIdx {
+			afterStart = resolveReconciler
+		}
 		g.Go(func() error {
-			log.Info("starting collector", logger.F("collector", c.Name()))
-			if err := c.Start(ctx); err != nil {
-				return fmt.Errorf("collector %s start: %w", c.Name(), err)
+			if err := startCollector(ctx, c, afterStart, log); err != nil {
+				return err
 			}
 			<-ctx.Done()
 			return ctx.Err()
