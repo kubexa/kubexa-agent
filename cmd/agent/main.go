@@ -70,6 +70,22 @@ type effectiveConfigSetter interface {
 	SetOnEffectiveConfig(func(*config.Config) ([]string, error))
 }
 
+// shutdownSignaler is the narrow, structural view of the stream manager this
+// file needs to let a gateway-requested Shutdown drain the agent through the
+// SAME exit path a real SIGTERM already takes, rather than a second
+// implementation only Shutdown would ever exercise: stream.Manager
+// deliberately does not expose it, mirroring effectiveConfigSetter above, so
+// the mock in internal/health -- which implements only Manager -- is
+// unaffected. serve() asserts streamMgr against this interface and treats a
+// failed assertion as a boot error, for the same reason
+// effectiveConfigSetter does: a silent skip here would leave the platform's
+// restart-on-boot-only-config feature permanently inert, with no error and
+// no log line to say so.
+type shutdownSignaler interface {
+	ShutdownRequested() <-chan struct{}
+	ShutdownReason() string
+}
+
 // sweepRequester is the narrow, structural view of the capability reporter
 // the swap callback needs: *capability.Reporter, when the state collector is
 // enabled and buildCollectors constructs one. Collector itself does not
@@ -214,7 +230,7 @@ func run() int {
 	defer stop()
 	rootCtx = logger.NewContext(rootCtx, rootLog)
 
-	if err := serve(rootCtx, cfg, devMode, rootLog); err != nil {
+	if err := serve(rootCtx, stop, cfg, devMode, rootLog); err != nil {
 		if isContextClosed(err) {
 			rootLog.Info("agent stopped")
 			return 0
@@ -226,7 +242,13 @@ func run() int {
 	return 0
 }
 
-func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *logger.Logger) error {
+// stop is the signal.NotifyContext cancel func run() created for parentCtx:
+// calling it cancels parentCtx exactly the way a real SIGINT/SIGTERM would.
+// serve() also calls it when the stream manager's ShutdownRequested channel
+// fires, so a gateway-requested restart runs through the identical drain
+// below (g.Wait, then stopCollectors and q.Close under shutdownTimeout)
+// rather than a second, untested exit path.
+func serve(parentCtx context.Context, stop context.CancelFunc, cfg *config.Config, devMode bool, log *logger.Logger) error {
 	shutdownTimeout := defaultShutdownTimeout
 
 	mainReg := prometheus.NewRegistry()
@@ -504,6 +526,16 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		return fmt.Errorf("stream manager: %T does not expose the effective-config hook; "+
 			"platform-managed config would never apply to the live query policy", streamMgr)
 	}
+	// Same reasoning as the effectiveConfigSetter assertion just above: a
+	// failed assertion here must not silently skip the restart-on-Shutdown
+	// wiring. See TestStreamManagerSatisfiesShutdownSignaler, which pins
+	// that the real stream.New result satisfies this interface today.
+	shutdownSig, ok := streamMgr.(shutdownSignaler)
+	if !ok {
+		_ = q.Close()
+		return fmt.Errorf("stream manager: %T does not expose the shutdown signal; "+
+			"a gateway-requested restart would never take effect", streamMgr)
+	}
 	// The capability reporter appears as a Collector only when
 	// cfg.Collect.State.Enabled built one (see buildCollectors); capSweeper
 	// stays nil when it did not, in which case a swap below has nothing to
@@ -587,6 +619,26 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		}
 		log.Info("stream manager stopped")
 		return nil
+	})
+
+	// A gateway Shutdown drains the agent through the exact same path a real
+	// SIGTERM does: calling stop cancels rootCtx (parentCtx here), which is
+	// what ctx above is derived from, so every goroutine in this group sees
+	// ctx.Done() and returns exactly as it would on a rollout's SIGTERM. The
+	// log line here is the only thing that lets an operator tell a
+	// platform-requested restart apart from a crash when they look at a
+	// restarted pod afterward.
+	g.Go(func() error {
+		select {
+		case <-shutdownSig.ShutdownRequested():
+			log.Warn("gateway requested restart; draining",
+				logger.F("reason", shutdownSig.ShutdownReason()),
+			)
+			stop()
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	})
 
 	log.Info("agent ready",

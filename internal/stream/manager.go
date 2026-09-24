@@ -222,6 +222,23 @@ type streamManager struct {
 	// dropped and the handshake advertises node_ops=false.
 	nodeJobs NodeJobResponder
 
+	// shutdownCh is closed exactly once -- guarded by shutdownOnce -- when
+	// the gateway sends a Shutdown message. Closing it rather than sending
+	// on it makes the signal level-triggered: any number of observers, and
+	// a read that happens after the close, all see it fired. cmd/agent
+	// watches it and calls the same signal.NotifyContext stop() a real
+	// SIGTERM invokes, so a platform-requested restart drains through the
+	// one exit path the agent already has instead of a second
+	// implementation only Shutdown would ever exercise (see main.go).
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
+	// shutdownReason holds the gateway's stated reason for the FIRST
+	// Shutdown message received in this session. shutdownOnce guards both
+	// the close of shutdownCh and this store together, so a retried or
+	// duplicate Shutdown never overwrites the reason an operator sees
+	// logged when the drain begins.
+	shutdownReason atomic.Value // string
+
 	// nodeJobLast retains the latest NodeJobEvent per job id, recorded by
 	// handleNodeJob's emit closure before it ever tries to send. A stream can
 	// die without this side noticing (Send "succeeds" into a doomed stream --
@@ -379,6 +396,7 @@ func New(
 		nodeJobLast:       make(map[string]nodeJobRetained),
 		nodeJobClock:      time.Now,
 		nodeJobRetention:  nodeJobRetention,
+		shutdownCh:        make(chan struct{}),
 	}
 	// The manager is the store's only writer and Set panics on a nil receiver,
 	// so a caller that passes none gets a private store rather than a crash on
@@ -1223,6 +1241,7 @@ func (m *streamManager) handleGatewayMessage(ctx context.Context, msg *agentv1.G
 		m.log.Warn("gateway requested shutdown",
 			logger.F("reason", p.Shutdown.GetReason()),
 		)
+		m.fireShutdown(p.Shutdown.GetReason())
 	case *agentv1.GatewayMessage_Ack:
 		// Gated so an old-mode agent (no delivery_acks) never takes the queue
 		// mutex or runs WAL compaction for an ack it doesn't need: the false
@@ -1924,6 +1943,41 @@ func (m *streamManager) EffectiveConfig() *config.Config {
 		return st.cfg
 	}
 	return m.cfg
+}
+
+// ShutdownRequested returns a channel that is closed when the gateway has
+// asked this agent to restart via a Shutdown message. It is level-triggered
+// (closed, not sent-on), so it is safe for more than one goroutine to select
+// on it and safe to read after it has already fired: a mid-drain read still
+// observes the close. cmd/agent asserts its Manager value against the
+// shutdownSignaler interface to reach this method, the same shape
+// effectiveConfigSetter uses for SetOnEffectiveConfig, so that a caller that
+// only needs Run/Send/Connected/SessionID/IsThrottled -- and the mock in
+// internal/health -- is unaffected.
+func (m *streamManager) ShutdownRequested() <-chan struct{} {
+	return m.shutdownCh
+}
+
+// ShutdownReason returns the reason the gateway gave in the Shutdown message
+// that first fired ShutdownRequested's channel, or "" if none has arrived
+// yet. Only the first Shutdown's reason is kept -- see fireShutdown.
+func (m *streamManager) ShutdownReason() string {
+	if v, ok := m.shutdownReason.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// fireShutdown records reason and closes shutdownCh, both exactly once. A
+// gateway that retries the Shutdown message, or sends two Shutdown messages
+// in one session, must not panic the agent on a double close -- and must
+// not have the operator-facing reason silently replaced by whatever the
+// retry happened to say.
+func (m *streamManager) fireShutdown(reason string) {
+	m.shutdownOnce.Do(func() {
+		m.shutdownReason.Store(reason)
+		close(m.shutdownCh)
+	})
 }
 
 // SetOnEffectiveConfig registers the callback applyManaged invokes with the
