@@ -986,9 +986,18 @@ func TestHandshakeCapabilitiesReportWhatTheCollectorsWereBuiltFrom(t *testing.T)
 		t.Fatal("setup: caps must follow the file config before boot reports a collector config")
 	}
 
-	built := *m.cfg
-	built.Collect.Logs.Enabled = false
-	m.SetCollectorConfig(&built)
+	// Through ApplyBlocks, not `built := *m.cfg`: a shallow struct copy
+	// shares every slice with the config this manager treats as immutable,
+	// so an edit here touching a rule list would silently mutate m.cfg --
+	// corrupting the very invariant the managed-block feature rests on, in
+	// the test that exists to defend it.
+	built, err := config.ApplyBlocks(m.cfg, map[string][]byte{
+		"collect.logs": []byte("enabled: false\n"),
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
+	}
+	m.SetCollectorConfig(built)
 
 	if m.agentCaps().GetLogs() {
 		t.Fatal("caps.Logs = true while the log collector was never built")

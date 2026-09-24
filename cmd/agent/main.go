@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -151,43 +152,77 @@ var errReconcilerNotReady = errors.New("watch reconciler is not ready yet: the a
 //
 // It has three states, and the middle one is the point:
 //
-//   - unpopulated (boot has not reached the collectors): Reconcile returns
-//     errReconcilerNotReady. Never a nil dereference, and never a silent
-//     success -- the platform retries on an error and cannot retry a lie.
+//   - unpopulated (boot has not reached the collectors): Reconcile records
+//     the desired set and returns errReconcilerNotReady. Never a nil
+//     dereference, and never a silent success -- a caller that cannot
+//     converge must say so.
 //   - populated with nil (collect.state is disabled, so no collector
 //     satisfies WatchReconciler at all): Reconcile succeeds and does
 //     nothing, which is exactly what the manager's own nil check did before.
 //   - populated with a collector: a pass-through.
 //
-// The distinction between the first two is why this stores a slot pointer
-// rather than the interface value: an interface holding nil and an absent
-// interface are the same atomic.Pointer load, and they must answer
-// differently.
+// The recorded set is REPLAYED when Set populates the holder, and that is
+// not belt-and-braces: nothing else would ever re-send it. Measured in the
+// backend, internal/clusterwatch/reconciler.go:188-217 skips a session whose
+// signature matches lastSent, and that signature is recorded on a successful
+// SEND -- delivery to the stream, not application by the agent. The stream
+// manager logs the rejected reconcile and returns. So the 15s periodic
+// reconciler does not re-send the same set: healing would need the desired
+// set itself to change (a lease added or expired, 90s TTL) or a reconnect.
+// Without the replay, a watch a user asked for in the boot window can stay
+// dead for up to 90 seconds.
+//
+// Drop-and-replay-LATEST, not a queue: each reconcile is a complete desired
+// set ("converge on exactly this"), so only the most recent one means
+// anything, and replaying an older one after a newer would converge
+// backwards.
+//
+// One mutex covers resolution, the pending set and the forwarded call --
+// rather than the lock-free atomic the other two holders use -- so a replay
+// cannot interleave with a live reconcile and leave the informers converged
+// on the older of the two. Reconcile's only caller is the stream manager's
+// receive loop, which is already serial, so the lock costs nothing; Set runs
+// once, at boot.
 type reconcilerHolder struct {
-	slot atomic.Pointer[reconcilerSlot]
+	mu          sync.Mutex
+	resolved    bool
+	inner       stream.WatchReconciler
+	pending     []k8sresource.Descriptor
+	havePending bool
 }
 
-// reconcilerSlot is one resolution of the holder, including the resolution
-// "there is no reconciler on this agent".
-type reconcilerSlot struct{ inner stream.WatchReconciler }
-
-// Set resolves the holder. r may be nil, meaning this agent builds no state
-// collector; that is a resolution, not an absence. Called once, by serve(),
-// before the collectors start.
-func (h *reconcilerHolder) Set(r stream.WatchReconciler) {
-	h.slot.Store(&reconcilerSlot{inner: r})
+// Set resolves the holder and replays the most recent desired set that was
+// refused while it was unresolved, if there was one. r may be nil, meaning
+// this agent builds no state collector; that is a resolution, not an
+// absence, and it discards any pending set because there is nothing that
+// could ever apply it. Called once, by serve(), before the collectors start.
+//
+// The returned error is the replayed Reconcile's own; serve() logs it. A
+// failed replay is no worse than the state before this holder existed.
+func (h *reconcilerHolder) Set(ctx context.Context, r stream.WatchReconciler) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	pending, have := h.pending, h.havePending
+	h.resolved, h.inner = true, r
+	h.pending, h.havePending = nil, false
+	if !have || r == nil {
+		return nil
+	}
+	return r.Reconcile(ctx, pending)
 }
 
 // Reconcile implements stream.WatchReconciler.
 func (h *reconcilerHolder) Reconcile(ctx context.Context, desired []k8sresource.Descriptor) error {
-	slot := h.slot.Load()
-	if slot == nil {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.resolved {
+		h.pending, h.havePending = desired, true
 		return errReconcilerNotReady
 	}
-	if slot.inner == nil {
+	if h.inner == nil {
 		return nil
 	}
-	return slot.inner.Reconcile(ctx, desired)
+	return h.inner.Reconcile(ctx, desired)
 }
 
 // scrapeHealthHolder is reconcilerHolder's sibling for the heartbeat's
@@ -317,6 +352,40 @@ func startCollectors(
 	// honestly call "what this process is running".
 	report(effective)
 	return collectors, effective, nil
+}
+
+// unwindBootFailure ends a boot that could not build its collectors, with
+// the servers and the stream manager already running in the run group.
+//
+// It exists as its own function because which of TWO errors it returns
+// decides the process EXIT CODE, and serve() is not reachable from a test.
+//
+// The run group's error wins whenever it has one. The servers bind in
+// milliseconds while the boot wait runs up to ten seconds, so a health,
+// metrics, pprof or stream failure lands inside that wait essentially
+// always: the errgroup records it, cancels ctx, and startCollectors comes
+// back with a plain context.Canceled. Returning THAT would be read by run()
+// through isContextClosed as a clean stop and exit 0 -- a port already in
+// use becoming a pod that restarts forever with exit code 0 and one
+// misleading "agent stopped" line. Before the collectors moved after the
+// run group, the same failure surfaced through serve()'s own g.Wait as a
+// named error and exit 1, and it has to keep doing so.
+//
+// isContextClosed guards the other direction: on a real SIGTERM during the
+// wait, the group returns the same context error the cause carries, and the
+// process must still exit 0.
+//
+// The queue is closed on every path -- it holds an open write-ahead log.
+func unwindBootFailure(stop context.CancelFunc, wait func() error, closeQueue func() error, cause error) error {
+	// The same cancel a SIGTERM uses, rather than returning out from under
+	// the running goroutines.
+	stop()
+	werr := wait()
+	_ = closeQueue()
+	if werr != nil && !isContextClosed(werr) {
+		return werr
+	}
+	return fmt.Errorf("collectors: %w", cause)
 }
 
 // waitForManagedConfig blocks until the agent's first handshake has been
@@ -497,6 +566,19 @@ func run() int {
 // fires, so a gateway-requested restart runs through the identical drain
 // below (g.Wait, then stopCollectors and q.Close under shutdownTimeout)
 // rather than a second, untested exit path.
+//
+// One exception, and it is narrow enough to state exactly: a Shutdown (or
+// any cancellation) that arrives BEFORE the collectors have been built
+// leaves through unwindBootFailure instead -- stop, g.Wait, q.Close -- which
+// skips stopCollectors and the shutdownTimeout-bounded context. What that
+// bounded context bounds is stopCollectors, and on that path there are no
+// collectors to stop: buildCollectors either has not run or returned an
+// error, so nothing is tailing a log or holding an informer. q.Close is
+// unbounded on BOTH paths already (shutdownCtx scopes stopCollectors only),
+// so the drain a caller can observe is the same one. It is a second exit
+// path in the code and not in behaviour, and it exists because the
+// collectors are now built after the run group is running -- see
+// startCollectors.
 func serve(parentCtx context.Context, stop context.CancelFunc, cfg *config.Config, devMode bool, log *logger.Logger) error {
 	shutdownTimeout := defaultShutdownTimeout
 
@@ -889,13 +971,7 @@ func serve(parentCtx context.Context, stop context.CancelFunc, cfg *config.Confi
 		log,
 	)
 	if err != nil {
-		// The servers and the stream manager are already running in g:
-		// unwind them through the same cancel a SIGTERM uses rather than
-		// returning out from under them.
-		stop()
-		_ = g.Wait()
-		_ = q.Close()
-		return fmt.Errorf("collectors: %w", err)
+		return unwindBootFailure(stop, g.Wait, q.Close, err)
 	}
 	log.Info("collection settings in effect",
 		logger.F("logs_enabled", effectiveCfg.Collect.Logs.Enabled),
@@ -940,7 +1016,15 @@ func serve(parentCtx context.Context, stop context.CancelFunc, cfg *config.Confi
 			healthSrv.Register(health.NewStateWatcherChecker(ready))
 		}
 	}
-	reconciler.Set(foundReconciler)
+	// A watch config that arrived while the holder was unresolved is
+	// replayed here -- see reconcilerHolder: nothing else re-sends it, and
+	// the gateway's periodic reconciler skips a set it has already
+	// delivered.
+	if err := reconciler.Set(ctx, foundReconciler); err != nil {
+		log.Warn("replaying the watch config that arrived before the collectors existed failed",
+			logger.F("error", err.Error()),
+		)
+	}
 	scrapeHealth.Set(foundScrape)
 	capSweeper.Set(foundCapSweeper)
 
