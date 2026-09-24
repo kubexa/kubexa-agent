@@ -451,3 +451,161 @@ func TestHealthSnapshotWithoutCountersReportsZero(t *testing.T) {
 		t.Fatalf("want zeroes, got %+v", h)
 	}
 }
+
+// newManagedTestManager builds a streamManager with a real, valid file
+// config -- unlike newConfigTestManager, applyManaged needs one that
+// config.ApplyBlocks can actually overlay and validate. It skips New() for
+// the same reason newConfigTestManager does: none of dialing, the queue or
+// metrics is reachable from applyManaged, handleGatewayMessage's config case
+// or applyHandshakeConfig.
+func newManagedTestManager(t *testing.T) *streamManager {
+	t.Helper()
+	return &streamManager{
+		cfg:   testConfig(),
+		log:   logger.New("stream-managed-test"),
+		rules: ingestrules.NewStore(),
+	}
+}
+
+// managedBlocksMsg builds a GatewayMessage carrying a ConfigUpdate whose
+// snapshot's managed field is nil when blocks is nil (the sender said
+// nothing about managed blocks -- ConfigSnapshot's patch rule), or a
+// ManagedBlocks set (possibly with zero entries, for a released block) when
+// blocks is non-nil.
+func managedBlocksMsg(t *testing.T, version string, blocks map[string]string) *agentv1.GatewayMessage {
+	t.Helper()
+	var set *agentv1.ManagedBlocks
+	if blocks != nil {
+		mb := &agentv1.ManagedBlocks{}
+		for key, yamlBody := range blocks {
+			mb.Blocks = append(mb.Blocks, &agentv1.ManagedBlock{Key: key, Yaml: yamlBody})
+		}
+		set = mb
+	}
+	return &agentv1.GatewayMessage{
+		Payload: &agentv1.GatewayMessage_Config{
+			Config: &agentv1.ConfigUpdate{
+				ConfigVersion: version,
+				Config:        &agentv1.ConfigSnapshot{Managed: set},
+			},
+		},
+	}
+}
+
+// TestManagedBlocksApplyFromTheHandshake: a managed block in the handshake's
+// config snapshot must land in EffectiveConfig, and must never touch the
+// immutable file config it was overlaid on.
+func TestManagedBlocksApplyFromTheHandshake(t *testing.T) {
+	m := newManagedTestManager(t)
+	fileBatchSize := m.cfg.Buffer.BatchSize
+
+	m.applyHandshakeConfig(&agentv1.HandshakeResponse{
+		Accepted:  true,
+		SessionId: "s1",
+		Config: &agentv1.ConfigSnapshot{
+			Managed: &agentv1.ManagedBlocks{
+				Blocks: []*agentv1.ManagedBlock{{Key: "buffer", Yaml: "batch_size: 250\n"}},
+			},
+		},
+	})
+
+	if got := m.EffectiveConfig().Buffer.BatchSize; got != 250 {
+		t.Fatalf("EffectiveConfig().Buffer.BatchSize = %d, want 250", got)
+	}
+	if m.cfg.Buffer.BatchSize != fileBatchSize {
+		t.Fatalf("the file config must not be mutated: BatchSize = %d, want %d", m.cfg.Buffer.BatchSize, fileBatchSize)
+	}
+}
+
+// TestManagedBlocksApplyFromAConfigUpdate is the handshake test's sibling on
+// the push path: the same overlay through GatewayMessage_Config, and the
+// config_version on the wire must show up as ManagedState's revision.
+func TestManagedBlocksApplyFromAConfigUpdate(t *testing.T) {
+	m := newManagedTestManager(t)
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, "7", map[string]string{
+		"buffer": "batch_size: 300\n",
+	}))
+
+	if got := m.EffectiveConfig().Buffer.BatchSize; got != 300 {
+		t.Fatalf("EffectiveConfig().Buffer.BatchSize = %d, want 300", got)
+	}
+	rev, errStr, _ := m.ManagedState()
+	if rev != 7 {
+		t.Fatalf("ManagedState revision = %d, want 7", rev)
+	}
+	if errStr != "" {
+		t.Fatalf("ManagedState err = %q, want empty", errStr)
+	}
+}
+
+// TestAWatchersOnlyUpdateKeepsTheManagedBlocks pins ConfigSnapshot's patch
+// rule on the managed field specifically: a nil managed field means the
+// sender said nothing about managed blocks, not "clear them". A plausible
+// wrong implementation would treat any non-managed update as a reset.
+func TestAWatchersOnlyUpdateKeepsTheManagedBlocks(t *testing.T) {
+	m := newManagedTestManager(t)
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, "5", map[string]string{
+		"buffer": "batch_size: 250\n",
+	}))
+
+	// A watchers-only update, like clusterwatch's reconciler sends, carries
+	// a nil managed field.
+	m.handleGatewayMessage(context.Background(), configMessage(t, [][]string{{"v1/pods"}}))
+
+	if got := m.EffectiveConfig().Buffer.BatchSize; got != 250 {
+		t.Fatalf("a watchers-only update erased the managed blocks: BatchSize = %d, want 250", got)
+	}
+	if rev, _, _ := m.ManagedState(); rev != 5 {
+		t.Fatalf("ManagedState revision = %d, want 5 (unchanged)", rev)
+	}
+}
+
+// TestAReleasedBlockRestoresTheFileValue: a non-nil managed set that simply
+// omits a previously-set key means the platform released that block. Since
+// ApplyBlocks always overlays onto a fresh copy of the immutable file
+// config, the file's own value comes back rather than the last value the
+// platform pushed.
+func TestAReleasedBlockRestoresTheFileValue(t *testing.T) {
+	m := newManagedTestManager(t)
+	fileBatchSize := m.cfg.Buffer.BatchSize
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, "1", map[string]string{
+		"buffer": "batch_size: 250\n",
+	}))
+	if got := m.EffectiveConfig().Buffer.BatchSize; got != 250 {
+		t.Fatalf("setup: BatchSize = %d, want 250", got)
+	}
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, "2", map[string]string{}))
+
+	if got := m.EffectiveConfig().Buffer.BatchSize; got != fileBatchSize {
+		t.Fatalf("a released block did not restore the file value: BatchSize = %d, want %d", got, fileBatchSize)
+	}
+	if rev, _, _ := m.ManagedState(); rev != 2 {
+		t.Fatalf("ManagedState revision = %d, want 2", rev)
+	}
+}
+
+// TestABadBlockAppliesNothingAndIsReported: a block ApplyBlocks refuses must
+// leave EffectiveConfig exactly where it was -- all-or-nothing, never a
+// partial apply -- and ManagedState's error must name the offending block
+// rather than being applied silently or crashing the agent.
+func TestABadBlockAppliesNothingAndIsReported(t *testing.T) {
+	m := newManagedTestManager(t)
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, "3", map[string]string{
+		"buffer": "batch_size: -1\n",
+	}))
+
+	if got, want := m.EffectiveConfig().Buffer.BatchSize, m.cfg.Buffer.BatchSize; got != want {
+		t.Fatalf("a rejected block must leave the effective config unchanged: BatchSize = %d, want %d", got, want)
+	}
+	rev, errStr, _ := m.ManagedState()
+	if rev != 0 {
+		t.Fatalf("a rejected revision must not be reported as applied, got %d", rev)
+	}
+	if !strings.Contains(errStr, "buffer") {
+		t.Fatalf("ManagedState err must name the block, got %q", errStr)
+	}
+}
