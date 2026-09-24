@@ -24,3 +24,16 @@ func TestManagedBlockAllowedKeysCoversEveryManagedKey(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryManagedBlockHasAPrototype guards the same gap as the test above,
+// for ManagedBlockPrototype: schemagen (tools/schemagen, Task 7) reflects
+// over a block's struct through it instead of carrying its own key->type
+// switch. A sixth block must fail here rather than silently generating a
+// schema that is missing it.
+func TestEveryManagedBlockHasAPrototype(t *testing.T) {
+	for _, key := range managedBlockKeys {
+		if _, ok := ManagedBlockPrototype(key); !ok {
+			t.Errorf("ManagedBlockPrototype has no case for managed block %q", key)
+		}
+	}
+}

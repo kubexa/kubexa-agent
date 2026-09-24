@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "buffer": {
+      "additionalProperties": false,
+      "properties": {
+        "batch_size": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "collect.logs": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "exclude_namespaces": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "follow": {
+          "type": "boolean"
+        },
+        "rules": {
+          "items": {
+            "properties": {
+              "containers": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "field_selector": {
+                "type": "string"
+              },
+              "follow": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "label_selector": {
+                "type": "string"
+              },
+              "labels": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "namespace": {
+                "type": "string"
+              },
+              "pod_names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "tail_lines": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "tail_lines": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "collect.metrics": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "node_interval": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "pod_interval": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "rules": {
+          "items": {
+            "properties": {
+              "field_selector": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "label_selector": {
+                "type": "string"
+              },
+              "labels": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "namespace": {
+                "type": "string"
+              },
+              "node_interval": {
+                "type": [
+                  "string",
+                  "integer"
+                ]
+              },
+              "node_names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "pod_interval": {
+                "type": [
+                  "string",
+                  "integer"
+                ]
+              },
+              "pod_names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "resources": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "collect.state": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "resync_period": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "rules": {
+          "items": {
+            "properties": {
+              "field_selector": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "label_selector": {
+                "type": "string"
+              },
+              "namespace": {
+                "type": "string"
+              },
+              "resources": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "resync_period": {
+                "type": [
+                  "string",
+                  "integer"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "query": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "rules": {
+          "items": {
+            "properties": {
+              "field_selector": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "label_selector": {
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "namespace": {
+                "type": "string"
+              },
+              "resources": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "verbs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "type": "object"
+}
