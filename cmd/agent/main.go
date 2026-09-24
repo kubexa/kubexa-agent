@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,6 +41,8 @@ import (
 	"github.com/kubexa/kubexa-agent/internal/stream"
 	"github.com/kubexa/kubexa-agent/pkg/buildinfo"
 	"github.com/kubexa/kubexa-agent/pkg/config"
+	"github.com/kubexa/kubexa-agent/pkg/config/k8sresource"
+	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 	commonv1 "github.com/kubexa/kubexa-agent/proto/gen/go/common/v1"
 )
 
@@ -95,6 +98,252 @@ type shutdownSignaler interface {
 // reporter by name.
 type sweepRequester interface {
 	RequestSweep()
+}
+
+// collectorConfigSetter is the narrow, structural view of the stream manager
+// serve() uses to tell it which config the collectors were actually built
+// from. Declared at package level for the same reason
+// effectiveConfigSetter is, and asserted the same way: a failed assertion is
+// a boot error, because a manager that never learns this reports every
+// revision as applied with restart_required false forever -- a control that
+// changes nothing, reported as working. See
+// TestStreamManagerSatisfiesCollectorConfigSetter.
+type collectorConfigSetter interface {
+	SetCollectorConfig(*config.Config)
+}
+
+// effectiveConfigSource is what boot reads to decide what to build the
+// collectors FROM: a signal that the first handshake has been processed, and
+// the config that produced. Kept separate from collectorConfigSetter so the
+// test doubles in boot_test.go need not implement a setter they never call.
+type effectiveConfigSource interface {
+	ConfigSettled() <-chan struct{}
+	EffectiveConfig() *config.Config
+}
+
+// managedConfigBootWait is how long boot waits for the gateway's first
+// handshake before building the collectors from the file config.
+//
+// Bounded, and short: an agent whose gateway is unreachable -- a cluster
+// with no egress yet, a gateway mid-rollout -- must still collect. Ten
+// seconds is long enough for a handshake on a working link (the handshake
+// timeout itself defaults to the same order) and short enough that the
+// health server, which starts before this wait, answers a readiness probe
+// with "collectors have not started yet" rather than the kubelet counting
+// liveness failures.
+const managedConfigBootWait = 10 * time.Second
+
+// errReconcilerNotReady is what a watch reconcile gets while the collectors
+// are still being built. The gateway retries on an error; it cannot retry a
+// success that did nothing.
+var errReconcilerNotReady = errors.New("watch reconciler is not ready yet: the agent is still starting its collectors")
+
+// reconcilerHolder breaks the dependency cycle between the stream manager
+// and the collectors.
+//
+// Measured: the collectors carry the reconciler (the state collector IS the
+// stream.WatchReconciler) and the stream manager needs it at construction --
+// while the collectors must now be built from the config the stream manager
+// resolves at the handshake. "Manager first, then collectors" is therefore
+// not an ordering, it is a cycle. The holder is the same indirection this
+// branch already uses twice (SetOnEffectiveConfig, sweepRequester): built
+// first, passed to stream.New, populated once the real collector exists.
+//
+// It has three states, and the middle one is the point:
+//
+//   - unpopulated (boot has not reached the collectors): Reconcile returns
+//     errReconcilerNotReady. Never a nil dereference, and never a silent
+//     success -- the platform retries on an error and cannot retry a lie.
+//   - populated with nil (collect.state is disabled, so no collector
+//     satisfies WatchReconciler at all): Reconcile succeeds and does
+//     nothing, which is exactly what the manager's own nil check did before.
+//   - populated with a collector: a pass-through.
+//
+// The distinction between the first two is why this stores a slot pointer
+// rather than the interface value: an interface holding nil and an absent
+// interface are the same atomic.Pointer load, and they must answer
+// differently.
+type reconcilerHolder struct {
+	slot atomic.Pointer[reconcilerSlot]
+}
+
+// reconcilerSlot is one resolution of the holder, including the resolution
+// "there is no reconciler on this agent".
+type reconcilerSlot struct{ inner stream.WatchReconciler }
+
+// Set resolves the holder. r may be nil, meaning this agent builds no state
+// collector; that is a resolution, not an absence. Called once, by serve(),
+// before the collectors start.
+func (h *reconcilerHolder) Set(r stream.WatchReconciler) {
+	h.slot.Store(&reconcilerSlot{inner: r})
+}
+
+// Reconcile implements stream.WatchReconciler.
+func (h *reconcilerHolder) Reconcile(ctx context.Context, desired []k8sresource.Descriptor) error {
+	slot := h.slot.Load()
+	if slot == nil {
+		return errReconcilerNotReady
+	}
+	if slot.inner == nil {
+		return nil
+	}
+	return slot.inner.Reconcile(ctx, desired)
+}
+
+// scrapeHealthHolder is reconcilerHolder's sibling for the heartbeat's
+// scrape health: the metrics collector supplies it, and the metrics
+// collector no longer exists when stream.New is called.
+//
+// Unresolved and resolved-to-none answer identically here -- nil, meaning
+// "this agent does not report scrape health" -- because that is already the
+// honest reading of an absent scrape_targets list, and during the boot
+// window it is literally true: nothing is scraping yet. It must never become
+// an empty list, which a consumer would read as "every kind is OK".
+type scrapeHealthHolder struct {
+	slot atomic.Pointer[scrapeHealthSlot]
+}
+
+type scrapeHealthSlot struct{ inner stream.ScrapeHealthSource }
+
+// Set resolves the holder; s may be nil (metrics collection disabled).
+func (h *scrapeHealthHolder) Set(s stream.ScrapeHealthSource) {
+	h.slot.Store(&scrapeHealthSlot{inner: s})
+}
+
+// ScrapeTargetHealth implements stream.ScrapeHealthSource.
+func (h *scrapeHealthHolder) ScrapeTargetHealth() []*agentv1.ScrapeTargetHealth {
+	slot := h.slot.Load()
+	if slot == nil || slot.inner == nil {
+		return nil
+	}
+	return slot.inner.ScrapeTargetHealth()
+}
+
+// sweeperHolder is the same indirection for the capability reporter's sweep
+// nudge, which the effective-config callback needs at stream.New time and
+// which the collectors only produce later.
+//
+// A nudge that arrives before the reporter exists is DROPPED, not queued:
+// the reporter runs its own sweep when it starts, from the policy that swap
+// just installed, so the nudge would ask for a sweep that is already
+// happening.
+type sweeperHolder struct {
+	slot atomic.Pointer[sweeperSlot]
+}
+
+type sweeperSlot struct{ inner sweepRequester }
+
+// Set resolves the holder; s may be nil (no capability reporter is built
+// when collect.state is disabled).
+func (h *sweeperHolder) Set(s sweepRequester) {
+	h.slot.Store(&sweeperSlot{inner: s})
+}
+
+// RequestSweep implements sweepRequester.
+func (h *sweeperHolder) RequestSweep() {
+	slot := h.slot.Load()
+	if slot == nil || slot.inner == nil {
+		return
+	}
+	slot.inner.RequestSweep()
+}
+
+// collectorsChecker keeps the readiness probe honest across the boot wait.
+//
+// The health server now starts BEFORE the collectors are built, so that a
+// liveness probe has something to answer during the wait. Without this
+// checker, readiness would go green in that window on the strength of the
+// k8s, queue and stream checks alone -- reporting an agent that collects
+// nothing as ready, which is this task's own failure mode wearing a
+// different hat. The state-watcher checker that used to cover the gap is
+// registered later, once the collector exists.
+type collectorsChecker struct{ started atomic.Bool }
+
+// Name returns the component identifier.
+func (c *collectorsChecker) Name() string { return "collectors" }
+
+// Check reports unhealthy until serve() has started the collectors.
+func (c *collectorsChecker) Check(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !c.started.Load() {
+		return health.Unhealthy(errors.New("collectors have not started yet"))
+	}
+	return nil
+}
+
+// startCollectors waits briefly for the platform's first managed config set,
+// builds the collectors from whatever that wait produced, and reports the
+// config they were built from back to the stream manager.
+//
+// This ordering is the fix for C1. Collectors used to be built from the FILE
+// config, while the managed set arrives at the handshake -- after it. A
+// restart did not rescue it, because a restart repeats the same order, which
+// is how four of the five managed blocks came to be stored, validated and
+// reported as applied while changing nothing.
+//
+// It takes build and report as functions rather than the dozen arguments
+// buildCollectors needs, because the ordering it encodes -- wait, then
+// build, then report, and report ONLY after a build that succeeded -- is
+// exactly what a test on serve() cannot see.
+//
+// The wait falls back to src.EffectiveConfig() on timeout, which is the file
+// config when nothing was applied: an agent whose gateway is unreachable
+// must still collect.
+func startCollectors(
+	ctx context.Context,
+	src effectiveConfigSource,
+	budget time.Duration,
+	build func(*config.Config) ([]Collector, error),
+	report func(*config.Config),
+	log *logger.Logger,
+) ([]Collector, *config.Config, error) {
+	waitForManagedConfig(ctx, src.ConfigSettled(), budget, log)
+	// A SIGTERM (or a server that already failed into the run group) during
+	// the wait: build nothing. Starting informers and a log tailer for a
+	// process that is shutting down is work that can only fail, and the
+	// wrapped context error is what run() reads as a clean stop.
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	effective := src.EffectiveConfig()
+	collectors, err := build(effective)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Only now: with no collectors there is nothing the heartbeat could
+	// honestly call "what this process is running".
+	report(effective)
+	return collectors, effective, nil
+}
+
+// waitForManagedConfig blocks until the agent's first handshake has been
+// processed, the budget expires, or ctx ends. It never fails: every outcome
+// leaves a config to build from.
+func waitForManagedConfig(ctx context.Context, settled <-chan struct{}, budget time.Duration, log *logger.Logger) {
+	if budget <= 0 {
+		return
+	}
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+
+	start := time.Now()
+	select {
+	case <-settled:
+		log.Info("gateway config settled; building collectors from the effective config",
+			logger.F("waited", time.Since(start).String()),
+		)
+	case <-timer.C:
+		// Said at Warn, not Info: the collectors are about to be built from
+		// the file config, so any managed block this cluster has is not in
+		// effect until the agent restarts -- and the heartbeat will say so.
+		log.Warn("no gateway config arrived within the boot wait; building collectors from the file config",
+			logger.F("waited", budget.String()),
+		)
+	case <-ctx.Done():
+	}
 }
 
 // logQueryPolicyWarnings logs the query policy's compile-time warnings, if
@@ -282,7 +531,11 @@ func serve(parentCtx context.Context, stop context.CancelFunc, cfg *config.Confi
 	}
 	log.Info("queue initialized", logger.F("spill_dir", cfg.Buffer.SpillDir))
 
-	log.Info("collection settings",
+	// What the FILE says, which is not yet what this agent will collect: the
+	// collectors are built after the first handshake, from the config the
+	// platform's managed blocks produce. The second line, "collection
+	// settings in effect", is the one that reports what was actually built.
+	log.Info("collection settings from the config file",
 		logger.F("logs_enabled", cfg.Collect.Logs.Enabled),
 		logger.F("state_enabled", cfg.Collect.State.Enabled),
 		logger.F("metrics_enabled", cfg.Collect.Metrics.Enabled),
@@ -413,45 +666,23 @@ func serve(parentCtx context.Context, stop context.CancelFunc, cfg *config.Confi
 
 	// One rule store, shared. The stream manager is its only writer (it is the
 	// only component that sees the gateway's messages) and the log collector
-	// reads it. Created here because the collectors are built before the
-	// manager and both need the same instance.
+	// reads it. Created here because the collectors and the manager both need
+	// the same instance and neither owns it.
 	rulesStore := ingestrules.NewStore()
 	// One counter set, shared the same way: the collector records truncation
 	// and rate limiting, the stream manager records age drops, and the
 	// heartbeat reports one number per reason.
 	ruleCounters := ingestrules.NewCounters()
 
-	collectors, err := buildCollectors(cfg, kube, q, mainReg, log, queryPolicy, mutatePolicy, execPolicy, reporterNodePolicy, helperNamespace, rulesStore, ruleCounters)
-	if err != nil {
-		_ = q.Close()
-		return fmt.Errorf("collectors: %w", err)
-	}
-
-	// The state collector, if enabled, also satisfies stream.WatchReconciler
-	// (its Reconcile method converges demand-driven informers on the
-	// gateway's watch config). Found by type assertion rather than a second
-	// return value from buildCollectors so that "which collector applies
-	// gateway config" stays a property of the collector's own type, not
-	// something the caller has to track separately.
-	var reconciler stream.WatchReconciler
-	// The metrics collector, if enabled, also satisfies
-	// stream.ScrapeHealthSource. Found the same way as reconciler above: an
-	// agent built without metrics collection has no collector to satisfy it,
-	// so scrapeHealth stays nil and the heartbeat reports no scrape_targets
-	// at all rather than a fabricated empty "everything is healthy".
-	var scrapeHealth stream.ScrapeHealthSource
-	for _, coll := range collectors {
-		if reconciler == nil {
-			if r, ok := coll.(stream.WatchReconciler); ok {
-				reconciler = r
-			}
-		}
-		if scrapeHealth == nil {
-			if s, ok := coll.(stream.ScrapeHealthSource); ok {
-				scrapeHealth = s
-			}
-		}
-	}
+	// The three holders below stand in for collectors that do not exist yet.
+	// The collectors are built AFTER the stream manager now -- from the
+	// config its first handshake resolves -- while the manager still needs
+	// what the collectors carry at construction. See reconcilerHolder for
+	// the measured cycle and for what each holder answers in the window
+	// before it is populated.
+	reconciler := &reconcilerHolder{}
+	scrapeHealth := &scrapeHealthHolder{}
+	capSweeper := &sweeperHolder{}
 
 	nodeOpsPolicy, err := compileNodeOpsPolicy(cfg, log)
 	if err != nil {
@@ -536,18 +767,29 @@ func serve(parentCtx context.Context, stop context.CancelFunc, cfg *config.Confi
 		return fmt.Errorf("stream manager: %T does not expose the shutdown signal; "+
 			"a gateway-requested restart would never take effect", streamMgr)
 	}
-	// The capability reporter appears as a Collector only when
-	// cfg.Collect.State.Enabled built one (see buildCollectors); capSweeper
-	// stays nil when it did not, in which case a swap below has nothing to
-	// nudge.
-	var capSweeper sweepRequester
-	for _, coll := range collectors {
-		if sweeper, ok := coll.(sweepRequester); ok {
-			capSweeper = sweeper
-			break
-		}
+	// The same ruling once more, for the two interfaces boot needs to build
+	// the collectors from the config the platform manages: without
+	// collectorConfigSetter the heartbeat reports restart_required false for
+	// every revision forever, and without effectiveConfigSource the
+	// collectors go back to being built from the file config -- both of them
+	// silent, and both of them the exact defect this wiring exists to close.
+	// See TestStreamManagerSatisfiesCollectorConfigSetter.
+	collectorCfgSink, ok := streamMgr.(collectorConfigSetter)
+	if !ok {
+		_ = q.Close()
+		return fmt.Errorf("stream manager: %T cannot be told which config the collectors were built from; "+
+			"the heartbeat would report every revision as in effect", streamMgr)
+	}
+	cfgSource, ok := streamMgr.(effectiveConfigSource)
+	if !ok {
+		_ = q.Close()
+		return fmt.Errorf("stream manager: %T does not expose the effective config; "+
+			"the collectors would be built from the file config and the managed blocks would apply to nothing", streamMgr)
 	}
 
+	// capSweeper is a holder, not the reporter itself: the capability
+	// reporter is one of the collectors, which do not exist yet. A swap
+	// landing before they do has nothing to nudge -- see sweeperHolder.
 	s.SetOnEffectiveConfig(newEffectiveConfigCallback(queryPolicy, capSweeper, log))
 
 	healthAddr := cfg.Observability.HealthAddr
@@ -561,11 +803,13 @@ func serve(parentCtx context.Context, stop context.CancelFunc, cfg *config.Confi
 	healthSrv.Register(health.NewK8sChecker(kube))
 	healthSrv.Register(health.NewQueueChecker(q, 0))
 	healthSrv.Register(health.NewStreamChecker(streamMgr))
-	for _, coll := range collectors {
-		if ready, ok := coll.(health.StateWatcherReady); ok {
-			healthSrv.Register(health.NewStateWatcherChecker(ready))
-		}
-	}
+	// Registered before the server starts and satisfied only once the
+	// collectors are running: the health server now starts BEFORE the boot
+	// wait, and readiness must not go green for an agent that is collecting
+	// nothing yet. The state-watcher checker joins it below, once there is a
+	// collector to ask.
+	collectorsReady := &collectorsChecker{}
+	healthSrv.Register(collectorsReady)
 
 	metricsSrv := metrics.NewServer(metricsAddr, mainReg, logger.New("metrics"))
 
@@ -574,18 +818,6 @@ func serve(parentCtx context.Context, stop context.CancelFunc, cfg *config.Confi
 	pprofSrv := agentpprof.NewServer(cfg.Observability.PprofAddr, logger.New("pprof"))
 
 	g, ctx := errgroup.WithContext(parentCtx)
-
-	for _, c := range collectors {
-		c := c
-		g.Go(func() error {
-			log.Info("starting collector", logger.F("collector", c.Name()))
-			if err := c.Start(ctx); err != nil {
-				return fmt.Errorf("collector %s start: %w", c.Name(), err)
-			}
-			<-ctx.Done()
-			return ctx.Err()
-		})
-	}
 
 	g.Go(func() error {
 		log.Info("starting health server", logger.F("addr", healthAddr))
@@ -640,6 +872,90 @@ func serve(parentCtx context.Context, stop context.CancelFunc, cfg *config.Confi
 			return ctx.Err()
 		}
 	})
+
+	// Only now are the collectors built, and from the config the stream
+	// manager's first handshake resolved rather than from the file config --
+	// see startCollectors for why that ordering is the whole fix, and
+	// reconcilerHolder for why the manager had to come first.
+	collectors, effectiveCfg, err := startCollectors(
+		ctx,
+		cfgSource,
+		managedConfigBootWait,
+		func(c *config.Config) ([]Collector, error) {
+			return buildCollectors(c, kube, q, mainReg, log, queryPolicy, mutatePolicy, execPolicy,
+				reporterNodePolicy, helperNamespace, rulesStore, ruleCounters)
+		},
+		collectorCfgSink.SetCollectorConfig,
+		log,
+	)
+	if err != nil {
+		// The servers and the stream manager are already running in g:
+		// unwind them through the same cancel a SIGTERM uses rather than
+		// returning out from under them.
+		stop()
+		_ = g.Wait()
+		_ = q.Close()
+		return fmt.Errorf("collectors: %w", err)
+	}
+	log.Info("collection settings in effect",
+		logger.F("logs_enabled", effectiveCfg.Collect.Logs.Enabled),
+		logger.F("state_enabled", effectiveCfg.Collect.State.Enabled),
+		logger.F("metrics_enabled", effectiveCfg.Collect.Metrics.Enabled),
+	)
+
+	// The state collector, if enabled, also satisfies stream.WatchReconciler
+	// (its Reconcile method converges demand-driven informers on the
+	// gateway's watch config); the metrics collector, if enabled, satisfies
+	// stream.ScrapeHealthSource; and the capability reporter -- built only
+	// when collect.state is enabled -- satisfies sweepRequester. All three
+	// are found by type assertion rather than by extra return values from
+	// buildCollectors, so that "which collector answers which gateway
+	// concern" stays a property of the collector's own type.
+	//
+	// Each holder is resolved EXACTLY ONCE, including to nil: an agent that
+	// builds no state collector has resolved "there is no reconciler", which
+	// is a different answer from "not ready yet" (see reconcilerHolder).
+	var (
+		foundReconciler stream.WatchReconciler
+		foundScrape     stream.ScrapeHealthSource
+		foundCapSweeper sweepRequester
+	)
+	for _, coll := range collectors {
+		if foundReconciler == nil {
+			if r, ok := coll.(stream.WatchReconciler); ok {
+				foundReconciler = r
+			}
+		}
+		if foundScrape == nil {
+			if sh, ok := coll.(stream.ScrapeHealthSource); ok {
+				foundScrape = sh
+			}
+		}
+		if foundCapSweeper == nil {
+			if sw, ok := coll.(sweepRequester); ok {
+				foundCapSweeper = sw
+			}
+		}
+		if ready, ok := coll.(health.StateWatcherReady); ok {
+			healthSrv.Register(health.NewStateWatcherChecker(ready))
+		}
+	}
+	reconciler.Set(foundReconciler)
+	scrapeHealth.Set(foundScrape)
+	capSweeper.Set(foundCapSweeper)
+
+	for _, c := range collectors {
+		c := c
+		g.Go(func() error {
+			log.Info("starting collector", logger.F("collector", c.Name()))
+			if err := c.Start(ctx); err != nil {
+				return fmt.Errorf("collector %s start: %w", c.Name(), err)
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}
+	collectorsReady.started.Store(true)
 
 	log.Info("agent ready",
 		logger.F("health_addr", healthAddr),

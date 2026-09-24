@@ -88,6 +88,23 @@ message Heartbeat {
   // screen tells a cluster owner their Secret values leave the cluster.
   optional bool collect_redact_secrets = 6; // collect.state.redact_secrets
   optional bool query_redact_secrets   = 7; // query.redact_secrets, after inheritance
+
+  // restart_required is true when the applied revision contains a block this
+  // process cannot put into effect without restarting. The screen's three
+  // states (applied / waiting for agent restart / rejected) are otherwise
+  // indistinguishable, and reporting "applied" for a setting that changed
+  // nothing is the failure this feature exists to prevent.
+  //
+  // The AGENT decides this, not the backend: only the agent knows which
+  // config its long-lived collectors were actually built from, and it
+  // answers by comparing that config against the one it has applied -- not
+  // by matching block NAMES, so re-pushing a restart-only block whose value
+  // has not changed does not ask for a pointless restart.
+  //
+  // A plain bool, not optional: this field ships in the same agent release
+  // as the managed blocks themselves, so no agent that reports an applied
+  // revision at all is too old to set it.
+  bool restart_required = 8;
 }
 
 message AgentHealth {

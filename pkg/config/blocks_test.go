@@ -285,3 +285,102 @@ func TestManagedBlockKeysIsTheClosedSet(t *testing.T) {
 		t.Fatal("mutate is never a managed block")
 	}
 }
+
+// TestEveryManagedBlockIsClassifiedByWhenItTakesEffect is the literal the
+// whole restart_required report rests on. It is spelled out here -- rather
+// than derived from the map it checks, which would agree with any value --
+// so that MOVING a block between the two categories cannot happen quietly:
+// the person moving it has to come here and say so, and its sibling in
+// internal/stream (TestHeartbeatRestartRequiredFollowsTheBlockClassification)
+// fails until the heartbeat follows.
+//
+// Live means a running agent puts the block into effect with no restart:
+// every consumer of that block re-reads EffectiveConfig() on each use.
+// Restart-only means the block is baked into a component at construction --
+// the collectors are built once, from the config resolved at boot.
+func TestEveryManagedBlockIsClassifiedByWhenItTakesEffect(t *testing.T) {
+	want := map[string]bool{
+		"collect.logs":    false,
+		"collect.state":   false,
+		"collect.metrics": false,
+		"query":           true,
+		"buffer":          true,
+	}
+	for _, key := range config.ManagedBlockKeys() {
+		live, ok := config.ManagedBlockAppliesLive(key)
+		if !ok {
+			t.Errorf("managed block %q is not classified live or restart-only", key)
+			continue
+		}
+		if live != want[key] {
+			t.Errorf("ManagedBlockAppliesLive(%q) = %v, want %v -- if this block really "+
+				"changed category, the heartbeat's restart_required must follow it",
+				key, live, want[key])
+		}
+	}
+	if _, ok := config.ManagedBlockAppliesLive("mutate"); ok {
+		t.Fatal("mutate is not a managed block and must not be classified")
+	}
+}
+
+// TestRestartRequiredBlocksNamesOnlyWhatChanged: the report is a COMPARISON,
+// not a list of block names present in the set. A restart-only block pushed
+// with the value the collectors were already built from asks for no restart
+// -- the platform re-sends the whole set on every revision, so a name-based
+// answer would demand a restart for every edit to any other block.
+func TestRestartRequiredBlocksNamesOnlyWhatChanged(t *testing.T) {
+	built := validBase(t)
+
+	same, err := config.ApplyBlocks(built, map[string][]byte{
+		"collect.state": []byte("enabled: true\n"),
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
+	}
+	if got := config.RestartRequiredBlocks(built, same); len(got) != 0 {
+		t.Fatalf("RestartRequiredBlocks = %v, want none: the value did not change", got)
+	}
+
+	changed, err := config.ApplyBlocks(built, map[string][]byte{
+		"collect.state": []byte("enabled: true\nresync_period: 17m\n"),
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
+	}
+	if got := config.RestartRequiredBlocks(built, changed); !slices.Equal(got, []string{"collect.state"}) {
+		t.Fatalf("RestartRequiredBlocks = %v, want [collect.state]", got)
+	}
+}
+
+// TestRestartRequiredBlocksIgnoresTheLiveOnes: a live block's change is in
+// effect already, so it must never ask for a restart -- that is the false
+// "waiting for agent restart" the screen would otherwise show forever for a
+// query-only edit.
+func TestRestartRequiredBlocksIgnoresTheLiveOnes(t *testing.T) {
+	built := validBase(t)
+	changed, err := config.ApplyBlocks(built, map[string][]byte{
+		"buffer": []byte("batch_size: 250\n"),
+		"query":  []byte("enabled: true\n"),
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
+	}
+	if got := config.RestartRequiredBlocks(built, changed); len(got) != 0 {
+		t.Fatalf("RestartRequiredBlocks = %v, want none for live blocks", got)
+	}
+}
+
+// TestRestartRequiredBlocksWithNoBuiltConfigAnswersNothing: before boot has
+// reported what the collectors were built from there is nothing to compare
+// against, and nothing has been built either. An empty answer is the honest
+// one; guessing "restart" would make every agent ask for a restart it does
+// not need on its first heartbeat.
+func TestRestartRequiredBlocksWithNoBuiltConfigAnswersNothing(t *testing.T) {
+	base := validBase(t)
+	if got := config.RestartRequiredBlocks(nil, base); len(got) != 0 {
+		t.Fatalf("RestartRequiredBlocks(nil, cfg) = %v, want none", got)
+	}
+	if got := config.RestartRequiredBlocks(base, nil); len(got) != 0 {
+		t.Fatalf("RestartRequiredBlocks(cfg, nil) = %v, want none", got)
+	}
+}
