@@ -71,6 +71,23 @@ message AgentCapabilities {
 message Heartbeat {
   int64       timestamp_unix_ms = 1;
   AgentHealth health            = 2;
+
+  // The platform's config revision this agent has actually applied, and why
+  // it could not. Zero means "no managed blocks applied" -- which is also
+  // what an agent too old to know this field reports, and the two are
+  // deliberately the same case: neither has applied anything.
+  int64           applied_config_revision = 3;
+  string          config_error            = 4;
+  repeated string config_warnings         = 5;
+
+  // The two redaction flags the platform may DISPLAY but never change
+  // (spec §3.3). They are `optional` rather than plain bools because an
+  // agent too old to set them must not be read as an agent with redaction
+  // off: that is the unmeasured/measured-zero distinction this proto
+  // already preserves for scrape health, and here it decides whether the
+  // screen tells a cluster owner their Secret values leave the cluster.
+  optional bool collect_redact_secrets = 6; // collect.state.redact_secrets
+  optional bool query_redact_secrets   = 7; // query.redact_secrets, after inheritance
 }
 
 message AgentHealth {
@@ -230,6 +247,27 @@ message ConfigSnapshot {
   int32                        batch_size             = 5;
   int32                        flush_interval_ms      = 6;
   IngestRules                  ingest_rules           = 7;
+  ManagedBlocks                managed                = 8;
+}
+
+// ManagedBlock is one configuration block the PLATFORM owns for this
+// cluster, carried as YAML in the agent's own schema rather than as a
+// typed mirror. The mirror is what produced LogCollectorConfig above,
+// which has drifted from config.LogNamespaceRule (no field_selector, no
+// pod_names, no labels) and which nothing reads. One schema -- the
+// agent's -- cannot drift from itself.
+message ManagedBlock {
+  string key  = 1; // collect.logs | collect.state | collect.metrics | query | buffer
+  string yaml = 2; // the block's value, agent snake_case, WITHOUT the key line
+}
+
+// ManagedBlocks is message-typed on purpose: by ConfigSnapshot's patch rule
+// above, nil means unchanged, so the clusterwatch reconciler and the
+// ingest-rules pusher cannot erase it. A NON-NIL value is the COMPLETE set
+// of blocks the platform owns; a block absent from it has been released
+// back to the agent's own config file.
+message ManagedBlocks {
+  repeated ManagedBlock blocks = 1;
 }
 
 // IngestRules are the limits the platform's log pipeline actually enforces,
