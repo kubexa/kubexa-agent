@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -151,6 +152,30 @@ type streamManager struct {
 	sessionID   atomic.Value // string
 	ready       atomic.Bool
 	configSnap  atomic.Pointer[agentv1.ConfigSnapshot]
+	// effective is the config the platform's managed blocks produce, overlaid
+	// on cfg. Nil until the first managed-block set is successfully applied --
+	// EffectiveConfig falls back to cfg itself for that case, so no caller
+	// needs to know whether any block is managed. cfg is never written after
+	// New, so it always stays available as the value a released block
+	// restores.
+	effective atomic.Pointer[config.Config]
+	// managedRev is the config_version of the last SUCCESSFULLY applied
+	// managed-block set, reported on the heartbeat. A rejected revision must
+	// never advance this: the screen would say "applied" for a config the
+	// agent is not running.
+	managedRev atomic.Int64
+	// managedErr records why the last managed-block set was refused, or an
+	// empty managedStatus when the last attempt succeeded. Nil (never
+	// attempted) and "succeeded" both report no error.
+	managedErr atomic.Pointer[managedStatus]
+	// onEffectiveConfig is called with the new effective config every time
+	// applyManaged installs one. A scalar field, not a registry: this
+	// codebase has already left two features inert behind a callback slot
+	// that kept only the last registration, so this field's singular name is
+	// the promise there is exactly one consumer. Task 4 sets it to swap the
+	// live query policy. Nil-checked -- most tests, and any build that never
+	// wires a consumer, leave it unset.
+	onEffectiveConfig func(*config.Config)
 	// rules is the resolved ingest-rule set. The manager owns it because it is
 	// the only component that sees the gateway's messages; the log collector
 	// reads it on the collection path and drainBufferedQueue on the send path.
@@ -776,6 +801,10 @@ func (m *streamManager) applyHandshakeConfig(hs *agentv1.HandshakeResponse) {
 		logger.F("max_line_bytes", m.rules.Get().MaxLineBytes),
 		logger.F("delivery_acks", hs.GetDeliveryAcks()),
 	)
+	// The handshake carries no config_version: it is the seed config, not a
+	// numbered push, so revision 0 is what ManagedState reports until the
+	// first ConfigUpdate assigns a real one.
+	m.applyManaged(hs.GetConfig().GetManaged(), 0)
 }
 
 func (m *streamManager) startSessionWorkers(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
@@ -1144,6 +1173,24 @@ func (m *streamManager) handleGatewayMessage(ctx context.Context, msg *agentv1.G
 		if len(p.Config.GetConfig().GetWatchers()) > 0 {
 			m.reconcileWatchConfig(ctx, p.Config.GetConfig())
 		}
+		// config_version is a string on the wire; ManagedState reports it as
+		// an int64. A version that fails to parse is the PLATFORM's bug, not
+		// a reason for the agent to refuse a config it can otherwise apply --
+		// so the blocks are still applied, just under the last known-good
+		// revision number rather than a fabricated one, since a garbled
+		// value here cannot be trusted enough to report as "applied".
+		revision := m.managedRev.Load()
+		if v := p.Config.GetConfigVersion(); v != "" {
+			if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+				revision = parsed
+			} else {
+				m.log.Warn("config update has a non-numeric config_version; applying managed blocks under the last reported revision",
+					logger.F("config_version", v),
+					logger.F("error", err.Error()),
+				)
+			}
+		}
+		m.applyManaged(p.Config.GetConfig().GetManaged(), revision)
 	case *agentv1.GatewayMessage_Shutdown:
 		m.log.Warn("gateway requested shutdown",
 			logger.F("reason", p.Shutdown.GetReason()),
@@ -1820,4 +1867,74 @@ func (m *streamManager) ConfigSnapshot() *agentv1.ConfigSnapshot {
 		return nil
 	}
 	return m.configSnap.Load()
+}
+
+// managedStatus is what the last attempt to apply a managed-block set left
+// behind, for ManagedState to report on the heartbeat.
+type managedStatus struct {
+	err      string
+	warnings []string
+}
+
+// EffectiveConfig returns the config the agent is actually running: cfg
+// overlaid with the platform's managed blocks when any have been applied
+// successfully, or cfg itself otherwise. Callers must never read m.cfg
+// directly for anything a managed block can change -- that field is the
+// immutable on-disk config, kept only so a released block has a value to
+// restore.
+func (m *streamManager) EffectiveConfig() *config.Config {
+	if cfg := m.effective.Load(); cfg != nil {
+		return cfg
+	}
+	return m.cfg
+}
+
+// applyManaged overlays a complete managed-block set. A nil set means the
+// sender said nothing about managed blocks and the current overlay stands --
+// that is ConfigSnapshot's patch rule, and it is what keeps the clusterwatch
+// reconciler and the ingest-rules pusher from erasing this field.
+//
+// It is all-or-nothing and it never returns an error to its caller: a config
+// the agent cannot apply must not take the agent down, so the failure is
+// recorded and reported on the next heartbeat instead, and the previously
+// effective config keeps running.
+func (m *streamManager) applyManaged(set *agentv1.ManagedBlocks, revision int64) {
+	if set == nil {
+		return
+	}
+	blocks := make(map[string][]byte, len(set.GetBlocks()))
+	for _, b := range set.GetBlocks() {
+		blocks[b.GetKey()] = []byte(b.GetYaml())
+	}
+	cfg, err := config.ApplyBlocks(m.cfg, blocks)
+	if err != nil {
+		m.managedErr.Store(&managedStatus{err: err.Error()})
+		m.log.Error("managed config rejected; keeping the running config",
+			logger.F("revision", revision),
+			logger.F("error", err.Error()),
+		)
+		return
+	}
+	m.effective.Store(cfg)
+	m.managedRev.Store(revision)
+	m.managedErr.Store(&managedStatus{})
+	m.log.Info("applied managed config blocks",
+		logger.F("revision", revision),
+		logger.F("blocks", len(blocks)),
+	)
+	if m.onEffectiveConfig != nil {
+		m.onEffectiveConfig(cfg) // Task 4 hooks the query policy swap here
+	}
+}
+
+// ManagedState reports what this agent has applied and why it refused
+// anything, for the heartbeat. The revision is the last APPLIED one: a
+// rejected revision must never be reported as applied, or the screen says
+// "applied" for a config the agent is not running.
+func (m *streamManager) ManagedState() (int64, string, []string) {
+	st := m.managedErr.Load()
+	if st == nil {
+		return m.managedRev.Load(), "", nil
+	}
+	return m.managedRev.Load(), st.err, st.warnings
 }
