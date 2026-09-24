@@ -714,15 +714,21 @@ func TestHeartbeatReportsBothRedactionFlags(t *testing.T) {
 
 	effective := *m.cfg
 	effective.Collect.State.RedactSecrets = true
-	effective.Query.RedactSecrets = proto.Bool(false)
+	// The file config's Query.RedactSecrets is nil, so its QueryRedactSecrets()
+	// falls back to Collect.State.RedactSecrets = false. Setting the
+	// effective config's override to true, not false, makes the two configs
+	// disagree on this flag too -- a false override would equal the file
+	// config's fallback value and the assertion below would pass even if
+	// buildHeartbeat read the wrong config.
+	effective.Query.RedactSecrets = proto.Bool(true)
 	m.managed.Store(&managedState{cfg: &effective, revision: 1})
 
 	hb := m.buildHeartbeat()
 	if hb.CollectRedactSecrets == nil || !hb.GetCollectRedactSecrets() {
-		t.Fatalf("CollectRedactSecrets = %v, want true (from EffectiveConfig, not the file config)", hb.CollectRedactSecrets)
+		t.Fatalf("CollectRedactSecrets = %v, want true (from EffectiveConfig, not the file config)", hb.GetCollectRedactSecrets())
 	}
-	if hb.QueryRedactSecrets == nil || hb.GetQueryRedactSecrets() {
-		t.Fatalf("QueryRedactSecrets = %v, want false (the effective config's explicit override)", hb.QueryRedactSecrets)
+	if hb.QueryRedactSecrets == nil || !hb.GetQueryRedactSecrets() {
+		t.Fatalf("QueryRedactSecrets = %v, want true (the effective config's explicit override)", hb.GetQueryRedactSecrets())
 	}
 }
 
