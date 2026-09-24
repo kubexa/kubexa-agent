@@ -1136,3 +1136,64 @@ func TestANewRevisionWithIdenticalBodiesStillApplies(t *testing.T) {
 		t.Fatalf("ManagedState = (%d, %q), want (7, \"\") -- the heartbeat must echo the new revision", rev, errStr)
 	}
 }
+
+// TestRevertingToTheLastGoodSetClearsAStuckError guards the skip condition's
+// third clause specifically -- "the previous outcome succeeded" -- by
+// constructing the one shape where only that clause matters: a failure whose
+// carried-forward revision+identity are NOT the zero value, because they
+// were copied from a set that actually succeeded first.
+//
+// This is deliberately not redundant with TestAFailedSetIsRetriedOnTheNextHandshake:
+// that test's first-ever attempt fails with prev == nil, so the identity it
+// carries forward is "" (the zero value), which can never equal a real
+// hash. That test can pass -- and did pass under a mutation that deleted the
+// err clause entirely -- purely because the identity comparison already
+// fails on its own; the err clause is never on the path that decides the
+// outcome. Only a failure that follows a SUCCESS (so revision and identity
+// both match a real prior set) puts prev.err on the critical path: without
+// it, reverting to the last known-good config after a transient failure
+// would be silently skipped, leaving the platform's screen showing a
+// config_error for a config the agent is actually running correctly.
+func TestRevertingToTheLastGoodSetClearsAStuckError(t *testing.T) {
+	m := newManagedTestManager(t)
+	hookCalls := 0
+	m.SetOnEffectiveConfig(func(*config.Config) ([]string, error) {
+		hookCalls++
+		if hookCalls == 2 {
+			return nil, errors.New("transient rejection of rev6")
+		}
+		return nil, nil
+	})
+
+	goodMsg := managedBlocksMsg(t, 5, map[string]string{"buffer": "batch_size: 250\n"})
+	badMsg := managedBlocksMsg(t, 6, map[string]string{"buffer": "batch_size: 300\n"})
+
+	// Step 1: rev 5 / body A succeeds. State now carries revision=5 and
+	// body A's identity forward as the LAST GOOD set.
+	m.handleGatewayMessage(context.Background(), goodMsg)
+	if rev, errStr, _ := m.ManagedState(); rev != 5 || errStr != "" {
+		t.Fatalf("setup: ManagedState = (%d, %q), want (5, \"\")", rev, errStr)
+	}
+
+	// Step 2: rev 6 / body B fails in the hook. The error path carries
+	// revision=5 and body A's identity forward unchanged (per applyManaged's
+	// error branches), alongside the new err string.
+	m.handleGatewayMessage(context.Background(), badMsg)
+	if _, errStr, _ := m.ManagedState(); errStr == "" {
+		t.Fatalf("setup: rev 6 must fail")
+	}
+
+	// Step 3: the platform reverts to rev 5 / body A -- the exact set
+	// stored as "last good". Revision and identity both match the stored
+	// state, so ONLY prev.err != "" can stop this from being wrongly
+	// skipped as "unchanged".
+	m.handleGatewayMessage(context.Background(), goodMsg)
+
+	if hookCalls != 3 {
+		t.Fatalf("hook called %d times, want 3 -- reverting to the last good set after a failure must re-apply, not be skipped as unchanged", hookCalls)
+	}
+	rev, errStr, _ := m.ManagedState()
+	if rev != 5 || errStr != "" {
+		t.Fatalf("ManagedState = (%d, %q), want (5, \"\") -- the revert must clear the stuck config_error, not leave it stuck forever", rev, errStr)
+	}
+}
