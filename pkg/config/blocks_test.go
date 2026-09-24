@@ -57,6 +57,27 @@ func TestApplyBlocksLeavesUnmanagedBlocksAlone(t *testing.T) {
 	}
 }
 
+// TestApplyBlocksRefusesAnUnmanagedBlockKey pins m-1: the loop that overlays
+// blocks only ever walks managedBlockKeys, so it never sees a key outside
+// the closed set -- the check that refuses one lives entirely in the second
+// loop, at the bottom of ApplyBlocks. A pushed {"rbac": ...} must be refused
+// with an error naming the key, not silently ignored and the revision
+// reported applied.
+func TestApplyBlocksRefusesAnUnmanagedBlockKey(t *testing.T) {
+	base := validBase(t)
+	for _, key := range []string{"rbac", "mutate.policy"} {
+		t.Run(key, func(t *testing.T) {
+			_, err := config.ApplyBlocks(base, map[string][]byte{key: []byte("enabled: true\n")})
+			if err == nil {
+				t.Fatalf("ApplyBlocks accepted unmanaged block key %q", key)
+			}
+			if !strings.Contains(err.Error(), key) {
+				t.Fatalf("error must name the key; got %v", err)
+			}
+		})
+	}
+}
+
 func TestApplyBlocksIsAllOrNothing(t *testing.T) {
 	base := validBase(t)
 	_, err := config.ApplyBlocks(base, map[string][]byte{

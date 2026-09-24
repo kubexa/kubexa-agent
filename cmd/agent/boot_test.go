@@ -610,3 +610,20 @@ func TestABootFailureLogsTheCauseItDoesNotReturn(t *testing.T) {
 		t.Fatalf("the cause was discarded; log was:\n%s", out.String())
 	}
 }
+
+// TestCollectorsCheckerReportsUnhealthyUntilStarted pins m-2: the checker's
+// own doc comment says it "reports unhealthy until serve() has started the
+// collectors", and serve() sets started only after startCollector has been
+// launched for every collector, not merely scheduled. Nothing previously
+// asserted the checker's own two states; this does, directly against the
+// type, without going through the whole boot sequence.
+func TestCollectorsCheckerReportsUnhealthyUntilStarted(t *testing.T) {
+	c := &collectorsChecker{}
+	if err := c.Check(context.Background()); err == nil {
+		t.Fatal("Check() = nil before started is set, want unhealthy")
+	}
+	c.started.Store(true)
+	if err := c.Check(context.Background()); err != nil {
+		t.Fatalf("Check() = %v after started is set, want healthy", err)
+	}
+}
