@@ -56,6 +56,20 @@ type Collector interface {
 	Name() string
 }
 
+// effectiveConfigSetter is the narrow, structural view of the stream manager
+// this file needs: stream.Manager (the interface stream.New returns)
+// deliberately does not expose SetOnEffectiveConfig -- most callers, and the
+// mock in internal/health, only need Run/Send/Connected/SessionID/
+// IsThrottled -- so the hook is reached by asserting a Manager value against
+// this interface instead. Declared at package level, rather than inline in
+// serve(), so TestStreamManagerSatisfiesEffectiveConfigSetter can assert the
+// exact same interface serve() uses, against the exact same stream.New
+// constructor, rather than a redeclared copy that could quietly drift from
+// the real one.
+type effectiveConfigSetter interface {
+	SetOnEffectiveConfig(func(*config.Config))
+}
+
 // logQueryPolicyWarnings logs the query policy's compile-time warnings, if
 // any. It is called both after the boot-time compile and after every live
 // swap so the two paths report identically -- see policy.NewHolder and
@@ -413,31 +427,40 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 	// so a wildcard rule arriving this way logs the same warning it would
 	// have logged at boot.
 	//
-	// stream.Manager (streamMgr's static type) deliberately does not expose
-	// this hook -- most callers, and the mock in internal/health, only need
-	// Run/Send/Connected/SessionID/IsThrottled -- so it is reached by
-	// asserting streamMgr against the narrow interface the concrete manager
-	// actually implements.
-	type effectiveConfigSetter interface {
-		SetOnEffectiveConfig(func(*config.Config))
+	// The effectiveConfigSetter assertion below is required to hold, not
+	// merely attempted: if it ever fails -- a future decorator or second
+	// Manager implementation that stream.New starts returning -- the swap
+	// never gets wired, and the query block's whole managed-config feature
+	// goes silently inert for the life of the process: the executor and the
+	// capability reporter both keep running on the boot-time policy
+	// forever, with no error and no log line to say so. An agent that
+	// starts and runs with this feature permanently dead is worse than one
+	// that refuses to start, because the first failure is invisible on a
+	// customer's cluster and the second is not -- so this is a boot
+	// failure, not a skipped step. See
+	// TestStreamManagerSatisfiesEffectiveConfigSetter, which pins that the
+	// real stream.New result satisfies this interface today.
+	s, ok := streamMgr.(effectiveConfigSetter)
+	if !ok {
+		_ = q.Close()
+		return fmt.Errorf("stream manager: %T does not expose the effective-config hook; "+
+			"platform-managed config would never apply to the live query policy", streamMgr)
 	}
-	if s, ok := streamMgr.(effectiveConfigSetter); ok {
-		s.SetOnEffectiveConfig(func(effective *config.Config) {
-			warnings, err := queryPolicy.Swap(effective)
-			if err != nil {
-				// The stream manager only calls onEffectiveConfig with a
-				// config ApplyBlocks already validated, so this should not
-				// happen in practice; if it ever does, the previous policy
-				// stays in effect (Holder.Swap leaves it untouched on
-				// error) and this is the operator's only signal something
-				// is wrong.
-				log.Error("live query policy swap rejected; keeping the previous policy",
-					logger.F("error", err.Error()))
-				return
-			}
-			logQueryPolicyWarnings(log, warnings)
-		})
-	}
+	s.SetOnEffectiveConfig(func(effective *config.Config) {
+		warnings, err := queryPolicy.Swap(effective)
+		if err != nil {
+			// The stream manager only calls onEffectiveConfig with a
+			// config ApplyBlocks already validated, so this should not
+			// happen in practice; if it ever does, the previous policy
+			// stays in effect (Holder.Swap leaves it untouched on
+			// error) and this is the operator's only signal something
+			// is wrong.
+			log.Error("live query policy swap rejected; keeping the previous policy",
+				logger.F("error", err.Error()))
+			return
+		}
+		logQueryPolicyWarnings(log, warnings)
+	})
 
 	healthAddr := cfg.Observability.HealthAddr
 	metricsAddr := cfg.Observability.MetricsAddr
