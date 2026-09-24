@@ -1003,3 +1003,136 @@ func TestHandshakeCapabilitiesReportWhatTheCollectorsWereBuiltFrom(t *testing.T)
 		t.Fatal("caps.Logs = true while the log collector was never built")
 	}
 }
+
+// TestAnUnchangedManagedSetIsANoOp is task 7d's finding: this deployment's
+// stream is cut and re-established roughly every 150 seconds by design, so
+// "on every handshake" means the SAME revision and the SAME block bodies
+// land on applyManaged several hundred times a day per cluster. Before this
+// test, applyManaged had no unchanged check: every one of those replays ran
+// ApplyBlocks again and called the hook again, which in production is the
+// live query policy swap plus a force=true nudge to the capability sweep --
+// a full SelfSubjectAccessReview pass against the customer's API server on
+// every reconnect, forever. The hook call count is the only thing this
+// package can observe of that cost (the nudge itself lives in cmd/agent's
+// onEffectiveConfig closure), so asserting it stays at one across two
+// identical handshakes stands in for both.
+func TestAnUnchangedManagedSetIsANoOp(t *testing.T) {
+	m := newManagedTestManager(t)
+	hookCalls := 0
+	m.SetOnEffectiveConfig(func(*config.Config) ([]string, error) {
+		hookCalls++
+		return nil, nil
+	})
+
+	msg := managedBlocksMsg(t, 5, map[string]string{"buffer": "batch_size: 250\n"})
+	m.handleGatewayMessage(context.Background(), msg)
+	m.handleGatewayMessage(context.Background(), msg)
+
+	if hookCalls != 1 {
+		t.Fatalf("hook called %d times, want 1 -- the second identical handshake must be a no-op", hookCalls)
+	}
+	rev, errStr, _ := m.ManagedState()
+	if rev != 5 || errStr != "" {
+		t.Fatalf("ManagedState = (%d, %q), want (5, \"\")", rev, errStr)
+	}
+	if got := m.EffectiveConfig().Buffer.BatchSize; got != 250 {
+		t.Fatalf("EffectiveConfig().Buffer.BatchSize = %d, want 250", got)
+	}
+}
+
+// TestAFailedSetIsRetriedOnTheNextHandshake is the ruling's non-optional
+// half: the skip exists to save work on a set that is already running, not
+// to paper over a set that never ran. If the identity check fired on a
+// failed attempt too, one transient hook error (a live policy compiler
+// hiccup, say) would freeze the agent's config_error for the rest of the
+// process's life -- every later identical handshake would match the failed
+// attempt's identity and skip, and nothing would ever retry it. The skip
+// condition's "last outcome succeeded" clause is what prevents that: it
+// reads prev.err, which a failed attempt leaves non-empty.
+func TestAFailedSetIsRetriedOnTheNextHandshake(t *testing.T) {
+	m := newManagedTestManager(t)
+	hookCalls := 0
+	m.SetOnEffectiveConfig(func(*config.Config) ([]string, error) {
+		hookCalls++
+		if hookCalls == 1 {
+			return nil, errors.New("live query policy rejected the new config")
+		}
+		return nil, nil
+	})
+
+	msg := managedBlocksMsg(t, 6, map[string]string{"buffer": "batch_size: 250\n"})
+	m.handleGatewayMessage(context.Background(), msg)
+
+	if _, errStr, _ := m.ManagedState(); errStr == "" {
+		t.Fatalf("setup: first attempt must fail")
+	}
+
+	// Same revision, same bodies -- a naive identity check would treat this
+	// as unchanged and skip it, leaving config_error stuck forever.
+	m.handleGatewayMessage(context.Background(), msg)
+
+	if hookCalls != 2 {
+		t.Fatalf("hook called %d times, want 2 -- a failed set must be retried, not skipped", hookCalls)
+	}
+	rev, errStr, _ := m.ManagedState()
+	if rev != 6 || errStr != "" {
+		t.Fatalf("ManagedState = (%d, %q), want (6, \"\") after the retry succeeds", rev, errStr)
+	}
+}
+
+// TestAChangedBodyAtTheSameRevisionStillApplies pins that the revision alone
+// is not the identity: a controller that reuses a revision number across two
+// different bodies (a bug, but one this agent must not compound) must still
+// see its second body applied, not silently discarded because the revision
+// matched the first.
+func TestAChangedBodyAtTheSameRevisionStillApplies(t *testing.T) {
+	m := newManagedTestManager(t)
+	hookCalls := 0
+	m.SetOnEffectiveConfig(func(*config.Config) ([]string, error) {
+		hookCalls++
+		return nil, nil
+	})
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 8, map[string]string{
+		"buffer": "batch_size: 250\n",
+	}))
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 8, map[string]string{
+		"buffer": "batch_size: 300\n",
+	}))
+
+	if hookCalls != 2 {
+		t.Fatalf("hook called %d times, want 2 -- a changed body must apply even at the same revision", hookCalls)
+	}
+	if got := m.EffectiveConfig().Buffer.BatchSize; got != 300 {
+		t.Fatalf("EffectiveConfig().Buffer.BatchSize = %d, want 300", got)
+	}
+}
+
+// TestANewRevisionWithIdenticalBodiesStillApplies is the pre-flight
+// correction: identity cannot be the block bodies alone, because the
+// heartbeat echoes the REVISION, not a content hash. A controller can bump
+// the revision without changing a single byte of the bodies (a metadata-only
+// edit upstream, or simply re-numbering an unchanged set) -- and the
+// platform's screen needs the heartbeat to say "applied: 7", not a stale
+// "applied: 6", once it has sent 7. A body-only identity would skip this and
+// leave the agent reporting a revision the platform has already superseded.
+func TestANewRevisionWithIdenticalBodiesStillApplies(t *testing.T) {
+	m := newManagedTestManager(t)
+	hookCalls := 0
+	m.SetOnEffectiveConfig(func(*config.Config) ([]string, error) {
+		hookCalls++
+		return nil, nil
+	})
+
+	body := map[string]string{"buffer": "batch_size: 250\n"}
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 6, body))
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 7, body))
+
+	if hookCalls != 2 {
+		t.Fatalf("hook called %d times, want 2 -- a new revision must apply even with identical bodies", hookCalls)
+	}
+	rev, errStr, _ := m.ManagedState()
+	if rev != 7 || errStr != "" {
+		t.Fatalf("ManagedState = (%d, %q), want (7, \"\") -- the heartbeat must echo the new revision", rev, errStr)
+	}
+}
