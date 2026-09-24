@@ -180,7 +180,9 @@ func (c *countingReconciler) Reconcile(_ context.Context, desired []k8sresource.
 func TestReconcilerHolderForwardsOnceTheCollectorExists(t *testing.T) {
 	h := &reconcilerHolder{}
 	real := &countingReconciler{err: errors.New("from the collector")}
-	h.Set(real)
+	if err := h.Set(context.Background(), real); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
 
 	desired := []k8sresource.Descriptor{{GVR: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}}
 	err := h.Reconcile(context.Background(), desired)
@@ -203,7 +205,9 @@ func TestReconcilerHolderForwardsOnceTheCollectorExists(t *testing.T) {
 // update for an agent that is behaving exactly as configured.
 func TestReconcilerHolderResolvedToNoneSucceedsSilently(t *testing.T) {
 	h := &reconcilerHolder{}
-	h.Set(nil)
+	if err := h.Set(context.Background(), nil); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
 
 	if err := h.Reconcile(context.Background(), nil); err != nil {
 		t.Fatalf("Reconcile = %v, want nil when there is no state collector at all", err)
@@ -269,5 +273,168 @@ func TestBootBuildsNothingWhenTheContextEndsDuringTheWait(t *testing.T) {
 	}
 	if builds != 0 {
 		t.Fatalf("build calls = %d, want 0 once the context is done", builds)
+	}
+}
+
+// TestABindFailureDuringTheBootWaitExitsWithTheRealError: the servers bind
+// in milliseconds while the boot wait runs up to ten seconds, so a health,
+// metrics, pprof or stream failure lands INSIDE the wait essentially always.
+// The errgroup records it and cancels ctx, the wait returns, and the
+// collectors are never built -- so the error serve() returns is a wrapped
+// context.Canceled, which run() reads through isContextClosed as a clean
+// stop and exits 0.
+//
+// A port already in use would then be a silent restart loop: a pod
+// restarting forever, exit code 0, one misleading "agent stopped" line. The
+// run group's own error is the diagnosis and must win over the context one.
+func TestABindFailureDuringTheBootWaitExitsWithTheRealError(t *testing.T) {
+	bindErr := errors.New("health server: listen tcp :8080: bind: address already in use")
+
+	err := unwindBootFailure(
+		func() {},
+		func() error { return bindErr },
+		func() error { return nil },
+		context.Canceled, // what startCollectors returns once the group cancelled ctx
+	)
+	if !errors.Is(err, bindErr) {
+		t.Fatalf("error = %v, want the run group's own %v", err, bindErr)
+	}
+	if isContextClosed(err) {
+		t.Fatal("run() would read this as a clean stop and exit 0, hiding a hard bind failure")
+	}
+}
+
+// TestABootFailureWithAHealthyRunGroupKeepsItsOwnCause: the other half --
+// when the run group has nothing to say (a real SIGTERM in the wait, or a
+// genuine buildCollectors error), the cause stays the answer. A context
+// error here SHOULD read as a clean stop.
+func TestABootFailureWithAHealthyRunGroupKeepsItsOwnCause(t *testing.T) {
+	buildErr := errors.New("log collector: checkpoint dir is not writable")
+
+	err := unwindBootFailure(func() {}, func() error { return nil }, func() error { return nil }, buildErr)
+	if !errors.Is(err, buildErr) {
+		t.Fatalf("error = %v, want %v", err, buildErr)
+	}
+
+	// A SIGTERM inside the wait: the group returns the same context error and
+	// the process must exit 0, not 1.
+	err = unwindBootFailure(func() {}, func() error { return context.Canceled }, func() error { return nil }, context.Canceled)
+	if !isContextClosed(err) {
+		t.Fatalf("error = %v, want a clean stop for a SIGTERM during the boot wait", err)
+	}
+}
+
+// TestABootFailureAlwaysClosesTheQueue: the queue holds a write-ahead log
+// with an open file handle; an unwind that skipped it would leave the WAL
+// unclosed on every failed boot.
+func TestABootFailureAlwaysClosesTheQueue(t *testing.T) {
+	for _, groupErr := range []error{nil, errors.New("health server: bind")} {
+		closed := false
+		_ = unwindBootFailure(
+			func() {},
+			func() error { return groupErr },
+			func() error { closed = true; return nil },
+			errors.New("boom"),
+		)
+		if !closed {
+			t.Fatalf("the queue was not closed when the run group returned %v", groupErr)
+		}
+	}
+}
+
+// TestReconcilerHolderReplaysTheSetItRefused closes the window Ruling A's
+// error alone leaves open. Measured in the backend: the periodic watch
+// reconciler (internal/clusterwatch/reconciler.go:188-217) skips a session
+// whose signature matches what it last SENT -- sent, not applied -- so a set
+// this holder refuses is never re-sent on its own. Healing would otherwise
+// need the desired set to change (a lease expiring, 90s TTL) or a
+// reconnect, which is up to a minute and a half of a watch a user has just
+// asked for being dead.
+func TestReconcilerHolderReplaysTheSetItRefused(t *testing.T) {
+	h := &reconcilerHolder{}
+	desired := []k8sresource.Descriptor{{GVR: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}}
+
+	if err := h.Reconcile(context.Background(), desired); !errors.Is(err, errReconcilerNotReady) {
+		t.Fatalf("setup: error = %v, want errReconcilerNotReady", err)
+	}
+
+	real := &countingReconciler{}
+	if err := h.Set(context.Background(), real); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if real.calls != 1 {
+		t.Fatalf("Reconcile calls after Set = %d, want 1 (the refused set must be replayed)", real.calls)
+	}
+	if len(real.last) != 1 || real.last[0].GVR.Resource != "pods" {
+		t.Fatalf("the replayed desired set was not the refused one: %v", real.last)
+	}
+}
+
+// TestReconcilerHolderReplaysOnlyTheLatestRefusedSet: each reconcile is a
+// COMPLETE desired set -- "converge on exactly this" -- so replaying an
+// older one after a newer would converge backwards. Drop-and-replay-latest,
+// never a queue.
+func TestReconcilerHolderReplaysOnlyTheLatestRefusedSet(t *testing.T) {
+	h := &reconcilerHolder{}
+	older := []k8sresource.Descriptor{{GVR: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}}
+	newer := []k8sresource.Descriptor{{GVR: schema.GroupVersionResource{Version: "v1", Resource: "services"}}}
+	_ = h.Reconcile(context.Background(), older)
+	_ = h.Reconcile(context.Background(), newer)
+
+	real := &countingReconciler{}
+	if err := h.Set(context.Background(), real); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if real.calls != 1 {
+		t.Fatalf("Reconcile calls = %d, want exactly 1 replay", real.calls)
+	}
+	if len(real.last) != 1 || real.last[0].GVR.Resource != "services" {
+		t.Fatalf("replayed %v, want the LATEST refused set", real.last)
+	}
+}
+
+// TestReconcilerHolderReplaysNothingWhenItRefusedNothing: the common boot --
+// no watch config arrived in the window -- must not synthesize a reconcile
+// to an empty desired set, which is the message that stops every
+// demand-driven informer.
+func TestReconcilerHolderReplaysNothingWhenItRefusedNothing(t *testing.T) {
+	h := &reconcilerHolder{}
+	real := &countingReconciler{}
+	if err := h.Set(context.Background(), real); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if real.calls != 0 {
+		t.Fatalf("Reconcile calls = %d, want 0: nothing was ever refused", real.calls)
+	}
+}
+
+// TestReconcilerHolderDropsTheRefusedSetWhenThereIsNoCollector: an agent
+// with collect.state disabled resolves to nil. There is nothing that could
+// ever apply the refused set, and it must not be held forever.
+func TestReconcilerHolderDropsTheRefusedSetWhenThereIsNoCollector(t *testing.T) {
+	h := &reconcilerHolder{}
+	_ = h.Reconcile(context.Background(), []k8sresource.Descriptor{
+		{GVR: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+	})
+
+	if err := h.Set(context.Background(), nil); err != nil {
+		t.Fatalf("Set(nil) = %v, want nil", err)
+	}
+	if err := h.Reconcile(context.Background(), nil); err != nil {
+		t.Fatalf("Reconcile after resolving to none = %v, want nil", err)
+	}
+}
+
+// TestReconcilerHolderSurfacesAFailedReplay: serve() logs it, so it must not
+// be swallowed here.
+func TestReconcilerHolderSurfacesAFailedReplay(t *testing.T) {
+	h := &reconcilerHolder{}
+	_ = h.Reconcile(context.Background(), []k8sresource.Descriptor{
+		{GVR: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+	})
+
+	boom := errors.New("informer start failed")
+	if err := h.Set(context.Background(), &countingReconciler{err: boom}); !errors.Is(err, boom) {
+		t.Fatalf("Set = %v, want the replayed Reconcile's own error", err)
 	}
 }
