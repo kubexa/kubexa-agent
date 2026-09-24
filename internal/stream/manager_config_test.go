@@ -884,11 +884,20 @@ func TestHeartbeatDoesNotReportRestartRequiredForQueryOnly(t *testing.T) {
 
 // TestHeartbeatRestartRequiredFollowsTheBlockClassification is the sibling
 // of pkg/config's TestEveryManagedBlockIsClassifiedByWhenItTakesEffect: both
-// spell the two categories out as literals, so a block that MOVES between
-// them fails here until the heartbeat's answer moves with it. Deriving the
-// expectation from ManagedBlockAppliesLive instead would agree with any
+// spell the categories out as literals, so a block that MOVES between them
+// fails here until the heartbeat's answer moves with it. Deriving the
+// expectation from ManagedBlockEffect instead would agree with any
 // classification, including a wrong one, which is exactly the shape of test
 // that let four inert blocks report as applied.
+//
+// restart_required is UNCHANGED on the wire by the three-valued
+// classification (Task 7e, C-A/M-B): collect.logs and collect.state are
+// EffectPartial now, not EffectRestart, but RestartRequiredBlocks still
+// counts a partial block whose value differs -- its construction-time half
+// really is pending -- so both cases below still want true. What changed is
+// only that a screen must stop reading that true as "nothing has taken
+// effect yet" for these two; the live half of each is already running the
+// pushed value (see managedBlockEffect's comment in pkg/config/blocks.go).
 //
 // Each case pushes a value that DIFFERS from the file config the collectors
 // were built from -- a block pushed with the value already in effect asks
