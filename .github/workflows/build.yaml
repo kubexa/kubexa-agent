@@ -42,6 +42,18 @@ jobs:
       - name: Generate proto
         run: make proto
 
+      # schema/agent-config-blocks.json is generated FROM pkg/config's own
+      # managed-block structs and allowlist (tools/schemagen), not hand
+      # maintained -- this is what keeps it from drifting out from under
+      # the backend's validator (Task 11) and the app's per-block forms
+      # (Task 17). Output is deterministic (sorted keys, no version field:
+      # see tools/schemagen/main.go), so a real drift is the only thing
+      # that can make this diff non-empty.
+      - name: Verify agent-config-blocks.json is up to date
+        run: |
+          go run ./tools/schemagen > /tmp/agent-config-blocks.json
+          diff -u schema/agent-config-blocks.json /tmp/agent-config-blocks.json
+
       # TestHelmAcceptsTheShippedChart runs the real validator over
       # values.schema.json, and without helm it skips silently. The runner
       # image ships one already, so this is here to PIN it: the action's

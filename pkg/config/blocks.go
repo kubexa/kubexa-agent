@@ -84,6 +84,44 @@ func IsManagedBlockKey(key string) bool {
 	return false
 }
 
+// ManagedBlockPrototype returns a zero value of the struct behind key, so a
+// tool can reflect over the block's shape without carrying its own copy of
+// the key set. ok is false for any key outside the managed set.
+func ManagedBlockPrototype(key string) (value any, ok bool) {
+	switch key {
+	case "collect.logs":
+		return LogsCollectConfig{}, true
+	case "collect.state":
+		return StateCollectConfig{}, true
+	case "collect.metrics":
+		return MetricsCollectConfig{}, true
+	case "query":
+		return QueryConfig{}, true
+	case "buffer":
+		return BufferConfig{}, true
+	}
+	return nil, false
+}
+
+// ManagedBlockAllowedKeys returns key's allowlist as a sorted slice, so a
+// tool can build against the actual gate instead of reconstructing it: a
+// tool that reflected over ManagedBlockPrototype's struct alone would
+// include every field the struct happens to have -- redact_secrets chief
+// among them -- not only the ones the platform may set. ok is false for any
+// key outside the managed set.
+func ManagedBlockAllowedKeys(key string) (keys []string, ok bool) {
+	allowed, ok := managedBlockAllowedKeys[key]
+	if !ok {
+		return nil, false
+	}
+	keys = make([]string, 0, len(allowed))
+	for k := range allowed {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys, true
+}
+
 // checkAllowedKeys refuses any top-level key in body that key's allowlist
 // does not name. It looks only at body's own top-level keys -- a key nested
 // inside a rules entry belongs to the rule, not the block, and stays
