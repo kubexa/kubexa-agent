@@ -150,3 +150,74 @@ func TestSchemaCarriesNoVersionField(t *testing.T) {
 		t.Errorf("generated schema mentions \"version\": %s", raw)
 	}
 }
+
+// schemaGet walks a generated document by a sequence of map keys, failing
+// the test if any step is missing or not itself an object.
+func schemaGet(t *testing.T, schema map[string]any, path ...string) any {
+	t.Helper()
+	var cur any = schema
+	for _, p := range path {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			t.Fatalf("path %v: %v is not an object", path, cur)
+		}
+		cur, ok = m[p]
+		if !ok {
+			t.Fatalf("path %v: missing %q", path, p)
+		}
+	}
+	return cur
+}
+
+// TestTypeMappingForRepresentativeFields pins schemaForType's Go-type ->
+// JSON-type mapping at one field per shape the generator has to handle. The
+// key-set and yaml-spelling tests above catch a struct changing without the
+// schema being regenerated, but not a WRONG mapping: change schemaForType,
+// regenerate, and those tests stay green because the (wrong) output still
+// matches itself. This is what actually catches that class of defect --
+// including the duration union FIX 1 removed, which this test was run
+// against, failing, before that fix landed.
+func TestTypeMappingForRepresentativeFields(t *testing.T) {
+	schema, err := buildSchema()
+	if err != nil {
+		t.Fatalf("buildSchema: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		path []string
+		want string
+	}{
+		{"buffer.batch_size is an integer", []string{"properties", "buffer", "properties", "batch_size", "type"}, "integer"},
+		{"collect.logs.follow is a boolean", []string{"properties", "collect.logs", "properties", "follow", "type"}, "boolean"},
+		{"collect.logs.exclude_namespaces is an array", []string{"properties", "collect.logs", "properties", "exclude_namespaces", "type"}, "array"},
+		{"collect.logs.exclude_namespaces holds strings", []string{"properties", "collect.logs", "properties", "exclude_namespaces", "items", "type"}, "string"},
+		// yaml.v3 refuses a bare integer for a time.Duration field --
+		// config.ValidateBlock("collect.state", "resync_period: 300000000000")
+		// fails with "cannot unmarshal !!int into time.Duration" -- so the
+		// schema must say "string", not a ["string","integer"] union that
+		// advertises an acceptance path the agent does not have (FIX 1).
+		{"collect.state.resync_period is a duration string, not a number", []string{"properties", "collect.state", "properties", "resync_period", "type"}, "string"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := schemaGet(t, schema, c.path...)
+			if got != c.want {
+				t.Errorf("got %#v, want %q", got, c.want)
+			}
+		})
+	}
+
+	labels, ok := schemaGet(t, schema, "properties", "collect.logs", "properties", "rules", "items", "properties", "labels").(map[string]any)
+	if !ok {
+		t.Fatalf("collect.logs rules items have no \"labels\" property")
+	}
+	if labels["type"] != "object" {
+		t.Errorf("labels.type = %v, want \"object\"", labels["type"])
+	}
+	values, ok := labels["additionalProperties"].(map[string]any)
+	if !ok || values["type"] != "string" {
+		t.Errorf("labels.additionalProperties = %v, want {\"type\":\"string\"}", labels["additionalProperties"])
+	}
+}

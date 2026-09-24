@@ -9,15 +9,21 @@
 // config.ManagedBlockPrototype, so the schema cannot drift from what
 // pkg/config.ValidateBlock actually accepts.
 //
-// Run it with `go run ./tools/schemagen > schema/agent-config-blocks.json`.
-// Output is deterministic (object keys marshal in sorted order): the
-// build workflow regenerates into a temp file and diffs it against the
-// committed one, so drift between the structs and the committed schema
-// fails CI.
+// Run it with `go run ./tools/schemagen -o schema/agent-config-blocks.json`.
+// Use -o rather than shell redirection: `>` truncates its target the moment
+// the shell parses the command line, before this program has run at all, so
+// a hard error here -- the phantom-allowlist-key case Ruling B demands, say
+// -- would leave the committed file at 0 bytes instead of unchanged. -o
+// only opens the destination after the schema has built successfully.
+//
+// Output is deterministic (object keys marshal in sorted order): the build
+// workflow regenerates into a temp file and diffs it against the committed
+// one, so drift between the structs and the committed schema fails CI.
 package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"reflect"
@@ -30,14 +36,31 @@ import (
 var durationType = reflect.TypeOf(time.Duration(0))
 
 func main() {
+	out := flag.String("o", "", "write the schema here instead of stdout")
+	flag.Parse()
+
 	schema, err := buildSchema()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "schemagen:", err)
 		os.Exit(1)
 	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(schema); err != nil {
+	data, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "schemagen:", err)
+		os.Exit(1)
+	}
+	data = append(data, '\n')
+
+	if *out == "" {
+		if _, err := os.Stdout.Write(data); err != nil {
+			fmt.Fprintln(os.Stderr, "schemagen:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	// Only reached once the schema built and marshalled without error, so
+	// the destination is never truncated ahead of a failure.
+	if err := os.WriteFile(*out, data, 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "schemagen:", err)
 		os.Exit(1)
 	}
@@ -62,9 +85,15 @@ func buildSchema() (map[string]any, error) {
 		properties[key] = blockSchema
 	}
 	return map[string]any{
-		"$schema":    "https://json-schema.org/draft/2020-12/schema",
-		"type":       "object",
-		"properties": properties,
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"type":    "object",
+		// The document root is exactly as closed a set as a block body:
+		// IsManagedBlockKey refuses "rbac", "mutate.policy" and the like
+		// with "unknown config block", and this must refuse them too, or a
+		// key ValidateBlock rejects would still validate against the
+		// schema.
+		"additionalProperties": false,
+		"properties":           properties,
 	}, nil
 }
 
@@ -169,12 +198,16 @@ func schemaForType(t reflect.Type) (map[string]any, error) {
 		return map[string]any{"type": "string"}, nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		if t == durationType {
-			// yaml.v3 accepts a time.Duration field as either a Go duration
-			// string ("5m") or a bare integer of nanoseconds (decode.go's
-			// isDuration case) -- both are real acceptance paths, so both
-			// stay, rather than the schema picking one and quietly
-			// refusing values the agent itself would take.
-			return map[string]any{"type": []string{"string", "integer"}}, nil
+			// yaml.v3's isDuration flag (decode.go) does the opposite of
+			// what a plain int64 field gets: for every OTHER integer type
+			// it lets a bare number through, but for time.Duration it
+			// refuses one and requires a duration string ("5m").
+			// config.ValidateBlock confirms it against the real producer:
+			// "resync_period: 5m" parses, "resync_period: 300000000000"
+			// fails with "cannot unmarshal !!int into time.Duration". A
+			// ["string","integer"] union here would advertise an
+			// acceptance path the agent does not have.
+			return map[string]any{"type": "string"}, nil
 		}
 		return map[string]any{"type": "integer"}, nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
