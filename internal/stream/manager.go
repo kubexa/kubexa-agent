@@ -1971,6 +1971,7 @@ func (m *streamManager) applyManaged(set *agentv1.ManagedBlocks) {
 		if prev := m.managed.Load(); prev != nil {
 			next.cfg = prev.cfg
 			next.revision = prev.revision
+			next.warnings = prev.warnings
 		}
 		m.managed.Store(next)
 		m.log.Error("managed config rejected; keeping the running config",
