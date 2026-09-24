@@ -8,15 +8,21 @@ import (
 	"github.com/kubexa/kubexa-agent/pkg/config"
 )
 
-// TestBlockValidationAndPolicyCompileAgree pins config.ValidateBlock (the
-// gate the platform's push path hits first) and policy.Compile (the gate
-// that actually decides live queries) to the same accept/reject verdict for
-// every resource string.
+// TestBlockValidationAndPolicyCompileAgree pins that config.ValidateBlock
+// (the gate the platform's push path hits first) never accepts a resource
+// string that policy.Compile (the gate that actually decides live queries)
+// refuses -- the lenient-validator direction, which is what produced the
+// "pods/" defect this test was written for.
+//
+// It cannot pin the other direction: Compile calls root.ValidateQuery() as
+// its own first gate, so a validateQuery that turns stricter is inherited by
+// Compile, not contradicted by it -- the two would still agree here. That
+// direction is caught elsewhere, loudly: any test that compiles a policy
+// over ordinary resources, e.g. internal/query's executor suite, fails if
+// validateQuery starts rejecting a valid string.
 //
 // Every one of these passes ApplyBlocks today and fails Compile: validation
-// accepts what the real consumer refuses. The test asserts the two AGREE, in
-// both directions, so it keeps failing if either side drifts later --
-// whichever side turns out to be the lenient one.
+// accepts what the real consumer refuses.
 func TestBlockValidationAndPolicyCompileAgree(t *testing.T) {
 	cases := []string{
 		"pods", "apps/v1/deployments", "v1/pods", "*",
