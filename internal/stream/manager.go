@@ -3,6 +3,8 @@ package stream
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -1989,11 +1991,26 @@ func (m *streamManager) ConfigSnapshot() *agentv1.ConfigSnapshot {
 // reader observe a new effective config paired with a stale revision, or a
 // success paired with a leftover error -- exactly the combinations the
 // platform's screen must never show a cluster owner.
+//
+// identity is the fifth field, and it exists purely to make an unchanged set
+// cheap: it is a hash of the sorted key/body pairs of the last set that
+// actually SUCCEEDED, so applyManaged can tell "the gateway sent the same
+// blocks again" (a certainty on every reconnect, since this deployment's
+// stream is cut and re-established roughly every 150 seconds by design) from
+// "something changed" before paying for ApplyBlocks, the effective-config
+// hook, and the policy swap it drives. It is never the identity of a set
+// that is merely being ATTEMPTED -- both error paths in applyManaged carry
+// it forward from prev exactly like cfg/revision/warnings, so a failed
+// attempt never gets remembered as "the last thing we saw" and a retry of
+// the same failed set is never mistaken for a no-op. That, together with the
+// skip check itself requiring err == "", is what keeps one transient failure
+// from becoming a permanent one.
 type managedState struct {
 	cfg      *config.Config
 	revision int64
 	err      string
 	warnings []string
+	identity string
 }
 
 // EffectiveConfig returns the config the agent is actually running: cfg
@@ -2155,6 +2172,31 @@ func (m *streamManager) applyManaged(set *agentv1.ManagedBlocks) {
 	for _, b := range set.GetBlocks() {
 		blocks[b.GetKey()] = []byte(b.GetYaml())
 	}
+	// The skip check sits here, before ApplyBlocks, because that is where
+	// the whole cost of a reconnect lives: a per-block YAML round trip and
+	// clone, then (on success) the policy swap and the capability sweep's
+	// force=true nudge -- a full SelfSubjectAccessReview pass against the
+	// customer's API server. This deployment's stream is cut and
+	// re-established roughly every 150 seconds by design, so an owned block
+	// that never changes would otherwise pay that cost several hundred
+	// times a day, forever.
+	//
+	// Identity is revision AND body hash together, not either alone.
+	// Revision alone would apply a body-only change relabeled with the same
+	// number (a controller bug, but not one to compound by ignoring it).
+	// Body hash alone would skip a set whose bodies are byte-identical but
+	// whose revision advanced -- and the heartbeat echoes the revision, so
+	// that skip would report a revision the platform has already
+	// superseded ("applied: 6" on a screen the platform just told to expect
+	// 7). And the last outcome must have SUCCEEDED: skipping a set whose
+	// previous attempt failed would let one transient hook error (a live
+	// policy compiler hiccup, say) freeze config_error for the rest of the
+	// process's life, since every later identical handshake would then
+	// match the failed attempt and skip instead of retrying it.
+	identity := hashManagedBlocks(blocks)
+	if prev := m.managed.Load(); prev != nil && prev.err == "" && prev.revision == revision && prev.identity == identity {
+		return
+	}
 	cfg, err := config.ApplyBlocks(m.cfg, blocks)
 	if err != nil {
 		next := &managedState{err: err.Error()}
@@ -2162,6 +2204,7 @@ func (m *streamManager) applyManaged(set *agentv1.ManagedBlocks) {
 			next.cfg = prev.cfg
 			next.revision = prev.revision
 			next.warnings = prev.warnings
+			next.identity = prev.identity
 		}
 		m.managed.Store(next)
 		m.log.Error("managed config rejected; keeping the running config",
@@ -2185,6 +2228,7 @@ func (m *streamManager) applyManaged(set *agentv1.ManagedBlocks) {
 			next := &managedState{err: err.Error()}
 			if prev := m.managed.Load(); prev != nil {
 				next.cfg, next.revision, next.warnings = prev.cfg, prev.revision, prev.warnings
+				next.identity = prev.identity
 			}
 			m.managed.Store(next)
 			m.log.Error("managed config could not be put into effect; keeping the running config",
@@ -2195,11 +2239,37 @@ func (m *streamManager) applyManaged(set *agentv1.ManagedBlocks) {
 		}
 		warnings = w
 	}
-	m.managed.Store(&managedState{cfg: cfg, revision: revision, warnings: warnings})
+	m.managed.Store(&managedState{cfg: cfg, revision: revision, warnings: warnings, identity: identity})
 	m.log.Info("applied managed config blocks",
 		logger.F("revision", revision),
 		logger.F("blocks", len(blocks)),
 	)
+}
+
+// hashManagedBlocks fingerprints a managed-block set by its content alone --
+// key and body, sorted by key so map iteration order never changes the
+// result. It deliberately does not include the revision: applyManaged
+// combines this with the revision itself for the skip check, but the two
+// are compared separately on purpose (see the comment there) rather than
+// folded into one hash, so a revision bump and a body change are always
+// distinguishable failure-independent facts about the set. The null byte
+// between key and body, and after the body, keeps {"a":"bc"} from hashing
+// the same as {"ab":"c"}.
+func hashManagedBlocks(blocks map[string][]byte) string {
+	keys := make([]string, 0, len(blocks))
+	for k := range blocks {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	h := sha256.New()
+	for _, k := range keys {
+		_, _ = h.Write([]byte(k))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(blocks[k])
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // ManagedState reports what this agent has applied and why it refused
