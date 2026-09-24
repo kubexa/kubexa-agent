@@ -184,7 +184,7 @@ func yamlFields(t reflect.Type) map[string]reflect.StructField {
 // batch_size, a resource string the policy compiler accepts, and so on)
 // stay the agent's job in ValidateBlock, not the schema's.
 func schemaForType(t reflect.Type) (map[string]any, error) {
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		// A pointer here (QueryConfig.Enabled, LogNamespaceRule.Follow, ...)
 		// means "unset inherits/defaults", which is exactly what an absent
 		// property in a partial block body already means. The shape a form
