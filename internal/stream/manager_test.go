@@ -2050,3 +2050,66 @@ func TestHeartbeatOmitsScrapeHealthWithNoCollector(t *testing.T) {
 		t.Fatalf("scrape_targets = %+v, want none", got)
 	}
 }
+
+// A Shutdown message fires the exported signal and records the gateway's
+// reason. Asserted through the signal, never through a process exit: a test
+// that exits the process tests nothing and takes the suite with it.
+func TestShutdownMessageFiresTheShutdownSignal(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	sm := newDrainTestManager(t, cfg, newTestQueue(t))
+
+	select {
+	case <-sm.ShutdownRequested():
+		t.Fatal("ShutdownRequested() fired before any Shutdown message arrived")
+	default:
+	}
+
+	sm.handleGatewayMessage(context.Background(), &agentv1.GatewayMessage{
+		Payload: &agentv1.GatewayMessage_Shutdown{
+			Shutdown: &agentv1.Shutdown{Reason: "revision 7 needs a restart"},
+		},
+	})
+
+	select {
+	case <-sm.ShutdownRequested():
+	default:
+		t.Fatal("ShutdownRequested() did not fire after a Shutdown message")
+	}
+	if got := sm.ShutdownReason(); got != "revision 7 needs a restart" {
+		t.Fatalf("ShutdownReason() = %q, want %q", got, "revision 7 needs a restart")
+	}
+}
+
+// Two Shutdown messages must not panic on a double close, and the reason
+// from the first is kept -- a gateway that retries must not crash the
+// agent.
+func TestASecondShutdownMessageIsHarmless(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	sm := newDrainTestManager(t, cfg, newTestQueue(t))
+
+	sm.handleGatewayMessage(context.Background(), &agentv1.GatewayMessage{
+		Payload: &agentv1.GatewayMessage_Shutdown{
+			Shutdown: &agentv1.Shutdown{Reason: "first reason"},
+		},
+	})
+
+	// Must not panic on the second close.
+	sm.handleGatewayMessage(context.Background(), &agentv1.GatewayMessage{
+		Payload: &agentv1.GatewayMessage_Shutdown{
+			Shutdown: &agentv1.Shutdown{Reason: "second reason"},
+		},
+	})
+
+	select {
+	case <-sm.ShutdownRequested():
+	default:
+		t.Fatal("ShutdownRequested() did not fire")
+	}
+	if got := sm.ShutdownReason(); got != "first reason" {
+		t.Fatalf("ShutdownReason() = %q, want the FIRST reason %q", got, "first reason")
+	}
+}
