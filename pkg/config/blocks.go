@@ -108,18 +108,21 @@ func (e BlockEffect) String() string {
 // over the struct can check. A derivation that drifted would hand the
 // platform a confident wrong answer, which is worse than the honest list.
 //
-// A partial entry's live half is named here, with the line that proves it,
-// so the claim can be checked against the code instead of taken on faith:
+// A partial entry's live half is named here by the FUNCTION that proves it,
+// so the claim can be checked against the code instead of taken on faith.
+// Functions, not line numbers: the first version of this comment cited
+// manager.go:1583 and the very next commit in the same series shifted that
+// line into an unrelated function, which is the failure mode a citation
+// exists to prevent.
 //
-//   - collect.logs: live half is shouldDeliverQueuedMessage
-//     (internal/stream/manager.go:1583), which drops queued log items the
-//     instant collect.logs.enabled goes false. Restart half: the tailer's
-//     rules, tail_lines, follow and exclude_namespaces are read once by
-//     logs.New.
-//   - collect.state: live half is Config.QueryRules() (query.go:304), which
-//     inherits these rules into the compiled query policy whenever
-//     query.rules is empty -- the shipped chart default -- and the policy
-//     holder is swapped on every applied set. Restart half: the informers.
+//   - collect.logs: live half is stream.shouldDeliverQueuedMessage, which
+//     drops queued log items the instant collect.logs.enabled goes false.
+//     Restart half: the tailer's rules, tail_lines, follow and
+//     exclude_namespaces are read once by logs.New.
+//   - collect.state: live half is Config.QueryRules(), which inherits these
+//     rules into the compiled query policy whenever query.rules is empty --
+//     the shipped chart default -- and the policy holder is swapped on every
+//     applied set. Restart half: the informers.
 //   - collect.metrics: restart-only. The collectors are built once, from the
 //     config resolved at boot, so its rules, intervals and enabled flag
 //     alike only change when the process restarts.
