@@ -471,12 +471,15 @@ func newManagedTestManager(t *testing.T) *streamManager {
 // snapshot's managed field is nil when blocks is nil (the sender said
 // nothing about managed blocks -- ConfigSnapshot's patch rule), or a
 // ManagedBlocks set (possibly with zero entries, for a released block) when
-// blocks is non-nil.
-func managedBlocksMsg(t *testing.T, version string, blocks map[string]string) *agentv1.GatewayMessage {
+// blocks is non-nil. revision is carried on the set itself, not on
+// ConfigUpdate.config_version -- that field belongs to other senders (the
+// ingest-rules pusher) and is absent from the handshake's ConfigSnapshot
+// entirely, so it plays no part in the managed-block revision.
+func managedBlocksMsg(t *testing.T, revision int64, blocks map[string]string) *agentv1.GatewayMessage {
 	t.Helper()
 	var set *agentv1.ManagedBlocks
 	if blocks != nil {
-		mb := &agentv1.ManagedBlocks{}
+		mb := &agentv1.ManagedBlocks{Revision: revision}
 		for key, yamlBody := range blocks {
 			mb.Blocks = append(mb.Blocks, &agentv1.ManagedBlock{Key: key, Yaml: yamlBody})
 		}
@@ -485,8 +488,7 @@ func managedBlocksMsg(t *testing.T, version string, blocks map[string]string) *a
 	return &agentv1.GatewayMessage{
 		Payload: &agentv1.GatewayMessage_Config{
 			Config: &agentv1.ConfigUpdate{
-				ConfigVersion: version,
-				Config:        &agentv1.ConfigSnapshot{Managed: set},
+				Config: &agentv1.ConfigSnapshot{Managed: set},
 			},
 		},
 	}
@@ -504,7 +506,8 @@ func TestManagedBlocksApplyFromTheHandshake(t *testing.T) {
 		SessionId: "s1",
 		Config: &agentv1.ConfigSnapshot{
 			Managed: &agentv1.ManagedBlocks{
-				Blocks: []*agentv1.ManagedBlock{{Key: "buffer", Yaml: "batch_size: 250\n"}},
+				Revision: 4,
+				Blocks:   []*agentv1.ManagedBlock{{Key: "buffer", Yaml: "batch_size: 250\n"}},
 			},
 		},
 	})
@@ -515,6 +518,12 @@ func TestManagedBlocksApplyFromTheHandshake(t *testing.T) {
 	if m.cfg.Buffer.BatchSize != fileBatchSize {
 		t.Fatalf("the file config must not be mutated: BatchSize = %d, want %d", m.cfg.Buffer.BatchSize, fileBatchSize)
 	}
+	// The handshake carries no config_version of its own -- the revision
+	// must come from the set itself, or a handshake-only agent could never
+	// report one at all.
+	if rev, _, _ := m.ManagedState(); rev != 4 {
+		t.Fatalf("ManagedState revision = %d, want 4", rev)
+	}
 }
 
 // TestManagedBlocksApplyFromAConfigUpdate is the handshake test's sibling on
@@ -523,7 +532,7 @@ func TestManagedBlocksApplyFromTheHandshake(t *testing.T) {
 func TestManagedBlocksApplyFromAConfigUpdate(t *testing.T) {
 	m := newManagedTestManager(t)
 
-	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, "7", map[string]string{
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 7, map[string]string{
 		"buffer": "batch_size: 300\n",
 	}))
 
@@ -545,7 +554,7 @@ func TestManagedBlocksApplyFromAConfigUpdate(t *testing.T) {
 // wrong implementation would treat any non-managed update as a reset.
 func TestAWatchersOnlyUpdateKeepsTheManagedBlocks(t *testing.T) {
 	m := newManagedTestManager(t)
-	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, "5", map[string]string{
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 5, map[string]string{
 		"buffer": "batch_size: 250\n",
 	}))
 
@@ -570,14 +579,14 @@ func TestAReleasedBlockRestoresTheFileValue(t *testing.T) {
 	m := newManagedTestManager(t)
 	fileBatchSize := m.cfg.Buffer.BatchSize
 
-	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, "1", map[string]string{
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 1, map[string]string{
 		"buffer": "batch_size: 250\n",
 	}))
 	if got := m.EffectiveConfig().Buffer.BatchSize; got != 250 {
 		t.Fatalf("setup: BatchSize = %d, want 250", got)
 	}
 
-	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, "2", map[string]string{}))
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 2, map[string]string{}))
 
 	if got := m.EffectiveConfig().Buffer.BatchSize; got != fileBatchSize {
 		t.Fatalf("a released block did not restore the file value: BatchSize = %d, want %d", got, fileBatchSize)
@@ -594,7 +603,7 @@ func TestAReleasedBlockRestoresTheFileValue(t *testing.T) {
 func TestABadBlockAppliesNothingAndIsReported(t *testing.T) {
 	m := newManagedTestManager(t)
 
-	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, "3", map[string]string{
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 3, map[string]string{
 		"buffer": "batch_size: -1\n",
 	}))
 
@@ -607,5 +616,43 @@ func TestABadBlockAppliesNothingAndIsReported(t *testing.T) {
 	}
 	if !strings.Contains(errStr, "buffer") {
 		t.Fatalf("ManagedState err must name the block, got %q", errStr)
+	}
+}
+
+// TestManagedRevisionSurvivesAReconnectThroughTheHandshake reproduces the
+// review finding: a block applied through a numbered ConfigUpdate, then
+// re-applied through a handshake (an agent restart or reconnect re-adopting
+// the same platform-owned set), must still report the ORIGINAL revision --
+// not 0, which the platform's screen cannot tell apart from "nothing has
+// ever been applied". This is the save-then-restart flow the whole feature
+// turns on.
+func TestManagedRevisionSurvivesAReconnectThroughTheHandshake(t *testing.T) {
+	m := newManagedTestManager(t)
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 12, map[string]string{
+		"buffer": "batch_size: 250\n",
+	}))
+	if rev, _, _ := m.ManagedState(); rev != 12 {
+		t.Fatalf("setup: ManagedState revision = %d, want 12", rev)
+	}
+
+	// The agent restarts (or reconnects) and picks the same platform-owned
+	// set back up from the handshake's config snapshot, revision included.
+	m.applyHandshakeConfig(&agentv1.HandshakeResponse{
+		Accepted:  true,
+		SessionId: "s2",
+		Config: &agentv1.ConfigSnapshot{
+			Managed: &agentv1.ManagedBlocks{
+				Revision: 12,
+				Blocks:   []*agentv1.ManagedBlock{{Key: "buffer", Yaml: "batch_size: 250\n"}},
+			},
+		},
+	})
+
+	if rev, _, _ := m.ManagedState(); rev != 12 {
+		t.Fatalf("revision did not survive the handshake: ManagedState revision = %d, want 12", rev)
+	}
+	if got := m.EffectiveConfig().Buffer.BatchSize; got != 250 {
+		t.Fatalf("EffectiveConfig().Buffer.BatchSize = %d, want 250", got)
 	}
 }
