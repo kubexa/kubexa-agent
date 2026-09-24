@@ -2,13 +2,17 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/kubexa/kubexa-agent/internal/ingestrules"
 	"github.com/kubexa/kubexa-agent/internal/logger"
+	"github.com/kubexa/kubexa-agent/pkg/config"
 	"github.com/kubexa/kubexa-agent/pkg/config/k8sresource"
 	agentv1 "github.com/kubexa/kubexa-agent/proto/gen/go/agent/v1"
 )
@@ -654,5 +658,164 @@ func TestManagedRevisionSurvivesAReconnectThroughTheHandshake(t *testing.T) {
 	}
 	if got := m.EffectiveConfig().Buffer.BatchSize; got != 250 {
 		t.Fatalf("EffectiveConfig().Buffer.BatchSize = %d, want 250", got)
+	}
+}
+
+// TestHeartbeatReportsTheAppliedRevision: a successfully applied managed
+// block set must show up on the heartbeat payload with no config_error.
+func TestHeartbeatReportsTheAppliedRevision(t *testing.T) {
+	m := newManagedTestManager(t)
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 9, map[string]string{
+		"buffer": "batch_size: 250\n",
+	}))
+
+	hb := m.buildHeartbeat()
+	if hb.GetAppliedConfigRevision() != 9 {
+		t.Fatalf("AppliedConfigRevision = %d, want 9", hb.GetAppliedConfigRevision())
+	}
+	if hb.GetConfigError() != "" {
+		t.Fatalf("ConfigError = %q, want empty", hb.GetConfigError())
+	}
+}
+
+// TestHeartbeatReportsARejectedBlock: the revision must stay at the last
+// APPLIED one and the error must be set. A rejected revision reported as
+// applied makes the screen say "applied" for a config the agent refused to
+// run.
+func TestHeartbeatReportsARejectedBlock(t *testing.T) {
+	m := newManagedTestManager(t)
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 5, map[string]string{
+		"buffer": "batch_size: 250\n",
+	}))
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 6, map[string]string{
+		"buffer": "batch_size: -1\n",
+	}))
+
+	hb := m.buildHeartbeat()
+	if hb.GetAppliedConfigRevision() != 5 {
+		t.Fatalf("AppliedConfigRevision = %d, want 5 (the rejected rev 6 must not advance it)", hb.GetAppliedConfigRevision())
+	}
+	if !strings.Contains(hb.GetConfigError(), "buffer") {
+		t.Fatalf("ConfigError must name the offending block, got %q", hb.GetConfigError())
+	}
+}
+
+// TestHeartbeatReportsBothRedactionFlags: both flags come from the EFFECTIVE
+// config, not the immutable file config -- proven here by diverging the two,
+// storing an overlay directly (as applyManaged would after a managed block),
+// and confirming buildHeartbeat follows the overlay. Both flags are ALWAYS
+// set (proto.Bool), never left nil, because this agent always knows them.
+func TestHeartbeatReportsBothRedactionFlags(t *testing.T) {
+	m := newManagedTestManager(t)
+	m.cfg.Collect.State.RedactSecrets = false
+	m.cfg.Query.RedactSecrets = nil
+
+	effective := *m.cfg
+	effective.Collect.State.RedactSecrets = true
+	effective.Query.RedactSecrets = proto.Bool(false)
+	m.managed.Store(&managedState{cfg: &effective, revision: 1})
+
+	hb := m.buildHeartbeat()
+	if hb.CollectRedactSecrets == nil || !hb.GetCollectRedactSecrets() {
+		t.Fatalf("CollectRedactSecrets = %v, want true (from EffectiveConfig, not the file config)", hb.CollectRedactSecrets)
+	}
+	if hb.QueryRedactSecrets == nil || hb.GetQueryRedactSecrets() {
+		t.Fatalf("QueryRedactSecrets = %v, want false (the effective config's explicit override)", hb.QueryRedactSecrets)
+	}
+}
+
+// TestHeartbeatCarriesTheWarningsTheCallbackReturned: Ruling A -- the
+// unredacted-wildcard warning the onEffectiveConfig callback returns must
+// reach the heartbeat, not just the agent's own log, so the person who
+// pushed the config from the platform can see it too.
+func TestHeartbeatCarriesTheWarningsTheCallbackReturned(t *testing.T) {
+	m := newManagedTestManager(t)
+	wantWarnings := []string{"query allows every resource and redaction is off"}
+	m.SetOnEffectiveConfig(func(*config.Config) ([]string, error) {
+		return wantWarnings, nil
+	})
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 3, map[string]string{
+		"buffer": "batch_size: 250\n",
+	}))
+
+	hb := m.buildHeartbeat()
+	if len(hb.GetConfigWarnings()) != 1 || hb.GetConfigWarnings()[0] != wantWarnings[0] {
+		t.Fatalf("ConfigWarnings = %v, want %v", hb.GetConfigWarnings(), wantWarnings)
+	}
+}
+
+// TestSetOnEffectiveConfigNilLeavesTheSwapUnwired: SetOnEffectiveConfig's own
+// doc comment says fn may be nil, "the same as never calling this at all" --
+// pin that a nil registration doesn't panic applyManaged now that the field
+// is an atomic.Pointer (a stored pointer to a nil func is itself non-nil).
+func TestSetOnEffectiveConfigNilLeavesTheSwapUnwired(t *testing.T) {
+	m := newManagedTestManager(t)
+	m.SetOnEffectiveConfig(nil)
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 1, map[string]string{
+		"buffer": "batch_size: 250\n",
+	}))
+
+	if got := m.EffectiveConfig().Buffer.BatchSize; got != 250 {
+		t.Fatalf("EffectiveConfig().Buffer.BatchSize = %d, want 250", got)
+	}
+	if rev, errStr, _ := m.ManagedState(); rev != 1 || errStr != "" {
+		t.Fatalf("ManagedState = (%d, %q), want (1, \"\")", rev, errStr)
+	}
+}
+
+// TestAFailedSwapDoesNotAdvanceTheAppliedRevision is Ruling B, the one that
+// matters most: ApplyBlocks accepting a value its real consumer (the query
+// policy compiler, here faked) refuses is a mirrored-constraint gap, and
+// reporting that set as applied would be worse than refusing it. Revision 12
+// applies cleanly; revision 13 is valid AS FAR AS ApplyBlocks is concerned,
+// but the callback -- standing in for a live policy swap that fails -- must
+// reject the whole set, leaving 12 as the last APPLIED revision everywhere:
+// the heartbeat, config_error, and EffectiveConfig() itself.
+func TestAFailedSwapDoesNotAdvanceTheAppliedRevision(t *testing.T) {
+	m := newManagedTestManager(t)
+	calls := 0
+	m.SetOnEffectiveConfig(func(*config.Config) ([]string, error) {
+		calls++
+		if calls == 1 {
+			return nil, nil
+		}
+		return nil, errors.New("query policy rejected the new config")
+	})
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 12, map[string]string{
+		"buffer": "batch_size: 250\n",
+	}))
+	if rev, errStr, _ := m.ManagedState(); rev != 12 || errStr != "" {
+		t.Fatalf("setup: ManagedState = (%d, %q), want (12, \"\")", rev, errStr)
+	}
+	if got := m.EffectiveConfig().Buffer.BatchSize; got != 250 {
+		t.Fatalf("setup: EffectiveConfig().Buffer.BatchSize = %d, want 250", got)
+	}
+
+	m.handleGatewayMessage(context.Background(), managedBlocksMsg(t, 13, map[string]string{
+		"buffer": "batch_size: 300\n",
+	}))
+
+	rev, errStr, _ := m.ManagedState()
+	if rev != 12 {
+		t.Fatalf("a failed swap must not advance the applied revision: ManagedState revision = %d, want 12", rev)
+	}
+	if errStr == "" {
+		t.Fatalf("ManagedState err must be set when the swap rejects the config")
+	}
+	if got := m.EffectiveConfig().Buffer.BatchSize; got != 250 {
+		t.Fatalf("EffectiveConfig() must still be revision 12's config: BatchSize = %d, want 250 (unchanged)", got)
+	}
+
+	hb := m.buildHeartbeat()
+	if hb.GetAppliedConfigRevision() != 12 {
+		t.Fatalf("heartbeat AppliedConfigRevision = %d, want 12", hb.GetAppliedConfigRevision())
+	}
+	if hb.GetConfigError() == "" {
+		t.Fatalf("heartbeat ConfigError must be set after a rejected swap")
 	}
 }
