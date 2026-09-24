@@ -98,6 +98,53 @@ func logQueryPolicyWarnings(log *logger.Logger, warnings []string) {
 	}
 }
 
+// newEffectiveConfigCallback builds the function serve() hands to
+// SetOnEffectiveConfig. It exists as its own function -- rather than staying
+// an inline closure in serve() -- for the same reason
+// buildCapabilityReporterOptions does: the ordering it encodes (nudge the
+// capability sweep only after a successful Swap, never on a rejected one) is
+// exactly what a test on serve()'s behavior cannot see, since serve() has no
+// return value that reflects it and starting a real stream manager to reach
+// this closure is not practical in a unit test. Returning the callback lets
+// a test invoke it directly and assert both outcomes.
+//
+// sweeper is a one-method interface, not *capability.Reporter, so a test can
+// pass a counting fake instead of standing up a real reporter; it may be nil
+// -- the capability reporter is not built when collect.state is disabled --
+// in which case a successful swap has nothing to nudge.
+func newEffectiveConfigCallback(holder *policy.Holder, sweeper sweepRequester, log *logger.Logger) func(*config.Config) ([]string, error) {
+	return func(effective *config.Config) ([]string, error) {
+		warnings, err := holder.Swap(effective)
+		if err != nil {
+			// ApplyBlocks validates the block schema, but a value that
+			// schema allows can still be one Compile refuses (e.g.
+			// "pods/": a valid k8sresource.Parse result with a zero GVR
+			// field) -- reachable, not theoretical. Returning the error
+			// here, rather than only logging it, makes applyManaged
+			// reject the WHOLE managed-block set instead of reporting a
+			// revision as applied while the agent keeps running the
+			// previous one (Holder.Swap leaves it untouched on error).
+			// The log still serves the cluster operator; the returned
+			// error is what reaches the person who pushed the config, on
+			// the heartbeat. RequestSweep is not called on this path: a
+			// rejected config changed no policy, so there is nothing new
+			// for the catalog to report.
+			log.Error("live query policy swap rejected; keeping the previous policy",
+				logger.F("error", err.Error()))
+			return nil, err
+		}
+		logQueryPolicyWarnings(log, warnings)
+		if sweeper != nil {
+			// Otherwise the explorer catalog waits out the reporter's own
+			// discovery tick (5m) or safety sweep (1h) before it reflects
+			// this swap, even though the executor already answers the new
+			// policy on its very next request.
+			sweeper.RequestSweep()
+		}
+		return warnings, nil
+	}
+}
+
 func main() {
 	os.Exit(run())
 }
@@ -469,36 +516,7 @@ func serve(parentCtx context.Context, cfg *config.Config, devMode bool, log *log
 		}
 	}
 
-	s.SetOnEffectiveConfig(func(effective *config.Config) ([]string, error) {
-		warnings, err := queryPolicy.Swap(effective)
-		if err != nil {
-			// ApplyBlocks validates the block schema, but a value that
-			// schema allows can still be one Compile refuses (e.g.
-			// "pods/": a valid k8sresource.Parse result with a zero GVR
-			// field) -- reachable, not theoretical. Returning the error
-			// here, rather than only logging it, makes applyManaged
-			// reject the WHOLE managed-block set instead of reporting a
-			// revision as applied while the agent keeps running the
-			// previous one (Holder.Swap leaves it untouched on error).
-			// The log still serves the cluster operator; the returned
-			// error is what reaches the person who pushed the config, on
-			// the heartbeat.
-			log.Error("live query policy swap rejected; keeping the previous policy",
-				logger.F("error", err.Error()))
-			return nil, err
-		}
-		logQueryPolicyWarnings(log, warnings)
-		if capSweeper != nil {
-			// Otherwise the explorer catalog waits out the reporter's own
-			// discovery tick (5m) or safety sweep (1h) before it reflects
-			// this swap, even though the executor already answers the new
-			// policy on its very next request. Only reached on a
-			// successful Swap above: a rejected config changed no policy,
-			// so there is nothing new for the catalog to report.
-			capSweeper.RequestSweep()
-		}
-		return warnings, nil
-	})
+	s.SetOnEffectiveConfig(newEffectiveConfigCallback(queryPolicy, capSweeper, log))
 
 	healthAddr := cfg.Observability.HealthAddr
 	metricsAddr := cfg.Observability.MetricsAddr
