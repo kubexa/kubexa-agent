@@ -150,6 +150,23 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          # arm64 added 2026-10-13. This image matters most of the five,
+          # because it is the only one that runs in the CUSTOMER's cluster: an
+          # amd64-only agent cannot be installed on an arm64 node pool
+          # (Graviton, Ampere) at all, which is a class of cluster we would be
+          # asked to monitor.
+          #
+          # This required real Dockerfile changes, not just this line: the
+          # builder had no --platform=$BUILDPLATFORM and GOARCH was hardcoded
+          # to amd64, so a second platform here would have published an arm64
+          # manifest holding an amd64 binary. The Dockerfile now
+          # cross-compiles and fails the build if the two disagree.
+          #
+          # No QEMU step: the Go build runs on the BUILDPLATFORM, the runtime
+          # stage is distroless with only COPY, and the architecture guard
+          # reads a COPY'd reference rather than running anything in the
+          # target architecture.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
