@@ -307,8 +307,33 @@ type: application
 # permissive default, which is the opposite of what it reads like. Omit the
 # key to keep the current rules, or set enabled: false to collect nothing.
 #
-version: 0.11.0
-appVersion: "0.11.0"
+# 0.11.1 changes no template and no Go code. It moves appVersion to 0.11.1,
+# which is 0.11.0's code published as a multi-arch index (linux/amd64 +
+# linux/arm64). The only files that moved are Dockerfile and
+# .github/workflows/build.yaml.
+#
+# This is the image that matters most, because it is the only one installed
+# into the CUSTOMER's cluster. amd64-only did not mean "we cannot demo on a
+# Mac"; it meant an arm64 node pool -- Graviton, Ampere -- could not be
+# monitored at all. The Dockerfile was fixed on 2026-10-13 (caca197): it had
+# no `--platform=$BUILDPLATFORM`, `GOARCH=amd64` HARDCODED, and never declared
+# TARGETARCH. That commit published nothing, because v0.11.0 predates it and
+# build.yaml's `type=semver` rule only fires on refs/tags/*. A fixed Dockerfile
+# is not a fixed image; this chart version exists to carry the tag that
+# publishes one.
+#
+# Do not verify it on a Mac: Rosetta runs a wrong-architecture ELF and it
+# prints its version, while `docker image inspect` reports the manifest and
+# never the contents. On a real arm64 node it is `exec format error`. The
+# build-time ELF guard in the Dockerfile is the check that holds, and it
+# compares against a busybox from an unpinned `FROM alpine` stage rather than
+# against $TARGETARCH -- comparing against the ARG the build itself used is
+# self-consistent and blind.
+#
+# Rolling back to 0.11.0 is safe on amd64 and reinstates an image that cannot
+# run on an arm64 node.
+version: 0.11.1
+appVersion: "0.11.1"
 keywords:
   - kubexa
   - observability
