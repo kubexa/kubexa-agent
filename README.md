@@ -1,16 +1,208 @@
 # kubexa-agent
 
-Secure agent that connects Kubernetes clusters to the Kubexa platform for monitoring, control, and real-time operations.
+**The Kubernetes agent of the Kubexa platform — and the part of it that runs inside *your* cluster, which is why it is open source.**
 
-## Features
+`kubexa-agent` is a single Go binary, deployed as one replica in the cluster it
+observes. It collects logs, cluster state and metrics, answers live read
+requests, and — only when the cluster owner explicitly turns each one on —
+performs writes, opens consoles and runs node jobs. Everything it does travels
+over **one outbound gRPC stream** to the Kubexa gateway; it opens no inbound
+port, needs no ingress, and no component of the platform ever dials into the
+cluster.
 
-- Collects Kubernetes pod logs (with checkpointing and namespace rules).
-- Watches cluster state (pods, deployments, ingresses, and more).
-- Scrapes Kubernetes Metrics API and custom Prometheus endpoints.
-- Streams data to the Kubexa gateway over a resilient gRPC connection.
-- Deployable with the included `helm/kubexa-agent` chart.
+[![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+![Go](https://img.shields.io/badge/go-1.26-00ADD8.svg)
+![Platforms](https://img.shields.io/badge/linux-amd64%20%7C%20arm64-lightgrey.svg)
+
+- Chart: `oci://ghcr.io/kubexa/charts/kubexa-agent` · Image: `ghcr.io/kubexa/kubexa-agent`
+- License: **GPL-3.0** · Go **1.26** · Runtime image: distroless, non-root, `linux/amd64` + `linux/arm64`
+
+## Contents
+
+- [How it works](#how-it-works)
+- [What the agent does](#what-the-agent-does)
+- [Why it is open source](#why-it-is-open-source)
+- [Trust boundaries](#trust-boundaries)
+- [Helm install](#helm-install)
+- [Singleton deployment](#singleton-deployment)
+- [Configuration](#configuration)
+- [Memory and resource sizing](#memory-and-resource-sizing)
+- [Repository layout](#repository-layout)
+- [Development](#development)
+- [CI releases](#ci-releases)
+- [Compatibility](#compatibility)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
+
+## How it works
+
+One process, one replica. Three collectors read from the cluster — the **log
+tailer** (container logs, with its read position checkpointed in a local SQLite
+store), the **state watcher** (client-go informers over the resources the owner's
+rules name) and the **metrics scraper** (Metrics API, cAdvisor,
+kube-state-metrics, custom Prometheus endpoints). Everything they produce goes
+into one **buffer**: an in-memory queue that spills to disk segments when it
+fills or when the gateway is unreachable. A single stream manager drains that
+buffer over **one outbound gRPC stream** to the Kubexa gateway, which forwards to
+the platform and its UI — and carries the platform's requests (live reads,
+mutations, consoles, node jobs, config updates) back down the same connection.
+Nothing dials into the cluster; the agent always calls out.
+
+```
+  your Kubernetes cluster
+  ───────────────────────────────────────────────────────────────────
+    kube-apiserver         kubelet / cAdvisor     kube-state-metrics
+          ▲                        ▲                      ▲
+          │ watch · get/list       │ scrape               │ scrape
+          │ exec · eviction        │                      │
+          └────────────┬───────────┴──────────────────────┘
+                       │
+             ┌─────────┴──────────┐
+             │    kubexa-agent    │  1 replica · non-root · distroless
+             │     (this repo)    │  no inbound port
+             └─────────┬──────────┘
+                       │  in-memory queue → disk spill
+                       │  (survives restarts and gateway outages)
+  ─────────────────────┼─────────────────────────────────────────────
+                       │  outbound gRPC over TLS, agent-initiated
+                       ▼
+               Kubexa gateway ──► platform · UI
+```
+
+Two streams, both opened by the agent:
+
+| Stream | Direction | Carries |
+|--------|-----------|---------|
+| `Connect` | bidirectional, long-lived | **up:** logs, state events, metrics, heartbeat/health, capability catalog, query / mutation / node-job results · **down:** handshake, acks, config updates, backpressure, shutdown, resource queries, mutation requests, console opens, node jobs |
+| `ExecSession` | one per console session | the session's bytes only — a slow or oversized console frame must not be able to stall telemetry |
+
+Three properties fall out of that shape, and they are the ones to design
+around:
+
+- **Outbound only.** No exposed port, no ingress, no inbound firewall rule; the
+  agent's identity is a tenant token it presents at handshake.
+- **Nothing is lost to a bad afternoon.** The disk queue survives the pod, and
+  log checkpoints survive it too — a restart neither re-sends nor skips lines.
+  A gateway outage fills the buffer instead of dropping telemetry.
+- **Versions are negotiated, not assumed.** The proto version is settled at
+  handshake ([`pkg/protoversion`](pkg/protoversion/)), so an agent and a gateway
+  of different ages produce an explicit "upgrade the agent" answer rather than a
+  timeout.
+
+## What the agent does
+
+The agent has four jobs. **Collect**, **answer** and **report** are on in the
+chart's defaults; everything under **act** is off until it is turned on in two
+independent places (see [Trust boundaries](#trust-boundaries)).
+
+**1. Collect — continuous, push-only.** *(on by default)*
+
+- **Logs** — tails container logs by namespace / label / pod-name / container
+  rules, joins wrapped lines, caps line size, and checkpoints its read position
+  in a local SQLite store so a restart neither re-sends nor skips lines.
+- **State** — client-go informers watch the resources the owner's rules name
+  (pods, deployments, services, ingresses, CRDs…) and push add/update/delete
+  events. `managedFields` and the `last-applied-configuration` annotation are
+  stripped from every object, unconditionally.
+- **Metrics** — the Kubernetes Metrics API, each node's cAdvisor endpoint,
+  kube-state-metrics, and any custom Prometheus `/metrics` URL (the Metrics API
+  is on by default; the other three are opt-in per endpoint). Scrape health is
+  reported per target kind, and "we never looked" is reported as a different
+  thing from "it returned nothing".
+
+**2. Answer — live, on-demand reads.** *(on by default, inheriting the state
+rules)* A request for the current state of one
+object or a list, served synchronously from the cluster's API server rather than
+from whatever the platform last stored. Full-object or table view, with the same
+sanitization on both paths.
+
+**3. Act — explicit, gated, auditable.** *(every item off by default)*
+
+- **Mutations**: `patch`, `delete`, `restart`, `scale`, `create`.
+- **Pod console**: an interactive shell in a running container, resizable and
+  resumable across a proxy cut.
+- **Node console**: a root shell on the node itself, via a privileged helper Pod
+  the agent creates and enters with `nsenter`.
+- **Node jobs**: `cordon`, `uncordon`, `drain` — drain follows `kubectl drain`
+  semantics (DaemonSet/mirror pods skipped, PodDisruptionBudgets honoured) and
+  never evicts the agent's own pod.
+
+**4. Report — so the UI never has to guess.** On every handshake the agent
+publishes a capability catalog: every API resource in the cluster, and whether
+*RBAC* or the *owner's policy* is what blocks reading it. On every heartbeat it
+reports health, queue pressure, scrape health, both Secret-redaction flags, which
+platform-managed config revision it actually applied, and whether a restart is
+still pending.
+
+## Why it is open source
+
+This agent is the one Kubexa component that runs on infrastructure we do not
+own, holding credentials to a cluster we cannot see. Asking an operator to take
+that on faith is the wrong request, so we don't:
+
+- **Verifiable trust, not asserted trust.** The agent's privileges are as wide as
+  the cluster owner allows, and in the extreme (`rbac.readAll` with
+  `redactSecrets: false`) they include reading every Secret in the cluster. What
+  it reads, what it redacts, and what crosses the network is readable here, in
+  the source, by the person who has to sign off on it.
+- **Security claims you can check.** Every powerful feature is designed to need
+  two independent yeses — Kubernetes RBAC *and* the owner's config — and no RBAC
+  grant in the chart is derived from the agent's own config, deliberately. Those
+  are claims about code, and claims about code belong in public code.
+- **The dangerous parts deserve the most eyes.** A node console is root on the
+  node. A drain evicts every pod on it. Those paths ship off, and they ship
+  readable.
+- **Reproducible supply chain.** Build the binary and the image from this tree,
+  push it to your own registry, and run that. Nothing in the chart requires our
+  published image.
+- **No lock-in on the data path.** `gateway.host` points wherever you point it,
+  including at a self-hosted Kubexa installation. The wire contract is in
+  [`proto/`](proto/), not hidden behind a client library.
+- **Portability we cannot test alone.** arm64 node pools, managed distributions,
+  odd RBAC setups and CRD-heavy clusters show up in other people's clusters
+  first. Issues and patches from those clusters make the agent correct for them.
+- **GPL-3.0 keeps it that way.** Improvements to the component that holds the
+  cluster's keys stay inspectable by the people whose clusters it runs in.
+
+## Trust boundaries
+
+Nothing powerful is reachable through a single switch. Each row needs every gate
+in it, and the chart's RBAC flags are **never** derived from the agent's config —
+the config can be mounted from a file the chart never sees, and a derived Role
+would then be narrow while the policy said yes.
+
+| What | Kubernetes RBAC (chart) | Owner policy (agent config) | Platform permission | Default |
+|------|-------------------------|-----------------------------|---------------------|---------|
+| Read cluster state, live queries | generated read role; `rbac.readAll` for everything incl. CRDs | `collect.state.rules`, `query.rules` | — | narrow read on |
+| Secret **values** leaving the cluster | part of the read role | `collect.state.redactSecrets`, `query.redactSecrets` | — | **not stripped** — see [Secret handling](#secret-handling) |
+| Writes (`patch`/`delete`/`restart`/`scale`/`create`) | `rbac.write` | `mutate.enabled` + `mutate.rules` | — | off |
+| Pod console | `rbac.exec` | `exec.pod.enabled` + `exec.pod.rules` | — | off |
+| Node console (root on the node) | `rbac.nodeShell` | `exec.node.enabled` + `exec.node.*` | `cluster:node_console` (admin) | off |
+| Node jobs (cordon / uncordon / drain) | `rbac.nodeOps` | `mutate.node.enabled` + `nodes` / `verbs` | `cluster:node_write` (write) | off |
+
+Two more boundaries worth knowing:
+
+- **RBAC and policy are reported separately.** A refusal is `RBAC_DENIED` or
+  `POLICY_DENIED`, never silence, so the UI can say which of the two is blocking
+  a resource — and a disabled feature answers explicitly instead of hanging.
+- **What the platform may manage is an allowlist, and it is deliberately narrow.**
+  The platform can own `collect.logs`, `collect.state`, `collect.metrics`, `query`
+  and `buffer`, and only named keys inside them. `redact_secrets` is **never**
+  settable from the platform — a gate is worth nothing if the party it gates can
+  open it — and `mutate.*`, `exec.*` and `rbac` are not managed at all: write and
+  console authority stays in this chart's values and in the ServiceAccount. A key
+  outside the allowlist rejects the whole block rather than being silently
+  dropped. Both redaction flags and the applied revision ride the heartbeat, so
+  the owner can see what is actually in force.
 
 ## Helm install
+
+The chart ships with the hosted platform's gateway as its default
+(`gateway.host: agents.kubexa.dev`), so a hosted install needs only a tenant
+token. A self-hosted platform sets `gateway.host` to its own agentserver ingress
+host — the examples below spell it out either way. Everything beyond reading is
+off until you turn it on; see [Trust boundaries](#trust-boundaries).
 
 ### Local chart
 
@@ -30,7 +222,7 @@ Published by `.github/workflows/helm-oci-release.yaml` on push to `main`:
 
 ```bash
 helm install kubexa-agent oci://ghcr.io/kubexa/charts/kubexa-agent \
-  --version 0.2.0 \
+  --version 0.11.1 \
   --namespace kubexa \
   --create-namespace \
   --set secret.tenantToken="<tenant-token>" \
@@ -45,7 +237,7 @@ Published by `.github/workflows/helm-release.yaml` to the `kubexa/helm-charts` G
 helm repo add kubexa https://kubexa.github.io/helm-charts
 helm repo update
 helm install kubexa-agent kubexa/kubexa-agent \
-  --version 0.2.0 \
+  --version 0.11.1 \
   --namespace kubexa \
   --create-namespace \
   --set secret.tenantToken="<tenant-token>" \
@@ -285,21 +477,68 @@ Disable collectors you do not need (`collect.logs.enabled`, `collect.state.enabl
 
 ### Observability
 
-Expose agent self-metrics on `observability.metrics_addr` (default `:9090`). Useful series for capacity planning:
+The agent serves its own liveness/readiness on `observability.health_addr`
+(default `:8080`) and Prometheus self-metrics on `observability.metrics_addr`
+(default `:9090`). `observability.pprof_addr` is **empty, meaning off** — the
+agent's heap holds unredacted Secret values from the informer cache and raw log
+lines from every collected pod, so a reachable profile endpoint is an
+exfiltration path; set it to a loopback address (`127.0.0.1:6060`) and reach it
+through `kubectl port-forward` when you need it.
+
+Useful series for capacity planning:
 
 - Queue depth and memory usage (buffer pressure)
 - Active log streams and dropped lines (log backpressure)
 - Informer cache sync / state event rates (watch scope too broad?)
 - Gateway connection state (disconnected → buffer fills)
 
+## Repository layout
+
+| Path | What lives there |
+|------|------------------|
+| `cmd/agent` | process entrypoint: boot order, wiring, graceful shutdown |
+| `cmd/dev-grpc-server` | a local mock gateway, so the agent can be run without the platform |
+| `pkg/config` | config structs, loading, validation, and the platform-managed block allowlist |
+| `pkg/protoversion` | handshake version negotiation |
+| `pkg/buildinfo` | version / commit / build time, injected at link time |
+| `internal/stream` | the gRPC session: handshake, reconnect/backoff, circuit breaker, message routing |
+| `internal/collector/logs` | log tailing, discovery, line joining, SQLite checkpoints |
+| `internal/collector/state` | informer-driven watch and object sanitization |
+| `internal/collector/metrics` | Metrics API, cAdvisor, kube-state-metrics, custom endpoints, series budget |
+| `internal/query` + `internal/query/policy` | live on-demand reads and the policy that gates them |
+| `internal/mutate` + `internal/mutate/policy` | patch / delete / restart / scale / create and its policy |
+| `internal/nodeops` | cordon, uncordon, drain as cancellable jobs with progress |
+| `internal/exec` | pod and node console sessions, helper-Pod lifecycle, output ring buffer |
+| `internal/capability` | API resource discovery and the capability catalog the UI reads |
+| `internal/queue` | in-memory queue and the disk spill |
+| `internal/ingestrules` | ingest limits the gateway pushes, plus the agent's explicit defaults |
+| `internal/k8s` | client-go wiring, typed helpers, retries |
+| `internal/health`, `internal/metrics`, `internal/logger`, `internal/pprof` | the agent's own observability |
+| `proto/` | the wire contract (`.proto`) and generated Go |
+| `helm/kubexa-agent` | the chart that installs all of the above |
+| `schema/`, `tools/schemagen` | JSON Schema for managed config blocks, generated from `pkg/config` and diffed in CI |
+
 ## Development
 
+No cluster of ours is needed to work on this: `make run-dev-grpc` stands up a
+local mock gateway, and `make run-dev` runs the agent against your current
+kubeconfig with debug logging and localhost binds.
+
 ```bash
-make run-dev          # agent with example-local.yaml
-make run-dev-grpc     # local demo gateway
+make run-dev-grpc     # local mock AgentService (insecure gRPC on 127.0.0.1:50051)
+make run-dev          # agent in dev mode: debug logs, localhost bind, kubeconfig
+make run-local        # agent with config/example-local.yaml (gitignored; holds tokens)
+
+make test             # go test ./...
+make lint             # golangci-lint
+make build            # compile the binary
+make proto            # regenerate protobuf Go from proto/
+make docker-build     # build the runtime image
+
 make helm-lint        # lint chart
 make helm-template    # render manifests
 make helm-package     # package to dist/
+make help             # every target, with its one-line description
 ```
 
 ## CI releases
@@ -308,4 +547,56 @@ make helm-package     # package to dist/
 |----------|---------|--------|
 | `helm-oci-release.yaml` | `helm/**` on `main` | `oci://ghcr.io/<org>/charts/kubexa-agent` |
 | `helm-release.yaml` | `helm/**` on `main` | `https://kubexa.github.io/helm-charts` |
-| `build.yaml` | push/PR | Docker image `ghcr.io/<org>/kubexa-agent` |
+| `build.yaml` | push to `main`/`develop`, `v*` tags, PRs to `main` | build + test, and a multi-arch (`amd64`/`arm64`) image `ghcr.io/<org>/kubexa-agent`. The `:X.Y.Z` tag the chart's `appVersion` points at is produced **only** by a `v*` tag, so a release needs that tag pushed. |
+
+## Compatibility
+
+- **Kubernetes**: built against client-go `v0.36.x`; the agent discovers what the
+  cluster actually serves instead of assuming a version, and reports what it
+  cannot read.
+- **Architectures**: `linux/amd64` and `linux/arm64` (a single multi-arch image
+  tag). An arm64 node pool — Graviton, Ampere — is a supported place to run it.
+- **Wire protocol**: negotiated at handshake. A capability the gateway does not
+  know is ignored; a request the agent is too old for is refused with an
+  "upgrade the agent" answer, not a timeout.
+- **Chart ↔ image**: `Chart.appVersion` names the image a chart version was
+  tested with, and `helm/kubexa-agent/Chart.yaml` carries a per-version upgrade
+  note — read it before an upgrade, especially where it states an install order
+  against the platform side.
+
+## Contributing
+
+Issues and pull requests are welcome, particularly from clusters we cannot
+reproduce: managed distributions, arm64 pools, restrictive RBAC, CRD-heavy
+installs. `make test && make lint && make helm-lint` is what CI runs; see
+[Development](#development) for the full target list.
+
+A few conventions this tree holds to, worth knowing before a first patch:
+
+- **Comments explain *why*, at the place where the decision lives.** Several of
+  this repo's sharpest edges (why an RBAC flag is not derived from config, why a
+  duration is quoted in one position and not another) are recorded in the code
+  and chart comments; keep that habit rather than moving the reasoning out.
+- **Every behavioural change comes with a test.** Package test coverage is the
+  norm here, not the exception.
+- **Default to off.** Anything that reads more, writes, or opens a session ships
+  disabled, and gets a separate RBAC gate from its policy gate.
+- **The chart's `values.schema.json` is part of the contract.** A new value is
+  described there too, so a misspelled key is refused by name at install time
+  instead of silently doing nothing. `schema/agent-config-blocks.json` is
+  generated — run `go run ./tools/schemagen -o schema/agent-config-blocks.json`;
+  CI fails on drift.
+
+## Security
+
+If you find a vulnerability, please report it privately rather than in a public
+issue: open a GitHub security advisory on this repository
+(*Security → Report a vulnerability*).
+
+When reporting, the useful details are: the chart version and `appVersion`, which
+gates were enabled (`rbac.*`, `mutate.*`, `exec.*`, `query.*`), and whether
+`redactSecrets` was on.
+
+## License
+
+GNU General Public License v3.0 — see [LICENSE](LICENSE).
