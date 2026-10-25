@@ -589,13 +589,10 @@ A few conventions this tree holds to, worth knowing before a first patch:
 
 ## Security
 
-If you find a vulnerability, please report it privately rather than in a public
-issue: open a GitHub security advisory on this repository
-(*Security → Report a vulnerability*).
-
-When reporting, the useful details are: the chart version and `appVersion`, which
-gates were enabled (`rbac.*`, `mutate.*`, `exec.*`, `query.*`), and whether
-`redactSecrets` was on.
+If you find a vulnerability, report it privately rather than in a public issue:
+**Security → Report a vulnerability** on this repository. [`SECURITY.md`](SECURITY.md)
+says what to include and which findings matter most — chiefly anything that
+crosses a boundary [Trust boundaries](#trust-boundaries) documents as closed.
 
 ## License
 
