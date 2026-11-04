@@ -525,6 +525,14 @@ service:
   annotations: {}
   metricsPort: 9090
   healthPort: 8080
+  # Annotate the pod for Prometheus/VictoriaMetrics pod discovery
+  # (prometheus.io/scrape, /port, /path). ON by default: the agent's queue and
+  # drop metrics are the only observable that distinguishes a healthy export
+  # from a stalled one, and leaving them uncollected is what made the
+  # 2026-10-26 stall invisible for 9.6 days. Turn it off only where something
+  # else already scrapes this pod -- serviceMonitor below, for instance --
+  # since a pod scraped twice reports every counter twice.
+  scrapeAnnotations: true
 
 serviceMonitor:
   enabled: false

@@ -19,6 +19,27 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.service.scrapeAnnotations }}
+        # Default ON, and it is the fix for a measured incident rather than a
+        # nice-to-have. The agent's own kubexa_queue_* and *_dropped_total
+        # series are the ONLY place a wedged export pipeline is visible: every
+        # other signal the platform has -- connection state, stream active,
+        # health_status, /healthz -- reads healthy while the queue fills and
+        # drops. On apexcrawl this pod ran unscraped, so when the export
+        # stalled on 2026-10-26 there was no history, no alert, and no number
+        # anywhere until a support bundle happened to catch the log noise 9.6
+        # days later.
+        #
+        # The port must be the CONTAINER port: the pod-discovery job keeps a
+        # pod only when prometheus.io/port equals a declared container port
+        # number (keep_if_equal on __meta_kubernetes_pod_container_port_number),
+        # so deriving this from anything but service.metricsPort would silently
+        # drop the target. Quoted because an annotation value is a string and a
+        # bare 9090 is a type error at apply time.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.service.metricsPort | quote }}
+        prometheus.io/path: "/metrics"
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
