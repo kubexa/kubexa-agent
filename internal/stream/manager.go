@@ -147,6 +147,11 @@ type streamManager struct {
 	sleep sleeper
 	dial  dialFunc
 
+	// sendDeadline bounds one stream.Send. Set from sessionSendDeadline in
+	// New; a field rather than the constant itself only so a test can assert
+	// the bound without waiting out the production value.
+	sendDeadline time.Duration
+
 	mu          sync.Mutex
 	state       ConnState
 	shutdownErr error
@@ -412,6 +417,7 @@ func New(
 		scrapeHealth:      scrapeHealth,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
 		sleep:             defaultSleeper,
+		sendDeadline:      sessionSendDeadline,
 		sendCh:            make(chan *agentv1.AgentMessage, defaultSendChannelSize),
 		state:             StateIdle,
 		rules:             rules,
@@ -783,7 +789,12 @@ func (m *streamManager) handshake(ctx context.Context, stream agentv1.AgentServi
 		},
 	}
 
-	if err := stream.Send(req); err != nil {
+	// Bounded like every other send on this stream. The handshake has its own
+	// timeout below, but that one bounds the RESPONSE: a handshake Send that
+	// parks leaves ready false forever, which sends every collector down the
+	// buffer path and fills the queue with nobody draining it -- the same
+	// invisible failure sessionSendDeadline exists for, one step earlier.
+	if err := m.sendOnSession(stream, req); err != nil {
 		return "", fmt.Errorf("send handshake: %w", err)
 	}
 
@@ -878,6 +889,76 @@ func (m *streamManager) applyHandshakeConfig(hs *agentv1.HandshakeResponse) {
 	// config_version at all, so a value derived from this call site alone
 	// could only ever be wrong.
 	m.applyManaged(hs.GetConfig().GetManaged())
+}
+
+// sessionSendDeadline bounds how long one stream.Send may take before the
+// session is declared stalled.
+//
+// stream.Send carries no context of its own. It blocks on the HTTP/2 write
+// quota for as long as the peer declines to read the stream, and the ONLY
+// thing that ends that wait is the stream's own death -- grpc's writeQuota
+// selects on the stream's done channel, nothing else. Measured on apexcrawl
+// 2026-11-04: the gateway stopped calling Recv two minutes into a session on
+// 10-26, and the drain's Send for an 83,013-byte batch sat in
+// http2Client.write for 13,860 minutes -- 9.6 days in which the agent
+// delivered no telemetry at all.
+//
+// Nothing noticed, and that is the part this bound exists for. Send returns as
+// soon as the transport accepts the bytes, so the heartbeat's small sends kept
+// succeeding against a peer reading nothing: connection_state{ready},
+// grpc_stream_active, every health_status component and /healthz all read
+// healthy for the whole 9.6 days while the queue filled, overflowed, and then
+// dropped ~6.9M records. A liveness signal that rides the same stream as the
+// data cannot tell "flowing" from "accepted into a buffer nobody drains" --
+// only a bound on the data send itself can.
+//
+// Thirty seconds is chosen against what a legitimate send costs: the gateway
+// acks a batch in milliseconds, and the largest batch this agent produces is
+// under a megabyte, so a Send that has made no progress in half a minute is
+// not slow, it is parked. The cost of being wrong is one reconnect on the
+// backoff ladder, and the WAL still holds the batch.
+//
+// Note what this is NOT: grpc keepalive would not have caught it. Keepalive
+// PINGs are answered by the peer's transport goroutine whether or not its
+// application ever calls Recv, so the connection stays provably alive while
+// the stream is permanently wedged.
+const sessionSendDeadline = 30 * time.Second
+
+// errSendStalled marks a session ended because a send made no progress inside
+// sessionSendDeadline. Run classifies it like any other session failure and
+// sleeps the backoff ladder before reconnecting: the gateway that stopped
+// reading is unlikely to start again within a dial.
+var errSendStalled = errors.New("stream send made no progress before its deadline")
+
+// sendOnSession sends one message under sessionSendDeadline.
+//
+// The deadline is enforced by ending the session, which closes the stream and
+// so makes the blocked Send return an error. That indirection is the whole
+// technique: Send takes no context, so there is no way to cancel the call
+// itself -- the only interruption grpc offers is the death of the stream it
+// was issued on. The timer is stopped on every return, so a send that
+// completes normally costs one timer and no session change.
+//
+// Every session worker that writes to the stream goes through here. The drain
+// is the one that was measured parked, but sendLoop and the heartbeat make the
+// identical unbounded call, and a control-plane reply wedged forever is the
+// same invisible failure with a smaller blast radius.
+func (m *streamManager) sendOnSession(stream agentv1.AgentService_ConnectClient, msg *agentv1.AgentMessage) error {
+	d := m.sendDeadline
+	if d <= 0 {
+		d = sessionSendDeadline
+	}
+	timer := time.AfterFunc(d, func() {
+		m.log.Warn("stream send made no progress; ending the session",
+			logger.F("deadline", d.String()),
+		)
+		if m.streamMetrics != nil {
+			m.streamMetrics.IncStreamError("send_stalled")
+		}
+		m.abortSessionErr(errSendStalled)
+	})
+	defer timer.Stop()
+	return stream.Send(msg)
 }
 
 func (m *streamManager) startSessionWorkers(ctx context.Context, stream agentv1.AgentService_ConnectClient) {
@@ -1037,7 +1118,7 @@ func (m *streamManager) heartbeatLoop(ctx context.Context, stream agentv1.AgentS
 			// health report that waits behind the backlog it is reporting on
 			// is worthless, and it must not be replayed from disk after a
 			// restart either.
-			if err := stream.Send(msg); err != nil {
+			if err := m.sendOnSession(stream, msg); err != nil {
 				m.log.Err(err).Warn("heartbeat send failed")
 				m.abortSession()
 				return
@@ -1228,7 +1309,7 @@ func (m *streamManager) sendLoop(ctx context.Context, stream agentv1.AgentServic
 			if msg.MessageId == "" {
 				msg.MessageId = uuid.NewString()
 			}
-			if err := stream.Send(msg); err != nil {
+			if err := m.sendOnSession(stream, msg); err != nil {
 				m.log.Err(err).Warn("stream send failed")
 				m.abortSession()
 				return
@@ -1762,7 +1843,7 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				terminalIDs = append(terminalIDs, item.ID)
 				continue
 			}
-			if err := stream.Send(&msg); err != nil {
+			if err := m.sendOnSession(stream, &msg); err != nil {
 				// The failed item AND everything after it are still ours: they
 				// were dequeued into the inflight map and nothing else will
 				// ever return them. Returning here without nacking stranded
