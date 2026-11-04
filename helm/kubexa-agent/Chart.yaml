@@ -332,7 +332,23 @@ type: application
 #
 # Rolling back to 0.11.0 is safe on amd64 and reinstates an image that cannot
 # run on an arm64 node.
-version: 0.11.1
+# 0.11.2 changes no image, and appVersion deliberately stays on 0.11.1: the
+# only change is that the pod now annotates itself for Prometheus/
+# VictoriaMetrics pod discovery (service.scrapeAnnotations, default true).
+# Every agent image already serves /metrics on service.metricsPort, so this
+# takes effect on the image you are already running.
+#
+# It exists because those metrics were never collected anywhere. On
+# 2026-10-26 apexcrawl's agent stopped exporting telemetry two minutes into a
+# session and stayed stopped for 9.6 days; kubexa_queue_depth,
+# kubexa_queue_dequeued_total and the collectors' *_dropped_total were the
+# only series that said so, and nothing scraped the pod, so there was no
+# history, no alert and no number until a support bundle caught the log noise
+# by accident. Umbrella 0.8.28 adds the two alert rules that read them.
+#
+# Turn it off only where something else already scrapes this pod (see
+# serviceMonitor): a pod scraped twice reports every counter twice.
+version: 0.11.2
 appVersion: "0.11.1"
 keywords:
   - kubexa

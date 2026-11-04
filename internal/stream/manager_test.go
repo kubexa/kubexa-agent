@@ -2206,3 +2206,81 @@ func TestLogsEnabledFollowsAPush(t *testing.T) {
 
 	cancel()
 }
+
+// blockingSendClient expresses the one gateway behaviour no other fake in this
+// package can: a peer that has stopped reading the stream. grpc's SendMsg
+// takes no context and blocks on the HTTP/2 write quota until the stream
+// itself dies -- its writeQuota selects on the stream's done channel and
+// nothing else -- so a faithful stand-in returns only once the session context
+// is cancelled. Every other fake here returns from Send immediately, which is
+// why a send that never returns was untestable and shipped unbounded.
+type blockingSendClient struct {
+	agentv1.AgentService_ConnectClient
+	sessionCtx context.Context
+	entered    chan struct{}
+	once       sync.Once
+}
+
+func (b *blockingSendClient) Send(*agentv1.AgentMessage) error {
+	b.once.Do(func() { close(b.entered) })
+	<-b.sessionCtx.Done()
+	return b.sessionCtx.Err()
+}
+
+// A gateway that stops reading must cost one session, not the agent's entire
+// telemetry pipeline.
+//
+// Measured on apexcrawl 2026-11-04: the drain's Send had been parked in
+// http2Client.write for 13,860 minutes -- 9.6 days -- because the gateway
+// stopped calling Recv two minutes into the session. Nothing bounded the call
+// and nothing observed it, so the queue filled, overflowed, and dropped ~6.9M
+// records while connection_state{ready}, grpc_stream_active, every
+// health_status component and /healthz all read healthy.
+//
+// Remove the deadline and this test HANGS rather than failing, which is the
+// defect stated precisely: an unbounded send has no failure, only silence.
+// runDrain's own bound turns that silence into a legible failure.
+func TestDrainEndsTheSessionWhenASendNeverReturns(t *testing.T) {
+	t.Parallel()
+
+	const batchSize = 4
+
+	cfg := testConfig()
+	cfg.Buffer.BatchSize = batchSize
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, cfg, q)
+	// The production value is 30s; the bound under test is that there IS one.
+	sm.sendDeadline = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A session for the deadline to end, exactly as startSessionWorkers would.
+	sessionCtx, sessionCancel := context.WithCancel(ctx)
+	defer sessionCancel()
+	sm.sessionMu.Lock()
+	sm.sessionCancel = sessionCancel
+	sm.sessionMu.Unlock()
+
+	enqueueTestLogs(ctx, t, q, batchSize)
+
+	stream := &blockingSendClient{sessionCtx: sessionCtx, entered: make(chan struct{})}
+	runDrain(sessionCtx, t, sm, stream)
+
+	select {
+	case <-stream.entered:
+	default:
+		t.Fatal("the drain never reached Send, so this run says nothing about a parked send")
+	}
+
+	if sessionCtx.Err() == nil {
+		t.Fatal("session context still live: the stream is never closed, so the real Send would still be parked")
+	}
+
+	sm.sessionMu.RLock()
+	sessionErr := sm.sessionErr
+	sm.sessionMu.RUnlock()
+	if !errors.Is(sessionErr, errSendStalled) {
+		t.Fatalf("session error = %v, want errSendStalled: Run cannot back off from a stall nobody named", sessionErr)
+	}
+}
