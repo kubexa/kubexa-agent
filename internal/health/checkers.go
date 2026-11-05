@@ -83,7 +83,13 @@ func (c *queueChecker) Check(ctx context.Context) error {
 	}
 
 	now := time.Now()
-	dropped := c.q.DroppedTotal()
+	// Refusals count toward the drop rate. They are the larger loss in
+	// practice and they were the entire loss in the export stall of
+	// 2026-10-26, when this checker read a flat 0 and reported the queue
+	// healthy for 9.6 days while the collectors discarded millions of
+	// records. A rate computed from only the losses that happen after an
+	// item is accepted cannot see a queue that is refusing everything.
+	dropped := c.q.DroppedTotal() + c.q.RefusedTotal()
 
 	c.mu.Lock()
 	elapsed := now.Sub(c.lastCheck)

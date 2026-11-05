@@ -1152,7 +1152,15 @@ func (m *streamManager) healthSnapshot() *agentv1.AgentHealth {
 	var depth, dropped int64
 	if m.queue != nil {
 		depth = m.queue.Depth()
-		dropped = m.queue.DroppedTotal()
+		// Dropped AND refused. This is the figure the platform shows as the
+		// agent's data loss, and for 9.6 days in 2026 it showed 0 while this
+		// agent was losing ~6.93 million records: every one of them was
+		// refused at Enqueue rather than dropped after being accepted, and
+		// only the queue's own drops were reported. The two remain separate
+		// counters -- they describe different events -- but a heartbeat that
+		// names one of them "dropped_messages" and omits the other is not
+		// reporting loss, it is reporting a subset of it.
+		dropped = m.queue.DroppedTotal() + m.queue.RefusedTotal()
 	}
 	truncated, tooOld, future, rateLimited := m.counters.Snapshot()
 	health := &agentv1.AgentHealth{

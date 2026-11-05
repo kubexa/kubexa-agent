@@ -42,6 +42,7 @@ type QueueMetrics struct {
 	enqueuedTotal      prometheus.Counter
 	dequeuedTotal      prometheus.Counter
 	droppedTotal       prometheus.Counter
+	refusedTotal       prometheus.Counter
 	unrecordedTotal    prometheus.Counter
 	ackTotal           prometheus.Counter
 	nackTotal          prometheus.Counter
@@ -137,6 +138,17 @@ func New(reg prometheus.Registerer, version, clusterID, agentID string) (*Metric
 				Subsystem: "queue",
 				Name:      "dropped_total",
 				Help:      "Total number of items dropped due to capacity limits.",
+			},
+		),
+		refusedTotal: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: metricNamespace,
+				Subsystem: "queue",
+				Name:      "refused_total",
+				Help: "Total number of items Enqueue refused. Every caller drops what it " +
+					"cannot enqueue -- none of them retry -- so each of these is a lost " +
+					"record. Counted apart from dropped_total, which is data the queue had " +
+					"accepted and then lost; this is data it never took.",
 			},
 		),
 		unrecordedTotal: prometheus.NewCounter(
@@ -401,6 +413,7 @@ func New(reg prometheus.Registerer, version, clusterID, agentID string) (*Metric
 		queue.enqueuedTotal,
 		queue.dequeuedTotal,
 		queue.droppedTotal,
+		queue.refusedTotal,
 		queue.unrecordedTotal,
 		queue.ackTotal,
 		queue.nackTotal,
@@ -522,6 +535,14 @@ func (q *QueueMetrics) IncDropped() {
 		return
 	}
 	q.droppedTotal.Inc()
+}
+
+// IncRefused increments the refused counter.
+func (q *QueueMetrics) IncRefused() {
+	if q == nil || q.refusedTotal == nil {
+		return
+	}
+	q.refusedTotal.Inc()
 }
 
 // IncAck increments the ack counter.

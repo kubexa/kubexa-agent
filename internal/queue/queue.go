@@ -132,6 +132,14 @@ type Queue interface {
 	// DroppedTotal returns total number of dropped items since start.
 	DroppedTotal() int64
 
+	// RefusedTotal returns the number of items Enqueue refused since start.
+	// Separate from DroppedTotal because the two describe different events:
+	// dropped items were accepted and then lost, refused items were never
+	// taken. Both are losses, because no caller of Enqueue retries -- every
+	// one of them wraps the error and returns it, and the collector above
+	// discards the record.
+	RefusedTotal() int64
+
 	// Close flushes pending items to disk (if spill enabled) and releases resources.
 	Close() error
 }
@@ -205,6 +213,8 @@ type bufferedQueue struct {
 	inflight map[string]*inflightEntry
 
 	dropped atomic.Int64
+	// refused counts items Enqueue would not take. See RefusedTotal.
+	refused atomic.Int64
 	// unrecorded counts items retired at the attempt cap that had actually
 	// been delivered. They are not losses and must not be reported as such:
 	// dropped_total is what an operator reads to decide whether telemetry went
@@ -383,7 +393,30 @@ func (q *bufferedQueue) itemSize(item Item) int64 {
 }
 
 // Enqueue adds an item to the queue, respecting context cancellation and capacity limits.
+// Enqueue is a thin wrapper so that EVERY refusal is counted at one place.
+//
+// The reason is a measured one. On 2026-10-26 an agent lost roughly 6.93
+// million records over 9.6 days, each of them at a `return err` inside the
+// function below, and `kubexa_queue_dropped_total` read 0 the whole time --
+// the loss was counted only in the collectors' own
+// `*_dropped_total{reason="queue_error"}`, which nothing aggregates and which
+// the heartbeat does not carry. Counting inside enqueue would have meant
+// finding every exit, and the next exit added would have been missed; a
+// wrapper cannot be.
+//
+// Every non-nil error is counted, including a context deadline and ErrClosed,
+// because the caller's behaviour is the same in all of them: wrap and return,
+// and the record is gone.
 func (q *bufferedQueue) Enqueue(ctx context.Context, item Item) error {
+	if err := q.enqueue(ctx, item); err != nil {
+		q.refused.Add(1)
+		q.metrics.IncRefused()
+		return err
+	}
+	return nil
+}
+
+func (q *bufferedQueue) enqueue(ctx context.Context, item Item) error {
 	if item.ID == "" {
 		item.ID = uuid.NewString()
 	}
@@ -1451,6 +1484,11 @@ func (q *bufferedQueue) DeliveredUnrecordedTotal() int64 {
 // DroppedTotal returns the number of items dropped since startup.
 func (q *bufferedQueue) DroppedTotal() int64 {
 	return q.dropped.Load()
+}
+
+// RefusedTotal returns the number of items Enqueue refused since startup.
+func (q *bufferedQueue) RefusedTotal() int64 {
+	return q.refused.Load()
 }
 
 // Close flushes memory items to disk when spill is enabled and releases resources.
