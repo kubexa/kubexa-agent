@@ -85,6 +85,7 @@ type mockQueue struct {
 	depth    int64
 	capacity int64
 	dropped  int64
+	refused  int64
 }
 
 func (m *mockQueue) Enqueue(context.Context, queue.Item) error { return nil }
@@ -102,6 +103,7 @@ func (m *mockQueue) NackInflightOlderThan(time.Duration) (int, error) {
 func (m *mockQueue) Drop([]string) error { return nil }
 func (m *mockQueue) Depth() int64        { return m.depth }
 func (m *mockQueue) DroppedTotal() int64 { return m.dropped }
+func (m *mockQueue) RefusedTotal() int64 { return m.refused }
 func (m *mockQueue) Close() error        { return nil }
 func (m *mockQueue) Capacity() int64     { return m.capacity }
 
@@ -129,5 +131,29 @@ func TestStreamCheckerDisconnect(t *testing.T) {
 
 	if err := checker.Check(context.Background()); err == nil {
 		t.Fatal("Check() error = nil, want disconnected unhealthy")
+	}
+}
+
+// TestQueueCheckerCountsRefusalsTowardTheDropRate pins the signal that was
+// missing for 9.6 days.
+//
+// In the export stall of 2026-10-26 this checker reported the queue healthy for
+// the entire incident. The drop rate it measures was computed from
+// DroppedTotal alone, and the agent's loss -- roughly 6.93 million records --
+// was entirely refusals: Enqueue would not take them, so nothing was ever
+// accepted and nothing was ever "dropped". A rate blind to refusals cannot see
+// a queue that is refusing everything, which is the one state worth reporting.
+func TestQueueCheckerCountsRefusalsTowardTheDropRate(t *testing.T) {
+	t.Parallel()
+
+	// Depth is deliberately low: a refusing queue need not be a deep one, and
+	// this must not pass by tripping the depth check instead.
+	q := &mockQueue{depth: 1, capacity: 100, refused: 5000}
+	checkErr := NewQueueChecker(q, 10).Check(context.Background())
+	if checkErr == nil {
+		t.Fatal("Check() error = nil: a queue refusing 5000 items reported healthy")
+	}
+	if !strings.Contains(checkErr.Error(), "drop rate") {
+		t.Fatalf("Check() error = %v, want a drop-rate message", checkErr)
 	}
 }

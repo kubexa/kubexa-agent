@@ -2284,3 +2284,33 @@ func TestDrainEndsTheSessionWhenASendNeverReturns(t *testing.T) {
 		t.Fatalf("session error = %v, want errSendStalled: Run cannot back off from a stall nobody named", sessionErr)
 	}
 }
+
+// TestHeartbeatReportsRefusedRecordsAsLoss pins the number the platform shows
+// as an agent's data loss.
+//
+// For 9.6 days in 2026 that number was 0 while the agent was losing roughly
+// 6.93 million records. The heartbeat carried the queue's DroppedTotal, and
+// the loss was entirely refusals -- records Enqueue would not take, which its
+// callers then discarded. "dropped_messages: 0" was true about the counter it
+// read and false about the agent.
+func TestHeartbeatReportsRefusedRecordsAsLoss(t *testing.T) {
+	t.Parallel()
+
+	q := newTestQueue(t)
+	sm := newDrainTestManager(t, testConfig(), q)
+
+	// A closed queue refuses every Enqueue, which is the cheapest way to reach
+	// the counter; the disk-cap path that produced the incident is pinned in
+	// internal/queue (TestARefusedEnqueueIsCounted).
+	if err := q.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := q.Enqueue(context.Background(), queue.Item{ID: "refused-1", Payload: []byte("x")}); err == nil {
+		t.Fatal("Enqueue on a closed queue returned nil")
+	}
+
+	if got := sm.healthSnapshot().GetDroppedMessages(); got != 1 {
+		t.Fatalf("dropped_messages = %d, want 1: a refused record is a lost record, and this "+
+			"field is what the platform shows as the agent's loss", got)
+	}
+}

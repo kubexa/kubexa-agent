@@ -2644,3 +2644,51 @@ func TestQueueAtTheDiskCapCanDrainAndReclaim(t *testing.T) {
 		t.Fatalf("Enqueue() after draining at the cap error = %v, want nil", err)
 	}
 }
+
+// TestARefusedEnqueueIsCounted pins that the queue counts what it would not
+// take, separately from what it accepted and lost.
+//
+// This is the exact arrival path of the 2026-10-26 export stall: the disk
+// budget is spent, evictOldestMemoryUnlocked cannot spill to make room, and
+// Enqueue returns ErrDiskFull without having accepted the item. The caller --
+// every caller, none of them retry -- wraps that error and discards the
+// record. Before this counter existed the loss appeared in no queue metric and
+// in no heartbeat field: kubexa_queue_dropped_total read 0 while millions of
+// records were lost.
+func TestARefusedEnqueueIsCounted(t *testing.T) {
+	dir := t.TempDir()
+	q := newTestBufferedQueue(t, &config.BufferConfig{
+		MaxMemoryBytes: 1 << 10,
+		SpillDir:       dir,
+		MaxDiskBytes:   64 << 10,
+		BatchSize:      8,
+	}, nil)
+	ctx := context.Background()
+
+	for i := 0; ; i++ {
+		err := q.Enqueue(ctx, Item{
+			ID:         fmt.Sprintf("item-%04d", i),
+			Payload:    []byte(strings.Repeat("x", 512)),
+			EnqueuedAt: time.Unix(1755000000, 0).UTC(),
+		})
+		if errors.Is(err, ErrDiskFull) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Enqueue() error = %v", err)
+		}
+		if i > 10000 {
+			t.Fatalf("Enqueue never reached the disk cap")
+		}
+	}
+
+	if got := q.RefusedTotal(); got != 1 {
+		t.Fatalf("RefusedTotal() = %d, want 1: exactly one Enqueue was refused", got)
+	}
+	// The refused item was never accepted, so it is not a drop. Collapsing the
+	// two would report the same loss twice and would also claim the queue lost
+	// something it held, which it did not.
+	if got := q.DroppedTotal(); got != 0 {
+		t.Fatalf("DroppedTotal() = %d, want 0: nothing the queue had accepted was lost", got)
+	}
+}
