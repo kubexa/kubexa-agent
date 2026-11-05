@@ -332,24 +332,44 @@ type: application
 #
 # Rolling back to 0.11.0 is safe on amd64 and reinstates an image that cannot
 # run on an arm64 node.
-# 0.11.2 changes no image, and appVersion deliberately stays on 0.11.1: the
-# only change is that the pod now annotates itself for Prometheus/
+# 0.11.2 moves appVersion to 0.11.2 and annotates the pod for Prometheus /
 # VictoriaMetrics pod discovery (service.scrapeAnnotations, default true).
-# Every agent image already serves /metrics on service.metricsPort, so this
-# takes effect on the image you are already running.
+# Both halves answer the same incident from the two sides it had.
 #
-# It exists because those metrics were never collected anywhere. On
-# 2026-10-26 apexcrawl's agent stopped exporting telemetry two minutes into a
-# session and stayed stopped for 9.6 days; kubexa_queue_depth,
-# kubexa_queue_dequeued_total and the collectors' *_dropped_total were the
-# only series that said so, and nothing scraped the pod, so there was no
-# history, no alert and no number until a support bundle caught the log noise
-# by accident. Umbrella 0.8.28 adds the two alert rules that read them.
+# On 2026-10-26 apexcrawl's agent stopped exporting telemetry two minutes into
+# a session and stayed stopped for 9.6 days, while every signal the platform
+# had read healthy. Image 0.11.2 carries the two fixes:
 #
-# Turn it off only where something else already scrapes this pod (see
-# serviceMonitor): a pod scraped twice reports every counter twice.
+#   - A session write that makes no progress no longer outlives its deadline.
+#     The drain goroutine was parked inside grpc SendMsg on an 83,013-byte
+#     message for 13,860 minutes. SendMsg takes no context of its own -- it
+#     blocks on the HTTP/2 write quota, whose select watches only the stream's
+#     done channel -- so the only interruption available is ending the
+#     session, which is what sendOnSession now does after 30 s.
+#     PAIRS WITH BACKEND IMAGE 0.5.68, whose gateway sheds a message after
+#     15 s. The 15 is deliberately under this 30: the gateway gives up on one
+#     message while the agent's session is still alive, costing a redelivery
+#     rather than a reconnect. Either side alone still fixes the deadlock,
+#     because both ends of it are now bounded.
+#
+#   - The agent counts what its queue REFUSES
+#     (kubexa_queue_refused_total), and reports dropped+refused as its loss
+#     figure on every heartbeat. All 6.93 million records lost in that
+#     incident were refusals -- items Enqueue would not take, which the
+#     collectors then discarded -- so kubexa_queue_dropped_total read 0, the
+#     heartbeat reported 0 loss, and the queue health checker, which measures
+#     a drop RATE, reported healthy for the entire 9.6 days.
+#
+# The chart half exists because none of those metrics were collected anywhere:
+# nothing scraped this pod. Every agent image already serves /metrics on
+# service.metricsPort, so the annotations take effect on whatever image is
+# running. Umbrella 0.8.28 adds the two alert rules that read them
+# (KubexaAgentExportStalled, KubexaAgentSendStalled).
+#
+# Turn scrapeAnnotations off only where something else already scrapes this
+# pod (see serviceMonitor): a pod scraped twice reports every counter twice.
 version: 0.11.2
-appVersion: "0.11.1"
+appVersion: "0.11.2"
 keywords:
   - kubexa
   - observability
