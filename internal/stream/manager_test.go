@@ -965,6 +965,16 @@ func newTestDiskQueue(t *testing.T) queue.Queue {
 
 func newDrainTestManager(t *testing.T, cfg *config.Config, q queue.Queue) *streamManager {
 	t.Helper()
+	sm, _ := newDrainTestManagerWithRegistry(t, cfg, q)
+	return sm
+}
+
+// newDrainTestManagerWithRegistry hands back the registry the manager writes
+// to. A test that asserts on a counter needs it: what an alert rule selects on
+// is a (metric name, label value) pair, and nothing in this package could read
+// one back before.
+func newDrainTestManagerWithRegistry(t *testing.T, cfg *config.Config, q queue.Queue) (*streamManager, *prometheus.Registry) {
+	t.Helper()
 	reg := prometheus.NewRegistry()
 	_, streamMetrics, connMetrics := newTestAgentMetrics(t, reg)
 	mgr, err := New(cfg, q, logger.New("stream-test"), streamMetrics, connMetrics, nil, nil, nil, nil, nil, nil, nil, nil)
@@ -973,7 +983,43 @@ func newDrainTestManager(t *testing.T, cfg *config.Config, q queue.Queue) *strea
 	}
 	sm := mgr.(*streamManager)
 	sm.ready.Store(true)
-	return sm
+	return sm, reg
+}
+
+// counterSample returns a counter sample selected the way an alert rule selects
+// it: by metric name and an exact set of label values. The second return
+// distinguishes "the series is not there" from "the series reads zero", which
+// is the point of reading it at all -- an absent series makes
+// increase(...) > 0 unsatisfiable, so a rule reading it is silent rather than
+// quiet, and a reader that folded absence into 0 could not tell those apart.
+func counterSample(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) (float64, bool) {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range families {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			got := make(map[string]string, len(metric.GetLabel()))
+			for _, lp := range metric.GetLabel() {
+				got[lp.GetName()] = lp.GetValue()
+			}
+			matched := true
+			for k, v := range labels {
+				if got[k] != v {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return metric.GetCounter().GetValue(), true
+			}
+		}
+	}
+	return 0, false
 }
 
 // A send that fails partway through a batch must leave nothing in flight:
@@ -2248,7 +2294,7 @@ func TestDrainEndsTheSessionWhenASendNeverReturns(t *testing.T) {
 	cfg := testConfig()
 	cfg.Buffer.BatchSize = batchSize
 	q := newTestQueue(t)
-	sm := newDrainTestManager(t, cfg, q)
+	sm, reg := newDrainTestManagerWithRegistry(t, cfg, q)
 	// The production value is 30s; the bound under test is that there IS one.
 	sm.sendDeadline = 50 * time.Millisecond
 
@@ -2282,6 +2328,26 @@ func TestDrainEndsTheSessionWhenASendNeverReturns(t *testing.T) {
 	sm.sessionMu.RUnlock()
 	if !errors.Is(sessionErr, errSendStalled) {
 		t.Fatalf("session error = %v, want errSendStalled: Run cannot back off from a stall nobody named", sessionErr)
+	}
+
+	// The alert that reports this failure to a human selects on exactly this
+	// (name, label value) pair -- KubexaAgentSendStalled is
+	// increase(kubexa_grpc_stream_errors_total{error_type="send_stalled"}[15m]) > 0,
+	// and that label is written at ONE call site, inside a time.AfterFunc
+	// callback. Until this assertion existed no test read it back, so renaming
+	// it would have left every test in this package green while the only rule
+	// that can report a stalled send had no series at all. From the alert side
+	// a rule with no series is indistinguishable from a healthy agent.
+	//
+	// Ordering is not a race: the increment precedes abortSessionErr in the
+	// same callback, so a visible sessionErr means the sample is already there.
+	const errorsTotal = "kubexa_grpc_stream_errors_total"
+	v, ok := counterSample(t, reg, errorsTotal, map[string]string{"error_type": "send_stalled"})
+	if !ok {
+		t.Fatalf("%s carries no error_type=\"send_stalled\" sample: KubexaAgentSendStalled would have no series to fire on", errorsTotal)
+	}
+	if v != 1 {
+		t.Fatalf("%s{error_type=\"send_stalled\"} = %v, want 1", errorsTotal, v)
 	}
 }
 
