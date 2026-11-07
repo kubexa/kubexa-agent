@@ -207,3 +207,74 @@ func TestTheCutReachesMessageAndNotOnlyRaw(t *testing.T) {
 		t.Error("Truncated = false, want true")
 	}
 }
+
+// TestResumeSinceClampsToTheAgeFloor pins the fix for a four-hour loop measured
+// on apexcrawl between 2026-10-11 and 2026-11-07.
+//
+// kubelet closes an idle log stream at streamingConnectionIdleTimeout, 4h by
+// default, and every stream opened at agent start goes idle together -- so the
+// quiet streams reconnect as one synchronized cohort every four hours, forever.
+// On each reconnect sinceForReconnect asks the API for logs since the last line
+// it processed. For a pod that has been silent LONGER than max_sample_age that
+// timestamp is one the drain will certainly reject: the agent re-reads a line
+// it delivered a week ago, enqueues it, drops it at ageDropReason, and reports
+// the drop to the platform as data loss. Measured: 10 batches per tick, 88
+// KubexaAgentDropsTooOld notifications in four weeks, not one of them real --
+// and that noise is what the genuine 9.6-day outage had to compete with.
+//
+// Clamping costs nothing that could have been ingested, because a line older
+// than the floor is one ageDropReason would discard anyway. It also does not
+// suppress what the counter exists for: records that expire while sitting in
+// the WAL still age out there and still count.
+func TestResumeSinceClampsToTheAgeFloor(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	const maxSampleAge = 168 * time.Hour // the deployed value on apexcrawl
+
+	cases := []struct {
+		name         string
+		checkpoint   time.Time
+		maxSampleAge time.Duration
+		want         time.Time
+	}{
+		{
+			// The apexcrawl case: a pod silent for eight days.
+			name:         "a checkpoint older than the floor is clamped",
+			checkpoint:   now.Add(-8 * 24 * time.Hour),
+			maxSampleAge: maxSampleAge,
+			want:         now.Add(-maxSampleAge),
+		},
+		{
+			name:         "a checkpoint inside the window is left alone",
+			checkpoint:   now.Add(-2 * time.Hour),
+			maxSampleAge: maxSampleAge,
+			want:         now.Add(-2 * time.Hour),
+		},
+		{
+			// Exactly at the floor is kept by ageDropReason (it drops on
+			// strictly greater), so it must not be moved.
+			name:         "a checkpoint exactly at the floor is left alone",
+			checkpoint:   now.Add(-maxSampleAge),
+			maxSampleAge: maxSampleAge,
+			want:         now.Add(-maxSampleAge),
+		},
+		{
+			// Same contract as TestQueuedMessageAgeFilterOffByDefault: with no
+			// rule pushed, nothing about age may change behaviour.
+			name:         "no rule pushed means no floor",
+			checkpoint:   now.Add(-100 * 24 * time.Hour),
+			maxSampleAge: 0,
+			want:         now.Add(-100 * 24 * time.Hour),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resumeSince(tc.checkpoint, tc.maxSampleAge, now)
+			if !got.Equal(tc.want) {
+				t.Fatalf("resumeSince = %s, want %s", got.Format(time.RFC3339Nano), tc.want.Format(time.RFC3339Nano))
+			}
+		})
+	}
+}
