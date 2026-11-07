@@ -233,6 +233,39 @@ func (c *Collector) runStream(parent context.Context, target streamTarget) {
 	}
 }
 
+// resumeSince decides where a reconnecting stream actually resumes.
+//
+// The checkpoint alone is wrong for a stream that has been quiet for longer
+// than max_sample_age. kubelet closes an idle log stream at its
+// streamingConnectionIdleTimeout -- 4h by default -- and every stream opened at
+// agent start goes idle together, so the quiet ones reconnect as one
+// synchronized cohort on that clock. sinceForReconnect then asks the API for
+// logs since the last line it processed, and for a pod silent longer than
+// max_sample_age that is a timestamp the drain will certainly reject: the agent
+// re-reads a line it delivered a week ago, enqueues it, drops it at
+// ageDropReason, and its heartbeat reports the drop to the platform as data
+// loss. Once per quiet stream, every four hours, indefinitely.
+//
+// Clamping to the age floor cannot cost anything that could have been ingested,
+// because a line older than the floor is one ageDropReason would discard
+// anyway. It also does not suppress the condition the drop counter exists for:
+// records that expire while sitting in the WAL still age out there and still
+// count. Only the self-inflicted re-read goes away.
+//
+// A zero max_sample_age means no rule was pushed, and then nothing about age
+// may change behaviour -- the same contract the age filter itself keeps.
+func resumeSince(checkpoint time.Time, maxSampleAge time.Duration, now time.Time) time.Time {
+	if maxSampleAge <= 0 {
+		return checkpoint
+	}
+	// ageDropReason drops on strictly greater, so a line exactly at the floor
+	// is still deliverable and the floor itself is a safe resume point.
+	if floor := now.Add(-maxSampleAge); checkpoint.Before(floor) {
+		return floor
+	}
+	return checkpoint
+}
+
 func classifyStreamError(err error) string {
 	if err == nil {
 		return "unknown"
@@ -252,6 +285,13 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 		Timestamps: true,
 	}
 	if since, ok := cursor.sinceForReconnect(reconnectSinceOverlap); ok {
+		if clamped := resumeSince(since, c.rules.Get().MaxSampleAge, time.Now()); !clamped.Equal(since) {
+			log.Debug("resume point clamped to the age floor",
+				logger.F("checkpoint", since.Format(time.RFC3339Nano)),
+				logger.F("resume_from", clamped.Format(time.RFC3339Nano)),
+			)
+			since = clamped
+		}
 		opts.SinceTime = since
 		log.Debug("resuming log stream",
 			logger.F("since_time", since.Format(time.RFC3339Nano)),
