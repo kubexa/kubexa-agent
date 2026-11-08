@@ -266,6 +266,72 @@ func resumeSince(checkpoint time.Time, maxSampleAge time.Duration, now time.Time
 	return checkpoint
 }
 
+// logReadPlan is what to ask the Kubernetes log API for on one container
+// stream.
+type logReadPlan struct {
+	opts k8s.LogOptions
+	// clampedFrom is the checkpoint that was refused for being older than the
+	// age floor, and is zero when nothing was clamped. It exists only so the
+	// caller can log what it would have resumed from.
+	clampedFrom time.Time
+}
+
+// planLogRead decides the read for one stream. It is a function rather than a
+// dozen lines inside consumeStream because its two branches have to AGREE
+// about the age floor, and until 2026-11-08 they did not.
+//
+// The reconnect branch was floored first, for the reason resumeSince above
+// records. The fresh-start branch was not, and it is reached on every agent
+// start, because streamCursor is in-memory only: the pod persists the queue it
+// has not delivered yet on a PVC and deliberately forgets where it was
+// reading. So a restart asks for each container's last tailLines lines with no
+// lower bound on their age, and for a pod that has been quiet longer than
+// max_sample_age every one of those lines is older than the floor -- read,
+// enqueued, discarded at ageDropReason, and reported to the platform on the
+// heartbeat as data loss. Measured on apexcrawl 2026-11-08: five such drops
+// within three minutes of a restart, on a cluster whose tailed pods are mostly
+// busy.
+//
+// The same two arguments the reconnect clamp rests on apply unchanged. It
+// cannot cost an ingestable line, because a line older than the floor is one
+// the age filter would discard anyway. And it does not hide what the counter
+// exists for: records that expire while waiting in the WAL still age out there
+// and still count. What goes away is a loss figure for records that were never
+// deliverable and were never ours.
+//
+// TailLines is kept alongside it. The Kubernetes API applies both bounds, so
+// the read is "the last N lines, none older than the floor" -- and on a first
+// install, where nothing has been delivered yet, that is the same read it
+// always was minus the part that could only be thrown away.
+//
+// A zero max_sample_age means no rule has been pushed, and then nothing about
+// age may change behaviour: the same contract resumeSince and ageDropReason
+// both keep.
+func planLogRead(
+	target streamTarget,
+	cursor *streamCursor,
+	maxSampleAge time.Duration,
+	now time.Time,
+) logReadPlan {
+	plan := logReadPlan{opts: k8s.LogOptions{
+		Follow:     target.rule.follow,
+		Timestamps: true,
+	}}
+	if since, ok := cursor.sinceForReconnect(reconnectSinceOverlap); ok {
+		if clamped := resumeSince(since, maxSampleAge, now); !clamped.Equal(since) {
+			plan.clampedFrom = since
+			since = clamped
+		}
+		plan.opts.SinceTime = since
+		return plan
+	}
+	plan.opts.TailLines = target.rule.tailLines
+	if maxSampleAge > 0 {
+		plan.opts.Since = maxSampleAge
+	}
+	return plan
+}
+
 func classifyStreamError(err error) string {
 	if err == nil {
 		return "unknown"
@@ -280,25 +346,19 @@ func classifyStreamError(err error) string {
 }
 
 func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, target streamTarget, cursor *streamCursor) error {
-	opts := k8s.LogOptions{
-		Follow:     target.rule.follow,
-		Timestamps: true,
+	plan := planLogRead(target, cursor, c.rules.Get().MaxSampleAge, time.Now())
+	opts := plan.opts
+	if !plan.clampedFrom.IsZero() {
+		log.Debug("resume point clamped to the age floor",
+			logger.F("checkpoint", plan.clampedFrom.Format(time.RFC3339Nano)),
+			logger.F("resume_from", opts.SinceTime.Format(time.RFC3339Nano)),
+		)
 	}
-	if since, ok := cursor.sinceForReconnect(reconnectSinceOverlap); ok {
-		if clamped := resumeSince(since, c.rules.Get().MaxSampleAge, time.Now()); !clamped.Equal(since) {
-			log.Debug("resume point clamped to the age floor",
-				logger.F("checkpoint", since.Format(time.RFC3339Nano)),
-				logger.F("resume_from", clamped.Format(time.RFC3339Nano)),
-			)
-			since = clamped
-		}
-		opts.SinceTime = since
+	if !opts.SinceTime.IsZero() {
 		log.Debug("resuming log stream",
-			logger.F("since_time", since.Format(time.RFC3339Nano)),
+			logger.F("since_time", opts.SinceTime.Format(time.RFC3339Nano)),
 			logger.F("overlap", reconnectSinceOverlap.String()),
 		)
-	} else {
-		opts.TailLines = target.rule.tailLines
 	}
 
 	reader, err := c.kube.Logs(ctx, target.pod.Namespace, target.pod.Name, target.container, opts)

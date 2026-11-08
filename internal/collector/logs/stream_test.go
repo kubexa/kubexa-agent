@@ -340,3 +340,102 @@ func TestEachLogMessageCarriesExactlyOneEntry(t *testing.T) {
 		}
 	}
 }
+
+// TestPlanLogReadFloorsTheFreshStart is the half resumeSince never covered.
+//
+// streamCursor is in-memory only, so EVERY agent start takes this branch for
+// every stream: the pod keeps its undelivered queue on a PVC and forgets where
+// it was reading. Without a floor, the read asks for each container's last
+// tailLines lines with no lower bound on age, and for a pod quiet longer than
+// max_sample_age all of them are past the floor -- read, enqueued, discarded at
+// ageDropReason, and reported to the platform as data loss. Measured on
+// apexcrawl 2026-11-08: five such drops within three minutes of a restart.
+func TestPlanLogReadFloorsTheFreshStart(t *testing.T) {
+	target := streamTarget{
+		pod:       &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "quiet", Namespace: "prod"}},
+		container: "app",
+		rule:      ruleView{follow: true, tailLines: 100},
+	}
+	plan := planLogRead(target, &streamCursor{}, 168*time.Hour, time.Now())
+
+	if plan.opts.Since != 168*time.Hour {
+		t.Errorf("Since = %v, want 168h: without it a restart re-reads lines the age filter will certainly discard and reports them as loss", plan.opts.Since)
+	}
+	// TailLines must survive alongside it. The API applies both bounds, and
+	// dropping it would turn a bounded read into "everything in the window".
+	if plan.opts.TailLines != 100 {
+		t.Errorf("TailLines = %d, want 100", plan.opts.TailLines)
+	}
+	if !plan.opts.SinceTime.IsZero() {
+		t.Errorf("SinceTime = %v, want zero on a fresh start (Since is relative and resolved at request time)", plan.opts.SinceTime)
+	}
+}
+
+// TestPlanLogReadLeavesAFreshStartAloneWithoutRules keeps the age floor from
+// inventing a bound nobody asked for. A zero max_sample_age means no ingest
+// rule has been pushed, and then nothing about age may change behaviour --
+// the same contract resumeSince and ageDropReason both keep.
+func TestPlanLogReadLeavesAFreshStartAloneWithoutRules(t *testing.T) {
+	target := streamTarget{
+		pod:       &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "n"}},
+		container: "app",
+		rule:      ruleView{tailLines: 50},
+	}
+	plan := planLogRead(target, &streamCursor{}, 0, time.Now())
+	if plan.opts.Since != 0 {
+		t.Fatalf("Since = %v, want 0 when no rule sets max_sample_age", plan.opts.Since)
+	}
+	if plan.opts.TailLines != 50 {
+		t.Fatalf("TailLines = %d, want 50", plan.opts.TailLines)
+	}
+}
+
+// TestPlanLogReadResumesFromTheCheckpoint is the reconnect branch, kept here so
+// the two branches are asserted side by side -- the whole reason planLogRead is
+// one function.
+func TestPlanLogReadResumesFromTheCheckpoint(t *testing.T) {
+	now := time.Now()
+	cur := &streamCursor{}
+	cur.lastProcessed = now.Add(-time.Minute)
+
+	target := streamTarget{
+		pod:       &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "n"}},
+		container: "app",
+		rule:      ruleView{tailLines: 100},
+	}
+	plan := planLogRead(target, cur, 168*time.Hour, now)
+
+	if plan.opts.SinceTime.IsZero() {
+		t.Fatal("a cursor with progress must resume from its checkpoint, not re-read the tail")
+	}
+	if plan.opts.TailLines != 0 {
+		t.Errorf("TailLines = %d, want 0 on a resume: asking for both would re-read the tail as well", plan.opts.TailLines)
+	}
+	if !plan.clampedFrom.IsZero() {
+		t.Errorf("clampedFrom = %v, want zero: a one-minute-old checkpoint is nowhere near the floor", plan.clampedFrom)
+	}
+}
+
+// TestPlanLogReadClampsAnExpiredCheckpoint is the case agent v0.11.3 shipped
+// for: the four-hourly re-read. It belongs next to the three above because the
+// clamp and the fresh-start floor are now the same decision taken twice.
+func TestPlanLogReadClampsAnExpiredCheckpoint(t *testing.T) {
+	now := time.Now()
+	cur := &streamCursor{}
+	cur.lastProcessed = now.Add(-300 * time.Hour) // a pod silent far longer than the floor
+
+	target := streamTarget{
+		pod:       &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "n"}},
+		container: "app",
+		rule:      ruleView{tailLines: 100},
+	}
+	plan := planLogRead(target, cur, 168*time.Hour, now)
+
+	if plan.clampedFrom.IsZero() {
+		t.Fatal("an expired checkpoint must be reported as clamped, or the operator cannot see why the resume point moved")
+	}
+	want := now.Add(-168 * time.Hour)
+	if !plan.opts.SinceTime.Equal(want) {
+		t.Fatalf("SinceTime = %v, want the floor %v", plan.opts.SinceTime, want)
+	}
+}
