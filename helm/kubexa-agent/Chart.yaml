@@ -368,8 +368,42 @@ type: application
 #
 # Turn scrapeAnnotations off only where something else already scrapes this
 # pod (see serviceMonitor): a pod scraped twice reports every counter twice.
-version: 0.11.2
-appVersion: "0.11.2"
+# 0.11.3 moves appVersion to 0.11.3. No template change; three fixes batched
+# since 0.11.2, all of them about telemetry the agent reports about ITSELF.
+#
+#   - A reconnect no longer re-reads log lines the drain will certainly drop.
+#     kubelet closes an idle log stream at streamingConnectionIdleTimeout
+#     (4h0m0s, a documented default), so every quiet stream the agent opened at
+#     startup dies as one synchronised cohort and re-opens together -- which is
+#     what kept apexcrawl's drop counter rising by exactly 10 every four hours
+#     for a month. The reconnect resumed from lastProcessed - 5s, and for a pod
+#     silent longer than max_sample_age (168h deployed) that timestamp is
+#     already expired, so the kubelet returned the ancient line and the drain's
+#     age filter dropped it and COUNTED it. resumeSince now clamps the resume
+#     point to now - max_sample_age. It cannot cost an ingestable line -- what
+#     is older than the floor is what the filter would discard anyway.
+#
+#     Nothing was ever lost: those lines had been delivered a week earlier and
+#     are in Loki. The cost was noise. 88 firing + 88 resolved for that alert
+#     alone, three alerts flapping on the same four-hour clock, ~642
+#     notifications in four weeks -- and the genuine 9.6-day export stall of
+#     2026-10-26 had to compete with all of it. A false alarm on a timer is
+#     what makes a true alarm unreadable.
+#
+#   - The label an alert selects on is now read by a test.
+#     IncStreamError("send_stalled") had exactly one caller, inside a
+#     time.AfterFunc, and that string is the whole input to
+#     KubexaAgentSendStalled. No test read it, so a rename would have left this
+#     package green and the rule permanently seriesless.
+#
+#   - The one-entry-per-message invariant that whole-batch age dropping rests
+#     on is pinned at the producer. See the commit; it changes no behaviour and
+#     exists so that introducing batching fails loudly instead of quietly
+#     turning a whole-batch drop into data loss.
+#
+# No install order constraint; the gateway is unaffected.
+version: 0.11.3
+appVersion: "0.11.3"
 keywords:
   - kubexa
   - observability

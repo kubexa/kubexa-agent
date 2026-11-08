@@ -1708,6 +1708,17 @@ func shouldDeliverQueuedMessage(cfg *config.Config, msg *agentv1.AgentMessage) b
 // path writes one entry per message, so in practice that is the same thing;
 // judging by the newest would let one fresh entry carry a week of stale ones
 // past the gate.
+//
+// That equivalence is load-bearing and is NOT a property of this function: it
+// holds only because internal/collector/logs builds every LogBatch with a
+// single entry. Pack several entries into one message and whole-batch dropping
+// stops being equivalent and becomes loss -- one stale duplicate would discard
+// every fresh line beside it, and the agent would count the discard as
+// expected. The invariant is therefore pinned at the producer, by
+// TestEachLogMessageCarriesExactlyOneEntry, which also records the ordering:
+// this function becomes per-entry BEFORE batching is introduced. Filtering
+// per-entry today would be unreachable code that changes what the drop counter
+// counts for no present benefit.
 func ageDropReason(msg *agentv1.AgentMessage, r ingestrules.Rules, now time.Time) string {
 	if r.MaxSampleAge <= 0 && r.MaxFutureSkew <= 0 {
 		return ""
