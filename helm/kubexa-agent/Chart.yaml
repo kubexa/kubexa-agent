@@ -402,8 +402,30 @@ type: application
 #     turning a whole-batch drop into data loss.
 #
 # No install order constraint; the gateway is unaffected.
-version: 0.11.3
-appVersion: "0.11.3"
+# 0.11.4 moves appVersion to 0.11.4. No template change. It finishes 0.11.3's
+# first fix, which covered one of the two paths that ask the Kubernetes log API
+# for old lines.
+#
+# 0.11.3 floored the RECONNECT resume point. Deploying it on apexcrawl showed
+# the other branch immediately: the new pod's age_too_old counter read 5 within
+# three minutes of starting, where it should have read 0. streamCursor is
+# in-memory only, so EVERY agent start takes the fresh-start branch for every
+# stream -- the pod persists the queue it has not delivered on a PVC and
+# deliberately forgets where it was reading. That branch bounds the read by
+# tailLines (so no, a restart does not re-read a whole log history) but put no
+# bound on the lines' AGE, and for a pod quiet longer than max_sample_age all
+# of its last 100 lines are past the floor: read, enqueued, discarded, and
+# reported to the platform as data loss.
+#
+# Same two arguments as before. It cannot cost an ingestable line, because a
+# line older than the floor is one the age filter would discard anyway; and
+# records that expire while waiting in the WAL still age out there and still
+# count. What goes away is a loss figure for records that were never
+# deliverable. A zero max_sample_age still changes nothing.
+#
+# No install order constraint; the gateway is unaffected.
+version: 0.11.4
+appVersion: "0.11.4"
 keywords:
   - kubexa
   - observability
