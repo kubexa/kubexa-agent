@@ -99,11 +99,21 @@ func TestHandleLogLinePopulatesWorkload(t *testing.T) {
 type recordingWriter struct {
 	entries    []*agentv1.LogEntry
 	sawDoneCtx bool
+	// batchSizes is the entry count of each message, in order. The entries
+	// field above FLATTENS every batch into one list, which is convenient and
+	// is also why nothing in this package could see how many entries a single
+	// message carried -- a collector that packed a hundred entries into one
+	// LogBatch would have left every test here green. See
+	// TestEachLogMessageCarriesExactlyOneEntry.
+	batchSizes []int
 }
 
 func (w *recordingWriter) Write(ctx context.Context, msg *agentv1.AgentMessage) error {
 	if ctx.Err() != nil {
 		w.sawDoneCtx = true
+	}
+	if msg.GetLogs() != nil {
+		w.batchSizes = append(w.batchSizes, len(msg.GetLogs().GetEntries()))
 	}
 	w.entries = append(w.entries, msg.GetLogs().GetEntries()...)
 	return nil
@@ -276,5 +286,57 @@ func TestResumeSinceClampsToTheAgeFloor(t *testing.T) {
 				t.Fatalf("resumeSince = %s, want %s", got.Format(time.RFC3339Nano), tc.want.Format(time.RFC3339Nano))
 			}
 		})
+	}
+}
+
+// TestEachLogMessageCarriesExactlyOneEntry pins an invariant this package does
+// not enforce and another package silently depends on.
+//
+// internal/stream's ageDropReason judges a queued log batch by its OLDEST
+// entry and drops the batch WHOLE, and its own comment justifies that with
+// "the collection path writes one entry per message, so in practice that is
+// the same thing". That is true -- and it is true only here, at the one place
+// a LogBatch is built. The moment this collector packs several entries into
+// one message, whole-batch dropping stops being equivalent and becomes real
+// loss: a single stale line, say a duplicate replayed after a reconnect, would
+// take every fresh line beside it with it, and the agent would report the
+// discard as expected behaviour.
+//
+// So the invariant is pinned on the producing side, which is the only side
+// that can break it, with the consequence written down. If batching ever
+// becomes worth doing, ageDropReason must become per-entry FIRST, and this
+// test is where that ordering is recorded.
+func TestEachLogMessageCarriesExactlyOneEntry(t *testing.T) {
+	m, err := newMetrics(prometheus.NewRegistry())
+	if err != nil {
+		t.Fatalf("newMetrics: %v", err)
+	}
+	w := &recordingWriter{}
+	c := &Collector{
+		writer:       w,
+		log:          logger.New("test"),
+		metrics:      m,
+		agentMeta:    &commonv1.AgentMetadata{},
+		workloads:    newWorkloadResolver(fake.NewSimpleClientset(), time.Minute),
+		writeTimeout: 50 * time.Millisecond,
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api-1", Namespace: "stage"}}
+	target := streamTarget{pod: pod, container: "app"}
+
+	// Two separate records, so the assertion is about a PROPERTY of every
+	// message rather than about the one message a single-write test produces.
+	for i, line := range []string{"first line", "second line"} {
+		join := newJoiner(maxJoinedBytes, maxJoinHold)
+		join.Add(ParsedLine{Message: line, Raw: []byte(line), Timestamp: time.Unix(0, int64(i+1))}, time.Now())
+		c.flushJoiner(context.Background(), c.log, target, join)
+	}
+
+	if len(w.batchSizes) != 2 {
+		t.Fatalf("messages written = %d, want 2; got batch sizes %v", len(w.batchSizes), w.batchSizes)
+	}
+	for i, n := range w.batchSizes {
+		if n != 1 {
+			t.Errorf("message %d carries %d entries, want exactly 1. internal/stream's ageDropReason drops a log batch WHOLE on its oldest entry and is only safe while this is 1; make it per-entry before batching here.", i, n)
+		}
 	}
 }
