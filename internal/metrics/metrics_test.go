@@ -307,8 +307,15 @@ func TestServerMetricsEndpoint(t *testing.T) {
 		if err != nil && err != context.Canceled {
 			t.Fatalf("Run() error = %v, want context.Canceled", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("server did not shut down within timeout")
+	// Derived from shutdownTimeout, never a literal that happens to equal it.
+	// This wait used to be a bare 5 * time.Second, which is exactly the
+	// server's own graceful-shutdown budget -- so the run where Shutdown waits
+	// that budget out (measured at roughly 1 in 25, see Run) lost the race by a
+	// hair and failed the whole package. The test's patience must be strictly
+	// longer than the deadline it is observing, or it measures the race between
+	// two equal timers instead of the behaviour.
+	case <-time.After(shutdownTimeout + 2*time.Second):
+		t.Fatalf("server did not shut down within %s, which is longer than its own %s graceful budget plus a forced close", shutdownTimeout+2*time.Second, shutdownTimeout)
 	}
 }
 

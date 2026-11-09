@@ -75,7 +75,26 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 
 		if err := s.httpSrv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("metrics server shutdown: %w", err)
+			// A graceful Shutdown waits for every connection to go idle, and a
+			// scraper's keep-alive connection is sometimes not seen as idle at
+			// all: measured 2026-11-09, roughly one run in 25 waits out the
+			// WHOLE shutdownTimeout and then returns DeadlineExceeded, against
+			// ~40us otherwise. Closing the client's idle connections first
+			// makes it 30 runs out of 30 fast, which is what identified the
+			// cause. In this agent /metrics is scraped by VictoriaMetrics over
+			// keep-alive, so the stall is a production path, not a test
+			// artifact -- it cost five seconds of every twenty-fifth pod
+			// termination, silently, because cmd/agent's isContextClosed
+			// treats DeadlineExceeded as a clean close.
+			//
+			// Close() drops those connections. For a metrics endpoint that
+			// costs at most one scrape, which the scraper retries; holding a
+			// terminating pod open for five seconds costs the shutdown budget
+			// every other component is also drawing on.
+			s.log.Err(err).Warn("metrics server did not shut down gracefully; closing its connections")
+			if cerr := s.httpSrv.Close(); cerr != nil {
+				return fmt.Errorf("metrics server close after failed shutdown: %w", cerr)
+			}
 		}
 		if err := <-errCh; err != nil {
 			return fmt.Errorf("metrics server: %w", err)

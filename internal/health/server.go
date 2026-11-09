@@ -148,7 +148,15 @@ func (s *Server) Start(ctx context.Context) error {
 		defer cancel()
 
 		if err := s.httpSrv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("health server shutdown: %w", err)
+			// Same stall as internal/metrics, same remedy, and the reason it
+			// has to be fixed here too: this endpoint is probed by the kubelet
+			// over keep-alive, so an idle probe connection can hold a
+			// terminating pod for the whole shutdownTimeout. See
+			// internal/metrics/server.go for the measurement.
+			s.log.Err(err).Warn("health server did not shut down gracefully; closing its connections")
+			if cerr := s.httpSrv.Close(); cerr != nil {
+				return fmt.Errorf("health server close after failed shutdown: %w", cerr)
+			}
 		}
 		if err := <-errCh; err != nil {
 			return fmt.Errorf("health server: %w", err)

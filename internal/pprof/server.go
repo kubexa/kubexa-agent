@@ -115,7 +115,14 @@ func (s *Server) Run(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := s.httpSrv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("pprof server shutdown: %w", err)
+		// Same stall as internal/metrics, same remedy. This endpoint is rarely
+		// connected to, so it is the least likely of the three to hit it --
+		// which is exactly why it would have been the one left behind. See
+		// internal/metrics/server.go for the measurement.
+		s.log.Err(err).Warn("pprof server did not shut down gracefully; closing its connections")
+		if cerr := s.httpSrv.Close(); cerr != nil {
+			return fmt.Errorf("pprof server close after failed shutdown: %w", cerr)
+		}
 	}
 	s.log.Info("pprof server stopped")
 	return nil
