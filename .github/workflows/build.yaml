@@ -107,19 +107,28 @@ jobs:
     needs: test
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
 
-    # Serialize every push to this package, ACROSS refs. `git push origin main
-    # v0.11.5` -- one command, which is how a release is cut here -- starts two
-    # runs of this workflow in the same second, because the triggers above
-    # cover both refs. Both then push manifests to the same GHCR package, and
-    # GHCR answers one of them with `denied: permission_denied: write_package`
-    # -- which is not a permission problem: measured 2026-11-09, the failed run
-    # succeeded unchanged when re-run alone a few minutes later. The group key
-    # therefore must NOT contain github.ref, and cancel-in-progress must stay
-    # false: the run that would be cancelled is as likely to be the tag's,
-    # which is the one that builds the release artefact.
-    concurrency:
-      group: docker-push-${{ github.repository }}
-      cancel-in-progress: false
+    # If this job fails with
+    #   ERROR: failed to push ghcr.io/kubexa/<image>:main:
+    #          denied: permission_denied: write_package
+    # it is NOT a permission problem and nothing needs changing: RE-RUN THE JOB.
+    # Measured 2026-11-09 -- three such failures across kubexa-agent and
+    # kubexa-app in half an hour, and each one succeeded unchanged on a lone
+    # re-run, same commit, same token, same tag.
+    #
+    # The obvious theory was a collision between the two runs that
+    # `git push origin main vX.Y.Z` starts, since the triggers above cover both
+    # refs and both runs write to one GHCR package. It is WRONG, and the two
+    # readings that killed it are worth keeping so nobody spends the evening on
+    # it again: kubexa-app failed with no other run pushing that package at all
+    # (so a collision is not necessary), and on 2026-10-20 kubexa-app pushed
+    # main and a tag in the SAME SECOND with both runs green (so it is not
+    # sufficient). A job-level `concurrency` group was committed on that theory
+    # and then removed again.
+    #
+    # What is actually established: the error is intermittent, it misnames its
+    # own cause, and a retry clears it. A retry wrapper around the push is the
+    # open option; it needs a third-party action, so it is a decision rather
+    # than a cleanup.
 
     permissions:
       contents: read
