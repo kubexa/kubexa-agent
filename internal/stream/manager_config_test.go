@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/kubexa/kubexa-agent/internal/ingestrules"
@@ -1385,5 +1386,76 @@ func TestAgeErrorLabelNamesBothOrigins(t *testing.T) {
 		if label == "age_too_old" {
 			t.Errorf("an age drop is counted under the retired value %q; both halves must name their origin", label)
 		}
+	}
+}
+
+// TestAnAgeDropReachesTheExposedMetricUnderItsNewLabel walks the whole
+// production path -- countAgeDrop, the shared IncStreamError, the real
+// registry -- and reads the label back off the exposed series.
+//
+// The two values it pins have no series on the live installation and cannot
+// get one without causing the thing they measure: since v0.11.4 there have
+// been no age drops at all, which is the point of those releases. Shipping a
+// label whose series has never existed is a shape this project has already
+// paid for once, so the exercise happens here instead of by deliberately
+// dropping somebody's logs. It covers everything except the scrape, and the
+// scrape is proven for this metric by the five other error_type values that
+// are live.
+func TestAnAgeDropReachesTheExposedMetricUnderItsNewLabel(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	_, streamMetrics, _ := newTestAgentMetrics(t, reg)
+	m := &streamManager{
+		counters:      ingestrules.NewCounters(),
+		streamMetrics: streamMetrics,
+		log:           logger.New("test"),
+	}
+
+	m.countAgeDrop("too_old", ageOriginRead)
+	m.countAgeDrop("too_old", ageOriginQueue)
+	m.countAgeDrop("too_old", ageOriginQueue)
+	m.countAgeDrop("future", "")
+
+	got := map[string]float64{}
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, f := range families {
+		if !strings.HasSuffix(f.GetName(), "grpc_stream_errors_total") {
+			continue
+		}
+		for _, mt := range f.GetMetric() {
+			for _, l := range mt.GetLabel() {
+				if l.GetName() == "error_type" {
+					got[l.GetValue()] = mt.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+
+	want := map[string]float64{
+		"age_too_old_on_read":  1,
+		"age_too_old_in_queue": 2,
+		"age_future":           1,
+	}
+	for label, n := range want {
+		v, ok := got[label]
+		if !ok {
+			t.Errorf("no exposed series carries error_type=%q; the drop was classified but is not observable", label)
+			continue
+		}
+		if v != n {
+			t.Errorf("error_type=%q counts %v, want %v", label, v, n)
+		}
+	}
+	if _, ok := got["age_too_old"]; ok {
+		t.Error("the retired error_type=\"age_too_old\" is still being exposed, so the two origins are still conflated on the wire")
+	}
+
+	// The heartbeat's cumulative is deliberately NOT split: both origins land
+	// in the same total, so KubexaAgentDropsTooOld fires on exactly what it
+	// fired on before this change.
+	if _, tooOld, _, _ := m.counters.Snapshot(); tooOld != 3 {
+		t.Errorf("heartbeat too_old total = %d, want 3 (both origins in one number, by design)", tooOld)
 	}
 }
