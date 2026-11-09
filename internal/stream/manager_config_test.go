@@ -356,7 +356,7 @@ func TestQueuedMessageAgeFilter(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			msg := logMessageAt(tc.ts)
-			if got := ageDropReason(msg, rules, now); got != tc.reason {
+			if got, _ := ageDropReason(msg, rules, now, now); got != tc.reason {
 				t.Errorf("want %q, got %q", tc.reason, got)
 			}
 		})
@@ -369,7 +369,7 @@ func TestQueuedMessageAgeFilter(t *testing.T) {
 func TestQueuedMessageAgeFilterOffByDefault(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	msg := logMessageAt(now.Add(-100 * 24 * time.Hour))
-	if got := ageDropReason(msg, ingestrules.Defaults(), now); got != "" {
+	if got, _ := ageDropReason(msg, ingestrules.Defaults(), now, now); got != "" {
 		t.Fatalf("with no rule pushed nothing may be dropped, got %q", got)
 	}
 }
@@ -385,7 +385,7 @@ func TestAgeFilterJudgesABatchByItsOldestEntry(t *testing.T) {
 			{Timestamp: now.Add(-48 * time.Hour).UnixNano()},
 		}},
 	}}
-	if got := ageDropReason(msg, rules, now); got != "too_old" {
+	if got, _ := ageDropReason(msg, rules, now, now); got != "too_old" {
 		t.Fatalf("want too_old, got %q", got)
 	}
 }
@@ -398,7 +398,7 @@ func TestAgeFilterIgnoresNonLogPayloads(t *testing.T) {
 	msg := &agentv1.AgentMessage{Payload: &agentv1.AgentMessage_Heartbeat{
 		Heartbeat: &agentv1.Heartbeat{TimestampUnixMs: now.Add(-72 * time.Hour).UnixMilli()},
 	}}
-	if got := ageDropReason(msg, rules, now); got != "" {
+	if got, _ := ageDropReason(msg, rules, now, now); got != "" {
 		t.Fatalf("only log batches are age-filtered, got %q", got)
 	}
 }
@@ -1287,5 +1287,103 @@ func TestRevertingToTheLastGoodSetClearsAStuckError(t *testing.T) {
 	rev, errStr, _ := m.ManagedState()
 	if rev != 5 || errStr != "" {
 		t.Fatalf("ManagedState = (%d, %q), want (5, \"\") -- the revert must clear the stuck config_error, not leave it stuck forever", rev, errStr)
+	}
+}
+
+// TestAgeDropOriginSeparatesAReReadFromAQueueExpiry pins the distinction the
+// single age_too_old label could not express.
+//
+// Both rows below are the same record at the same age, dropped for the same
+// reason, and only one of them is data loss. Conflating them is what let a
+// month of self-inflicted re-reads -- the agent re-reading lines it had already
+// delivered, on a four-hour kubelet timer -- report itself as loss, 88 firing
+// and 88 resolved, while a genuine 9.6-day export stall competed with that
+// noise and lost.
+//
+// It also pins the parameter order: `now` decides whether to drop and
+// `enqueuedAt` decides whose fault it is. Swap them in the function body and
+// the re-read row below returns in_queue, because enqueuedAt.Sub(ts) would be
+// measured from the wrong end.
+func TestAgeDropOriginSeparatesAReReadFromAQueueExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	rules := ingestrules.Rules{MaxSampleAge: 7 * 24 * time.Hour}
+	tenDaysOld := now.Add(-10 * 24 * time.Hour)
+
+	cases := []struct {
+		name       string
+		ts         time.Time
+		enqueuedAt time.Time
+		wantReason string
+		wantOrigin string
+		why        string
+	}{
+		{
+			name: "read a line that was already past the floor", ts: tenDaysOld,
+			enqueuedAt: now, wantReason: "too_old", wantOrigin: ageOriginRead,
+			why: "queued ten days after the line was written, so it was never deliverable and nothing was lost",
+		},
+		{
+			name: "queued while fresh, aged out waiting", ts: tenDaysOld,
+			enqueuedAt: tenDaysOld.Add(time.Minute), wantReason: "too_old", wantOrigin: ageOriginQueue,
+			why: "inside the floor when queued; this one IS loss and is the only row that should alarm anyone",
+		},
+		{
+			name: "no enqueue time recorded", ts: tenDaysOld,
+			enqueuedAt: time.Time{}, wantReason: "too_old", wantOrigin: ageOriginQueue,
+			why: "unknown must not become 'harmless': the default that cannot hide loss is the loss side",
+		},
+		{
+			name: "exactly at the floor when queued", ts: tenDaysOld,
+			enqueuedAt: tenDaysOld.Add(7 * 24 * time.Hour), wantReason: "too_old", wantOrigin: ageOriginQueue,
+			why: "the read path keeps a line exactly at the floor, so the boundary belongs to the queue side here too",
+		},
+		{
+			name: "a timestamp ahead of us is not an age", ts: now.Add(time.Hour),
+			enqueuedAt: now, wantReason: "future", wantOrigin: "",
+			why: "neither origin describes a future skew, so the label must stay as it was",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rules := rules
+			if tc.wantReason == "future" {
+				rules.MaxFutureSkew = 10 * time.Minute
+			}
+			reason, origin := ageDropReason(logMessageAt(tc.ts), rules, now, tc.enqueuedAt)
+			if reason != tc.wantReason {
+				t.Fatalf("reason = %q, want %q", reason, tc.wantReason)
+			}
+			if origin != tc.wantOrigin {
+				t.Errorf("origin = %q, want %q -- %s", origin, tc.wantOrigin, tc.why)
+			}
+		})
+	}
+}
+
+// TestAgeErrorLabelNamesBothOrigins pins the metric name itself. A drop
+// classified correctly and counted under the wrong error_type is still the
+// wrong metric, and this package has no other reader that would notice.
+//
+// The old value, age_too_old, must not come back for either half: nothing in
+// the platform matched it, and a query that keeps working while its meaning
+// narrows is worse than one that returns nothing.
+func TestAgeErrorLabelNamesBothOrigins(t *testing.T) {
+	cases := map[string]string{
+		ageErrorLabel("too_old", ageOriginRead):  "age_too_old_on_read",
+		ageErrorLabel("too_old", ageOriginQueue): "age_too_old_in_queue",
+		ageErrorLabel("future", ""):              "age_future",
+	}
+	for got, want := range cases {
+		if got != want {
+			t.Errorf("label %q, want %q", got, want)
+		}
+	}
+	for _, label := range []string{
+		ageErrorLabel("too_old", ageOriginRead),
+		ageErrorLabel("too_old", ageOriginQueue),
+	} {
+		if label == "age_too_old" {
+			t.Errorf("an age drop is counted under the retired value %q; both halves must name their origin", label)
+		}
 	}
 }

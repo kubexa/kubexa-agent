@@ -1719,24 +1719,83 @@ func shouldDeliverQueuedMessage(cfg *config.Config, msg *agentv1.AgentMessage) b
 // this function becomes per-entry BEFORE batching is introduced. Filtering
 // per-entry today would be unreachable code that changes what the drop counter
 // counts for no present benefit.
-func ageDropReason(msg *agentv1.AgentMessage, r ingestrules.Rules, now time.Time) string {
+// Its second return is the ORIGIN of an age drop, and the two origins are not
+// the same event:
+//
+//   - ageOriginRead -- the record was ALREADY past the floor when this agent
+//     put it in the queue. We read something we could never deliver, so
+//     nothing was lost: Loki either holds the line from the first delivery or
+//     never had it. Both age fixes of v0.11.3/v0.11.4 exist to make this case
+//     impossible, so a non-zero count here is a regression in the collector,
+//     not a loss event.
+//   - ageOriginQueue -- the record was inside the floor when it was queued and
+//     aged out while waiting to be delivered. That IS loss, and it is the
+//     thing this counter was always believed to mean.
+//
+// One label for both is what let a month of self-inflicted re-reads read as
+// data loss (88 firing + 88 resolved on a four-hour kubelet timer, which buried
+// a genuine 9.6-day export stall), and it is why the residue after v0.11.4
+// could only be attributed by reading a log line rather than a counter.
+//
+// now and enqueuedAt are both needed and are NOT interchangeable: now decides
+// whether to drop, enqueuedAt decides whose fault it is. Pinned together by
+// TestAgeDropOriginSeparatesAReReadFromAQueueExpiry.
+func ageDropReason(msg *agentv1.AgentMessage, r ingestrules.Rules, now, enqueuedAt time.Time) (string, string) {
 	if r.MaxSampleAge <= 0 && r.MaxFutureSkew <= 0 {
-		return ""
+		return "", ""
 	}
 	logs := msg.GetLogs()
 	if logs == nil || len(logs.GetEntries()) == 0 {
-		return ""
+		return "", ""
 	}
 	for _, e := range logs.GetEntries() {
 		ts := time.Unix(0, e.GetTimestamp())
 		if r.MaxSampleAge > 0 && now.Sub(ts) > r.MaxSampleAge {
-			return "too_old"
+			return "too_old", ageOrigin(ts, enqueuedAt, r.MaxSampleAge)
 		}
 		if r.MaxFutureSkew > 0 && ts.Sub(now) > r.MaxFutureSkew {
-			return "future"
+			// A timestamp ahead of us is not an age, so neither origin
+			// describes it and the label stays as it was.
+			return "future", ""
 		}
 	}
-	return ""
+	return "", ""
+}
+
+// The two origins of an age drop. They are label VALUES in
+// kubexa_grpc_stream_errors_total, as age_too_old_on_read and
+// age_too_old_in_queue.
+//
+// Both names are new on purpose. The old value, age_too_old, is retired rather
+// than kept for one of the two halves: nothing in the platform matches it (no
+// alert rule, no screen -- checked across all five repositories), and a
+// dashboard query that kept working while its meaning narrowed is worse than
+// one that returns nothing and sends its reader to look. An absent series here
+// is informative because the new names say what they are.
+const (
+	ageOriginRead  = "on_read"
+	ageOriginQueue = "in_queue"
+)
+
+// ageOrigin says whether a record that is too old NOW was already too old when
+// the agent queued it.
+//
+// enqueuedAt survives the disk spill -- internal/queue writes it as UnixNano
+// into each segment record and reads it back on recovery -- so this classifies
+// a recovered spill item correctly, which is the one case that previously could
+// only be guessed at from the startup log.
+func ageOrigin(ts, enqueuedAt time.Time, maxAge time.Duration) string {
+	if enqueuedAt.IsZero() {
+		// Nothing was recorded about when this item was queued, so we cannot
+		// claim it was fresh then. Counting it as our own loss is the only
+		// direction that cannot HIDE loss; defaulting the other way would
+		// quietly reclassify real loss as a harmless re-read.
+		return ageOriginQueue
+	}
+	if enqueuedAt.Sub(ts) > maxAge {
+		return ageOriginRead
+	}
+	return ageOriginQueue
 }
 
 // maxInflightBatches caps how many dequeued batches may await a gateway ack.
@@ -1855,8 +1914,8 @@ func (m *streamManager) drainBufferedQueue(ctx context.Context, stream agentv1.A
 				terminalIDs = append(terminalIDs, item.ID)
 				continue
 			}
-			if reason := ageDropReason(&msg, m.rules.Get(), time.Now()); reason != "" {
-				m.countAgeDrop(reason)
+			if reason, origin := ageDropReason(&msg, m.rules.Get(), time.Now(), item.EnqueuedAt); reason != "" {
+				m.countAgeDrop(reason, origin)
 				// Acked, not nacked: the record is not retryable. It will only
 				// get older, and a nack would replay it forever.
 				terminalIDs = append(terminalIDs, item.ID)
@@ -2082,7 +2141,14 @@ func (m *streamManager) reportSettleFailure(err error, msg, reason string, count
 
 // countAgeDrop records one age-filtered record under its reason, on both the
 // agent's own metrics and the cumulative counters the heartbeat reports.
-func (m *streamManager) countAgeDrop(reason string) {
+//
+// The origin reaches the agent's OWN metric only. The heartbeat's cumulative
+// (kubexa_gateway_agent_dropped_too_old_total, after the gateway relays it)
+// deliberately keeps counting both halves under one number: narrowing it would
+// change what KubexaAgentDropsTooOld fires on, across a version boundary, in
+// another repository -- and any age drop still deserves a look. Attribution is
+// a question the agent's own series now answers, which is where it was needed.
+func (m *streamManager) countAgeDrop(reason, origin string) {
 	switch reason {
 	case "too_old":
 		m.counters.IncTooOld()
@@ -2090,8 +2156,21 @@ func (m *streamManager) countAgeDrop(reason string) {
 		m.counters.IncFuture()
 	}
 	if m.streamMetrics != nil {
-		m.streamMetrics.IncStreamError("age_" + reason)
+		m.streamMetrics.IncStreamError(ageErrorLabel(reason, origin))
 	}
+}
+
+// ageErrorLabel builds the error_type value an age drop is counted under.
+//
+// It is a function rather than two lines inside countAgeDrop because the label
+// IS the observable: a correctly classified drop counted under the wrong name
+// is still the wrong metric, and nothing else in this package would notice.
+// Pinned by TestAgeErrorLabelNamesBothOrigins.
+func ageErrorLabel(reason, origin string) string {
+	if origin == "" {
+		return "age_" + reason
+	}
+	return "age_" + reason + "_" + origin
 }
 
 // ConfigSnapshot returns the latest config snapshot from the gateway, if any.
