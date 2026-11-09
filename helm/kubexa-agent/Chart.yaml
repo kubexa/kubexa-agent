@@ -424,8 +424,55 @@ type: application
 # deliverable. A zero max_sample_age still changes nothing.
 #
 # No install order constraint; the gateway is unaffected.
-version: 0.11.4
-appVersion: "0.11.4"
+# 0.11.5 moves appVersion to 0.11.5. No template change. It splits the label
+# that made the two fixes above hard to confirm.
+#
+# kubexa_grpc_stream_errors_total{error_type="age_too_old"} counted two
+# different events under one name: a line this agent re-read after it was
+# already past the floor (nothing lost -- Loki holds it from the first
+# delivery), and a line that was inside the floor when queued and expired
+# waiting to be delivered (that one IS loss). Only the second deserves
+# attention, and one label for both is why a month of self-inflicted re-reads
+# read as data loss, and why the residue after 0.11.4 could only be attributed
+# from a startup log line rather than measured.
+#
+# The drop site already has what it needs: queue.Item.EnqueuedAt, which
+# internal/queue writes into each spill segment and reads back on recovery, so
+# a recovered spill item is classified correctly too. If it is missing the drop
+# counts as loss -- the only default that cannot HIDE loss.
+#
+#   age_too_old            (retired)
+#   age_too_old_on_read    already past the floor when queued; not loss
+#   age_too_old_in_queue   expired while waiting; this is loss
+#
+# Both values are new on purpose. Nothing in the platform matched the old one
+# -- no alert rule and no screen, checked across all five repositories -- so a
+# dashboard query that kept working while its meaning narrowed would be worse
+# than one that returns nothing and sends its reader to look.
+#
+# The heartbeat's cumulative is deliberately NOT split, so
+# KubexaAgentDropsTooOld fires on exactly what it fired on before: narrowing it
+# would change an alert's meaning across a version boundary in another
+# repository, and any age drop still deserves a look. Attribution is now a
+# question the agent's own series answers, which is where it was needed.
+#
+# It also stops three HTTP servers holding a terminating pod open. A graceful
+# http.Server.Shutdown waits for every connection to go idle, and a scraper's
+# or the kubelet's keep-alive connection is sometimes not seen as idle at all:
+# measured roughly one run in 25 waiting out the whole five-second budget
+# against ~40us otherwise, and 30 out of 30 fast once the client's idle
+# connections were closed first. /metrics is scraped by VictoriaMetrics and
+# /healthz is probed by the kubelet, both over keep-alive, so this was a
+# production path -- invisible because cmd/agent treats a DeadlineExceeded as a
+# clean close. All three servers (metrics, health, pprof) now warn and force
+# the connections closed instead of returning a swallowed error. The budget
+# itself is unchanged: five seconds of a terminating pod, 4% of the time, in
+# parallel with every other component's shutdown, did not justify shortening a
+# window a long pprof profile legitimately uses.
+#
+# No install order constraint; the gateway is unaffected.
+version: 0.11.5
+appVersion: "0.11.5"
 keywords:
   - kubexa
   - observability
