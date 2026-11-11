@@ -470,9 +470,45 @@ type: application
 # parallel with every other component's shutdown, did not justify shortening a
 # window a long pprof profile legitimately uses.
 #
+# 0.11.6 stops the agent sending the same log line again after every
+# reconnect, and stores what it has sent so a restart does not undo that.
+#
+# The joiner holds a record until the next line arrives, so on a quiet pod the
+# LAST line is delivered by the end-of-stream flush -- and that flush advanced
+# no checkpoint. The cursor therefore sat permanently one record behind the
+# stream, every reconnect resumed from before a line already sent, and sent it
+# again. kubelet closes an idle stream on its own clock, so this repeated for
+# as long as the pod stayed quiet. Measured on apexcrawl 2026-11-11: one
+# cert-manager-webhook line stored SEVEN times, 137 of cert-manager-cainjector-s
+# 432 stored lines (32%) copies, and ~21 permanent Loki 400s a day once a
+# stream-s head moved more than max_chunk_age/2 past the copy -- which is what
+# the platform had been reading as late telemetry loss. It never was loss:
+# every rejection was "N out of N" stale, and the lines were already stored.
+#
+# Three changes, all in the agent: the end-of-stream flush now advances the
+# cursor; a bounded set of (read time, payload digest) pairs covering what a
+# resume can replay is checked before anything is sent, and is persisted in the
+# checkpoint database so an upgrade does not reopen the hole; and the resume
+# point is taken in the Kubernetes log API-s own timestamp frame instead of the
+# record-s clock, which a workload sets from its own JSON "time" field -- a
+# workload running ahead of the node was asking kubelet to start past lines it
+# had not read yet. Skipped replays are counted in a new
+# agent_log_collector_replayed_skipped_total, deliberately NOT as a drop:
+# nothing is lost, and filing it under drops would retell the lie that a month
+# of self-inflicted re-reads already told once.
+#
+# Also: the stream backoff resets after a read that delivered something. It was
+# reset only when the read returned no error, which a follow stream never does
+# -- it ends in io.EOF by construction -- so the delay ratcheted to its 30s
+# ceiling over a pod-s life and stayed there (apexcrawl read attempt=16 at 35h).
+#
+# The checkpoint database gains two columns, added in place on open. A PVC
+# outlives the agent that wrote it, so an older file opens, keeps the position
+# already in it, and resumes on the record clock until a read time is recorded.
+#
 # No install order constraint; the gateway is unaffected.
-version: 0.11.5
-appVersion: "0.11.5"
+version: 0.11.6
+appVersion: "0.11.6"
 keywords:
   - kubexa
   - observability
