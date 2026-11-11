@@ -140,3 +140,44 @@ func TestParseLineWithoutPrefixKeepsWholeLineAsRaw(t *testing.T) {
 		t.Fatalf("raw = %q", got.Raw)
 	}
 }
+
+// TestParseLineKeepsTheKubeletReadTimeWhenJSONOverridesTheTimestamp pins the
+// one timestamp in a record that the agent can trust as a position.
+//
+// Timestamp is the record's own clock and is deliberately overridden by a
+// JSON "time" field, because that is what a reader wants to see. But the
+// Kubernetes log API filters by ITS timestamp, and it is the only one that is
+// assigned per line, in order, at nanosecond precision, by something other
+// than the workload. Resuming or de-duplicating against an application's own
+// clock is resuming against a value the application may repeat, reorder or
+// set to anything at all.
+func TestParseLineKeepsTheKubeletReadTimeWhenJSONOverridesTheTimestamp(t *testing.T) {
+	t.Parallel()
+
+	const line = `2026-11-11T08:14:51.123456789Z {"time":"2020-01-01T00:00:00Z","msg":"hello"}`
+	parsed := ParseLine(line, time.Unix(0, 0))
+
+	wantRead := time.Date(2026, 11, 11, 8, 14, 51, 123456789, time.UTC)
+	if !parsed.ReadTime.Equal(wantRead) {
+		t.Errorf("ReadTime = %v, want %v (the kubelet prefix, kept even though the payload carried its own time)", parsed.ReadTime, wantRead)
+	}
+	wantTS := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if !parsed.Timestamp.Equal(wantTS) {
+		t.Errorf("Timestamp = %v, want %v (the payload's own clock still wins for the record)", parsed.Timestamp, wantTS)
+	}
+}
+
+// A line with no kubelet prefix leaves ReadTime zero rather than borrowing the
+// fallback: every caller of ReadTime treats zero as "no position here", and a
+// borrowed wall-clock reading would be a position that means nothing.
+func TestParseLineLeavesReadTimeZeroWithoutAPrefix(t *testing.T) {
+	t.Parallel()
+
+	parsed := ParseLine("plain line, no prefix", time.Unix(99, 0))
+	if !parsed.ReadTime.IsZero() {
+		t.Errorf("ReadTime = %v, want zero", parsed.ReadTime)
+	}
+	if !parsed.Timestamp.Equal(time.Unix(99, 0)) {
+		t.Errorf("Timestamp = %v, want the fallback", parsed.Timestamp)
+	}
+}

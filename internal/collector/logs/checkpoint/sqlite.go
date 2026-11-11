@@ -3,10 +3,12 @@ package checkpoint
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,8 +17,8 @@ import (
 
 const (
 	sqliteDriverName = "sqlite"
-	dbFileName         = "streams.db"
-	schemaDDL          = `
+	dbFileName       = "streams.db"
+	schemaDDL        = `
 CREATE TABLE IF NOT EXISTS log_stream_checkpoints (
   pod_uid           TEXT NOT NULL,
   container_name    TEXT NOT NULL,
@@ -26,6 +28,18 @@ CREATE TABLE IF NOT EXISTS log_stream_checkpoints (
   updated_at_ns     INTEGER NOT NULL,
   PRIMARY KEY (pod_uid, container_name)
 );`
+)
+
+var (
+	// addedColumns are applied to databases created before they existed. A
+	// PVC outlives the agent that wrote it, so the first upgrade past this
+	// point opens a table with neither column; SQLite has no ADD COLUMN IF
+	// NOT EXISTS, so a duplicate-column error from a newer file is expected
+	// and ignored.
+	addedColumns = []string{
+		`ALTER TABLE log_stream_checkpoints ADD COLUMN last_read_ns INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE log_stream_checkpoints ADD COLUMN recent_json TEXT NOT NULL DEFAULT ''`,
+	}
 )
 
 // SQLiteStore implements Store using a local SQLite database file.
@@ -78,62 +92,117 @@ func (s *SQLiteStore) init() error {
 	if _, err := s.db.Exec(schemaDDL); err != nil {
 		return fmt.Errorf("checkpoint schema: %w", err)
 	}
+	for _, stmt := range addedColumns {
+		if _, err := s.db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
+			return fmt.Errorf("checkpoint schema upgrade: %w", err)
+		}
+	}
 	return nil
 }
 
-// Load returns the last processed log timestamp for key.
-func (s *SQLiteStore) Load(ctx context.Context, key Key) (time.Time, bool, error) {
+// isDuplicateColumn reports the one ALTER failure that means the column is
+// already there. Matched on the message because modernc.org/sqlite's error
+// does not expose the extended result code through a comparable sentinel.
+func isDuplicateColumn(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
+}
+
+// Load returns the stream's position for key.
+func (s *SQLiteStore) Load(ctx context.Context, key Key) (Position, bool, error) {
 	if err := validateKey(key); err != nil {
-		return time.Time{}, false, err
+		return Position{}, false, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var lastNS int64
+	var (
+		lastNS     int64
+		lastReadNS int64
+		recentJSON string
+	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT last_processed_ns FROM log_stream_checkpoints WHERE pod_uid = ? AND container_name = ?`,
+		`SELECT last_processed_ns, last_read_ns, recent_json
+		   FROM log_stream_checkpoints WHERE pod_uid = ? AND container_name = ?`,
 		key.PodUID, key.Container,
-	).Scan(&lastNS)
+	).Scan(&lastNS, &lastReadNS, &recentJSON)
 	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, false, nil
+		return Position{}, false, nil
 	}
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf("load checkpoint: %w", err)
+		return Position{}, false, fmt.Errorf("load checkpoint: %w", err)
 	}
-	return time.Unix(0, lastNS).UTC(), true, nil
+
+	pos := Position{LastProcessed: time.Unix(0, lastNS).UTC()}
+	if lastReadNS > 0 {
+		pos.LastRead = time.Unix(0, lastReadNS).UTC()
+	}
+	// A row written before these columns existed, or one whose set was
+	// unreadable, resumes with no de-duplication rather than no position:
+	// one replayed record beats refusing to resume at all.
+	if recentJSON != "" {
+		var recent []Delivered
+		if err := json.Unmarshal([]byte(recentJSON), &recent); err == nil {
+			for i := range recent {
+				recent[i].ReadTime = recent[i].ReadTime.UTC()
+			}
+			pos.Recent = recent
+		}
+	}
+	return pos, true, nil
 }
 
-// Save records the last processed log timestamp for key.
-func (s *SQLiteStore) Save(ctx context.Context, key Key, lastProcessed time.Time, meta Metadata) error {
+// Save records the stream's position for key.
+func (s *SQLiteStore) Save(ctx context.Context, key Key, pos Position, meta Metadata) error {
 	if err := validateKey(key); err != nil {
 		return err
 	}
-	if lastProcessed.IsZero() {
+	if pos.LastProcessed.IsZero() {
 		return errors.New("last processed timestamp is zero")
 	}
 
-	lastProcessed = lastProcessed.UTC()
+	lastProcessed := pos.LastProcessed.UTC()
+	var lastReadNS int64
+	if !pos.LastRead.IsZero() {
+		lastReadNS = pos.LastRead.UTC().UnixNano()
+	}
+	recentJSON := ""
+	if len(pos.Recent) > 0 {
+		if encoded, err := json.Marshal(pos.Recent); err == nil {
+			recentJSON = string(encoded)
+		}
+	}
 	now := time.Now().UTC()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// The guard admits progress in EITHER frame. A workload whose own clock
+	// stands still or runs backwards still reads forward, and guarding on the
+	// record clock alone would freeze the de-duplication set at the moment
+	// that clock stopped advancing -- leaving the resume replaying records
+	// nothing remembers sending.
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO log_stream_checkpoints (
-  pod_uid, container_name, namespace, pod_name, last_processed_ns, updated_at_ns
-) VALUES (?, ?, ?, ?, ?, ?)
+  pod_uid, container_name, namespace, pod_name, last_processed_ns,
+  last_read_ns, recent_json, updated_at_ns
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(pod_uid, container_name) DO UPDATE SET
   namespace = excluded.namespace,
   pod_name = excluded.pod_name,
   last_processed_ns = excluded.last_processed_ns,
+  last_read_ns = excluded.last_read_ns,
+  recent_json = excluded.recent_json,
   updated_at_ns = excluded.updated_at_ns
-WHERE excluded.last_processed_ns > log_stream_checkpoints.last_processed_ns`,
+WHERE excluded.last_processed_ns > log_stream_checkpoints.last_processed_ns
+   OR excluded.last_read_ns > log_stream_checkpoints.last_read_ns`,
 		key.PodUID,
 		key.Container,
 		meta.Namespace,
 		meta.PodName,
 		lastProcessed.UnixNano(),
+		lastReadNS,
+		recentJSON,
 		now.UnixNano(),
 	)
 	if err != nil {

@@ -199,7 +199,7 @@ func (c *Collector) runStream(parent context.Context, target streamTarget) {
 			continue
 		}
 
-		err := c.consumeStream(streamCtx, log, target, cursor)
+		delivered, err := c.consumeStream(streamCtx, log, target, cursor)
 		if err == nil {
 			if !target.rule.follow {
 				return
@@ -224,7 +224,12 @@ func (c *Collector) runStream(parent context.Context, target streamTarget) {
 			continue
 		}
 
-		log.Warn("log stream ended; retrying", logger.F("error", err.Error()), logger.F("attempt", attempt))
+		attempt = attemptAfterRead(attempt, delivered)
+		log.Warn("log stream ended; retrying",
+			logger.F("error", err.Error()),
+			logger.F("attempt", attempt),
+			logger.F("delivered", delivered),
+		)
 		delay := streamBackoff(attempt, rng)
 		attempt++
 		if err := c.sleep(streamCtx, delay); err != nil {
@@ -345,7 +350,28 @@ func classifyStreamError(err error) string {
 	return "io"
 }
 
-func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, target streamTarget, cursor *streamCursor) error {
+// attemptAfterRead decides whether the read that just ended counts against
+// the backoff. The caller still increments for the failure itself; this only
+// says where that count starts from.
+//
+// A follow stream ALWAYS ends in an error -- io.EOF, by construction, every
+// time kubelet closes it for being idle. So "did it return an error" cannot
+// tell a healthy stream from a broken one, and the counter only ever climbed:
+// apexcrawl's agent was reading attempt=16 after 35 hours, meaning every
+// reconnect waited the full streamBackoffMax whether or not the previous read
+// had worked perfectly. What does tell them apart is whether anything was
+// read.
+func attemptAfterRead(attempt, delivered int) int {
+	if delivered > 0 {
+		return 0
+	}
+	return attempt
+}
+
+// consumeStream reads one stream to its end and reports how many records it
+// delivered, which is the only signal that separates a stream working
+// normally from one failing to open at all.
+func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, target streamTarget, cursor *streamCursor) (int, error) {
 	plan := planLogRead(target, cursor, c.rules.Get().MaxSampleAge, time.Now())
 	opts := plan.opts
 	if !plan.clampedFrom.IsZero() {
@@ -361,9 +387,11 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 		)
 	}
 
+	delivered := 0
+
 	reader, err := c.kube.Logs(ctx, target.pod.Namespace, target.pod.Name, target.container, opts)
 	if err != nil {
-		return fmt.Errorf("open log stream: %w", err)
+		return delivered, fmt.Errorf("open log stream: %w", err)
 	}
 	defer func() { _ = reader.Close() }()
 
@@ -382,18 +410,18 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 	// time, so a shared joiner would attach one program's frames to another's
 	// panic.
 	join := newJoiner(maxJoinedBytes, maxJoinHold)
-	defer c.flushJoiner(ctx, log, target, join)
+	defer c.flushJoiner(ctx, log, target, join, cursor)
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return delivered, err
 		}
 		raw, truncated, err := lr.next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return err
+			return delivered, err
 		}
 		line := string(raw)
 		c.metrics.addBytes(len(line))
@@ -403,33 +431,53 @@ func (c *Collector) consumeStream(ctx context.Context, log *logger.Logger, targe
 			continue
 		}
 		for _, record := range join.Add(parsed, time.Now()) {
+			// A resume rewinds past the last line it handled, so the start of
+			// every reconnected stream is lines this one has already sent.
+			// Delivering them again is not free: it stores the line twice for
+			// whoever reads the logs, and once the stream's head moves far
+			// enough ahead Loki refuses the copy outright and the whole batch
+			// fails with it.
+			if cursor.alreadyDelivered(record) {
+				c.metrics.incReplayedSkipped(target.pod.Namespace, target.pod.Name)
+				continue
+			}
 			if err := c.handleLogLine(ctx, target, record); err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return err
+					return delivered, err
 				}
 				log.Warn("failed to handle log line", logger.F("error", err.Error()))
 				continue
 			}
-			cursor.markProcessed(record.Timestamp)
+			cursor.markDelivered(record)
+			delivered++
 		}
 	}
 	if target.rule.follow {
-		return io.EOF
+		return delivered, io.EOF
 	}
-	return nil
+	return delivered, nil
 }
 
-// flushJoiner writes out any record still held by the joiner when a stream's
-// read loop ends. streamCtx (the stream's own context) is deliberately not
-// used to bound the write: this runs on every exit path, including teardown
-// (parent context canceled, or the stream torn down by
-// reconcileStreams/stopAllStreams), when streamCtx is already Done. Reusing
-// it would make the write's context.WithTimeout expire immediately and drop
-// a record that is often the tail of a multi-line stack trace still inside
-// the joiner's hold window — and unlike a reconnect, a genuine teardown never
-// gets a second chance to send it. The replacement context is bounded by
-// writeTimeout so a stuck downstream queue still cannot hold shutdown open.
-func (c *Collector) flushJoiner(streamCtx context.Context, log *logger.Logger, target streamTarget, join *joiner) {
+// flushJoiner writes out any record still held by the joiner when a stream
+// ends, on a context that outlives the stream's own -- and tells the cursor
+// what it delivered.
+//
+// The detached context is why this exists at all: a stream tears down on pod
+// deletion, rule removal and agent shutdown as well as on reconnect, and on a
+// genuine teardown the record inside the joiner's hold window -- often the
+// tail of a multi-line stack trace -- never gets a second chance to be sent.
+// The replacement context is bounded by writeTimeout so a stuck downstream
+// queue still cannot hold shutdown open.
+//
+// Marking the cursor is the other half, and it was missing. On a quiet stream
+// the record flushed here is the LAST line, every time: the joiner holds a
+// record until the next line arrives, and on a pod that writes once a day the
+// next line is a day away. While this advanced nothing, the cursor sat
+// permanently one record behind the stream, so every reconnect resumed from
+// before a line that had already been sent, and sent it again. Measured on
+// apexcrawl 2026-11-11: one cert-manager-webhook line from 11-08 stored seven
+// times and still being re-sent three days later.
+func (c *Collector) flushJoiner(streamCtx context.Context, log *logger.Logger, target streamTarget, join *joiner, cursor *streamCursor) {
 	records := join.Flush()
 	if len(records) == 0 {
 		return
@@ -437,9 +485,15 @@ func (c *Collector) flushJoiner(streamCtx context.Context, log *logger.Logger, t
 	flushCtx, cancel := context.WithTimeout(context.Background(), c.writeTimeout)
 	defer cancel()
 	for _, record := range records {
+		if cursor.alreadyDelivered(record) {
+			c.metrics.incReplayedSkipped(target.pod.Namespace, target.pod.Name)
+			continue
+		}
 		if err := c.handleLogLine(flushCtx, target, record); err != nil {
 			log.Warn("failed to handle log line", logger.F("error", err.Error()))
+			continue
 		}
+		cursor.markDelivered(record)
 	}
 }
 

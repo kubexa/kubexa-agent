@@ -17,7 +17,7 @@ import (
 	commonv1 "github.com/kubexa/kubexa-agent/proto/gen/go/common/v1"
 )
 
-func TestStreamCursor_markProcessed(t *testing.T) {
+func TestStreamCursor_markDelivered(t *testing.T) {
 	t.Parallel()
 
 	cur := &streamCursor{}
@@ -25,9 +25,9 @@ func TestStreamCursor_markProcessed(t *testing.T) {
 	ts2 := time.Date(2024, 6, 1, 12, 0, 1, 0, time.UTC)
 	tsOlder := time.Date(2024, 6, 1, 11, 59, 0, 0, time.UTC)
 
-	cur.markProcessed(ts1)
-	cur.markProcessed(tsOlder)
-	cur.markProcessed(ts2)
+	cur.markDelivered(deliveredLine(ts1, "one"))
+	cur.markDelivered(deliveredLine(tsOlder, "older"))
+	cur.markDelivered(deliveredLine(ts2, "two"))
 
 	since, ok := cur.sinceForReconnect(reconnectSinceOverlap)
 	if !ok {
@@ -53,7 +53,7 @@ func TestStreamCursor_sinceForReconnect_zeroOverlap(t *testing.T) {
 
 	cur := &streamCursor{}
 	ts := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
-	cur.markProcessed(ts)
+	cur.markDelivered(deliveredLine(ts, "line"))
 
 	since, ok := cur.sinceForReconnect(0)
 	if !ok {
@@ -68,7 +68,10 @@ func TestStreamCursor_nilSafe(t *testing.T) {
 	t.Parallel()
 
 	var cur *streamCursor
-	cur.markProcessed(time.Now())
+	cur.markDelivered(deliveredLine(time.Now(), "line"))
+	if cur.alreadyDelivered(deliveredLine(time.Now(), "line")) {
+		t.Fatal("nil cursor should not claim a record was delivered")
+	}
 	if _, ok := cur.sinceForReconnect(time.Second); ok {
 		t.Fatal("nil cursor should not report resume point")
 	}
@@ -149,7 +152,7 @@ func TestFlushJoinerDeliversAPendingRecordAfterTheStreamContextIsCanceled(t *tes
 	streamCtx, cancel := context.WithCancel(context.Background())
 	cancel() // teardown: the stream's own context is already Done.
 
-	c.flushJoiner(streamCtx, c.log, target, join)
+	c.flushJoiner(streamCtx, c.log, target, join, &streamCursor{})
 
 	if len(w.entries) != 1 {
 		t.Fatalf("writes = %d, want 1 (pending record must still reach the writer)", len(w.entries))
@@ -328,7 +331,7 @@ func TestEachLogMessageCarriesExactlyOneEntry(t *testing.T) {
 	for i, line := range []string{"first line", "second line"} {
 		join := newJoiner(maxJoinedBytes, maxJoinHold)
 		join.Add(ParsedLine{Message: line, Raw: []byte(line), Timestamp: time.Unix(0, int64(i+1))}, time.Now())
-		c.flushJoiner(context.Background(), c.log, target, join)
+		c.flushJoiner(context.Background(), c.log, target, join, &streamCursor{})
 	}
 
 	if len(w.batchSizes) != 2 {
@@ -437,5 +440,127 @@ func TestPlanLogReadClampsAnExpiredCheckpoint(t *testing.T) {
 	want := now.Add(-168 * time.Hour)
 	if !plan.opts.SinceTime.Equal(want) {
 		t.Fatalf("SinceTime = %v, want the floor %v", plan.opts.SinceTime, want)
+	}
+}
+
+// TestFlushJoinerMarksWhatItDelivered is the defect that made a quiet pod's
+// last line immortal.
+//
+// The joiner holds a record until the next line arrives or the stream ends,
+// so on a quiet stream the LAST line is delivered by flushJoiner at EOF --
+// and flushJoiner advanced nothing. The cursor stayed one record behind
+// forever, every reconnect resumed before a line that had already been sent,
+// and the line was delivered again. Measured on apexcrawl 2026-11-11: a
+// single cert-manager-webhook line from 11-08 stored seven times, still being
+// re-sent three days later, by then far enough behind its own stream's head
+// that Loki refused it outright -- which is what the platform had been
+// reading as late telemetry loss.
+func TestFlushJoinerMarksWhatItDelivered(t *testing.T) {
+	m, err := newMetrics(prometheus.NewRegistry())
+	if err != nil {
+		t.Fatalf("newMetrics: %v", err)
+	}
+
+	w := &recordingWriter{}
+	c := &Collector{
+		writer:       w,
+		log:          logger.New("test"),
+		metrics:      m,
+		agentMeta:    &commonv1.AgentMetadata{},
+		workloads:    newWorkloadResolver(fake.NewSimpleClientset(), time.Minute),
+		writeTimeout: 50 * time.Millisecond,
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "quiet-1", Namespace: "cert-manager"}}
+	target := streamTarget{pod: pod, container: "app"}
+
+	readTime := time.Date(2026, 11, 8, 0, 8, 22, 0, time.UTC)
+	record := ParsedLine{
+		Message:   "serving webhook",
+		Raw:       []byte("serving webhook"),
+		Timestamp: readTime,
+		ReadTime:  readTime,
+	}
+
+	join := newJoiner(maxJoinedBytes, maxJoinHold)
+	join.Add(record, time.Now())
+
+	cursor := &streamCursor{}
+	c.flushJoiner(context.Background(), c.log, target, join, cursor)
+
+	if len(w.entries) != 1 {
+		t.Fatalf("writes = %d, want 1", len(w.entries))
+	}
+	if !cursor.alreadyDelivered(record) {
+		t.Error("flushJoiner delivered a record the cursor does not know about; the next resume sends it again")
+	}
+	since, ok := cursor.sinceForReconnect(reconnectSinceOverlap)
+	if !ok {
+		t.Fatal("sinceForReconnect() = false after flushJoiner delivered a record; the stream resumes from before it")
+	}
+	if want := readTime.Add(-reconnectSinceOverlap); !since.Equal(want) {
+		t.Errorf("since = %v, want %v", since, want)
+	}
+}
+
+// A duplicate the resume replays must not reach the writer at all. Dropping it
+// at the consumer, or letting Loki refuse it, costs a batch and an alert for a
+// line that is already stored.
+func TestAReplayedRecordIsNotDeliveredTwice(t *testing.T) {
+	m, err := newMetrics(prometheus.NewRegistry())
+	if err != nil {
+		t.Fatalf("newMetrics: %v", err)
+	}
+
+	w := &recordingWriter{}
+	c := &Collector{
+		writer:       w,
+		log:          logger.New("test"),
+		metrics:      m,
+		agentMeta:    &commonv1.AgentMetadata{},
+		workloads:    newWorkloadResolver(fake.NewSimpleClientset(), time.Minute),
+		writeTimeout: 50 * time.Millisecond,
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "quiet-2", Namespace: "cert-manager"}}
+	target := streamTarget{pod: pod, container: "app"}
+
+	readTime := time.Date(2026, 11, 8, 0, 8, 22, 0, time.UTC)
+	record := ParsedLine{
+		Message:   "serving webhook",
+		Raw:       []byte("serving webhook"),
+		Timestamp: readTime,
+		ReadTime:  readTime,
+	}
+	cursor := &streamCursor{}
+
+	for i := 0; i < 3; i++ {
+		join := newJoiner(maxJoinedBytes, maxJoinHold)
+		join.Add(record, time.Now())
+		c.flushJoiner(context.Background(), c.log, target, join, cursor)
+	}
+
+	if len(w.entries) != 1 {
+		t.Fatalf("writes = %d, want 1: the same record was replayed by two reconnects and must only reach Loki once", len(w.entries))
+	}
+}
+
+// TestAttemptAfterReadResetsWhenAStreamDeliveredSomething keeps the backoff a
+// backoff.
+//
+// attempt was reset only when consumeStream returned nil, and a follow stream
+// never does -- it returns io.EOF by construction every time kubelet closes
+// it. So the delay ratcheted to streamBackoffMax over a pod's life and stayed
+// there: apexcrawl's agent was reading attempt=16 after 35 hours, meaning
+// every reconnect waited the full 30s whether or not the previous read had
+// worked perfectly.
+func TestAttemptAfterReadResetsWhenAStreamDeliveredSomething(t *testing.T) {
+	t.Parallel()
+
+	if got := attemptAfterRead(16, 1); got != 0 {
+		t.Errorf("attemptAfterRead(16, delivered=1) = %d, want 0: a stream that read lines is not failing", got)
+	}
+	// A read that delivered nothing leaves the count alone; the caller's own
+	// increment is what advances the backoff.
+	if got := attemptAfterRead(3, 0); got != 3 {
+		t.Errorf("attemptAfterRead(3, delivered=0) = %d, want 3", got)
 	}
 }

@@ -20,6 +20,7 @@ type metrics struct {
 	bytesProcessedTotal   prometheus.Counter
 	checkpointWritesTotal prometheus.Counter
 	checkpointErrorsTotal *prometheus.CounterVec
+	replayedSkippedTotal  *prometheus.CounterVec
 }
 
 func newMetrics(reg prometheus.Registerer) (*metrics, error) {
@@ -89,6 +90,14 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 			},
 			[]string{"op"},
 		),
+		replayedSkippedTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricNamespace,
+				Name:      "log_collector_replayed_skipped_total",
+				Help:      "Records a reconnect replayed that the stream had already delivered, and did not send again.",
+			},
+			[]string{"namespace", "pod"},
+		),
 	}
 
 	collectors := []prometheus.Collector{
@@ -100,6 +109,7 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		m.bytesProcessedTotal,
 		m.checkpointWritesTotal,
 		m.checkpointErrorsTotal,
+		m.replayedSkippedTotal,
 	}
 	for _, c := range collectors {
 		if err := reg.Register(c); err != nil {
@@ -121,6 +131,17 @@ func (m *metrics) incTruncated(namespace, pod string) {
 		return
 	}
 	m.truncatedTotal.WithLabelValues(namespace, pod).Inc()
+}
+
+// incReplayedSkipped counts what a resume replayed and this stream refused to
+// send twice. It is deliberately NOT a drop: nothing was lost, the record is
+// already stored, and filing it under dropped_total would re-tell exactly the
+// lie that a month of self-inflicted re-reads already told once.
+func (m *metrics) incReplayedSkipped(namespace, pod string) {
+	if m == nil {
+		return
+	}
+	m.replayedSkippedTotal.WithLabelValues(namespace, pod).Inc()
 }
 
 func (m *metrics) incDropped(namespace, pod, reason string) {

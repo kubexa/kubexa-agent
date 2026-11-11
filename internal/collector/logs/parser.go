@@ -21,6 +21,18 @@ type ParsedLine struct {
 	Level     agentv1.LogLevel
 	Raw       []byte
 	Timestamp time.Time
+	// ReadTime is the Kubernetes log API's own timestamp for this line, kept
+	// separately because Timestamp above is overridden by a JSON "time" field
+	// whenever the payload carries one.
+	//
+	// It is the only clock in a record the agent may use as a POSITION. The
+	// log API filters by it, assigns it per line in order at nanosecond
+	// precision, and nothing the workload writes can change it. A position
+	// taken from the payload's own clock is a position the workload can
+	// repeat, reorder, or set to 2020 -- and the resume then asks kubelet for
+	// a moment in a different frame than the one it answers in. Zero when the
+	// line carried no prefix.
+	ReadTime time.Time
 	// Truncated reports that the reader cut this line at the pushed
 	// max_line_bytes. It rides on the record through the joiner and reaches
 	// Loki as the structured-metadata key `truncated="true"`.
@@ -43,8 +55,10 @@ func ParseLine(line string, fallback time.Time) ParsedLine {
 	level := agentv1.LogLevel_LOG_LEVEL_UNSPECIFIED
 
 	// Kubernetes log API prefix: "2006-01-02T15:04:05.999999999Z payload"
+	readTime := time.Time{}
 	if parsedTS, rest, ok := splitK8sLogPrefix(line); ok {
 		ts = parsedTS
+		readTime = parsedTS
 		msg = rest
 	}
 
@@ -70,6 +84,7 @@ func ParseLine(line string, fallback time.Time) ParsedLine {
 		Level:     level,
 		Raw:       raw,
 		Timestamp: ts,
+		ReadTime:  readTime,
 	}
 }
 
