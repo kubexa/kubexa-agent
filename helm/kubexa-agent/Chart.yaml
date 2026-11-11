@@ -518,9 +518,25 @@ type: application
 # without complaint. Paying continuous disk writes to spare the cheap case
 # would be the worst trade available. Install 0.11.7 rather than 0.11.6.
 #
+# 0.11.8 stops a stream losing its last checkpoint when it is torn down.
+#
+# A stream rarely ends politely: pod deletion, rule removal and agent shutdown
+# all cancel its context before the deferred close runs, so the final position
+# write went out on a context that was already Done and failed. The last
+# position of every stream torn down that way was never written, and the next
+# start resumed from an older point and re-read what it had already sent --
+# the same defect 0.11.6 was cut for, reached by a different road. The write
+# is now detached from the stream context and bounded at 5s instead, which is
+# what the joiner-s own end-of-stream flush has always done two lines away.
+#
+# Found by the counter 0.11.6/0.11.7 gave a reason to read:
+# agent_log_collector_checkpoint_errors_total{op="save"} went to 1 on
+# apexcrawl at exactly the minute a Job pod-s stream ended, fifteen minutes
+# after those versions were deployed. The counter was always there.
+#
 # No install order constraint; the gateway is unaffected.
-version: 0.11.7
-appVersion: "0.11.7"
+version: 0.11.8
+appVersion: "0.11.8"
 keywords:
   - kubexa
   - observability
