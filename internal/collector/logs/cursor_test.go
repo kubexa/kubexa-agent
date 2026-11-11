@@ -11,10 +11,11 @@ import (
 )
 
 type mockCheckpointStore struct {
-	mu    sync.Mutex
-	data  map[checkpoint.Key]checkpoint.Position
-	loads int
-	saves int
+	mu         sync.Mutex
+	data       map[checkpoint.Key]checkpoint.Position
+	loads      int
+	saves      int
+	sawDoneCtx bool
 }
 
 func (m *mockCheckpointStore) Load(_ context.Context, key checkpoint.Key) (checkpoint.Position, bool, error) {
@@ -25,9 +26,12 @@ func (m *mockCheckpointStore) Load(_ context.Context, key checkpoint.Key) (check
 	return pos, ok, nil
 }
 
-func (m *mockCheckpointStore) Save(_ context.Context, key checkpoint.Key, pos checkpoint.Position, _ checkpoint.Metadata) error {
+func (m *mockCheckpointStore) Save(ctx context.Context, key checkpoint.Key, pos checkpoint.Position, _ checkpoint.Metadata) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if ctx.Err() != nil {
+		m.sawDoneCtx = true
+	}
 	m.saves++
 	if m.data == nil {
 		m.data = make(map[checkpoint.Key]checkpoint.Position)
@@ -281,5 +285,50 @@ func TestCursorPersistsFarLessThanItRemembers(t *testing.T) {
 	last := got.Recent[len(got.Recent)-1]
 	if !last.ReadTime.Equal(base.Add(time.Duration(maxRecentDelivered-1) * time.Millisecond)) {
 		t.Fatalf("newest persisted digest is %v, want the last record delivered", last.ReadTime)
+	}
+}
+
+// TestCursorPersistsEvenWhenTheStreamContextIsAlreadyDone is the teardown
+// case, and it is the one that matters most.
+//
+// A stream does not usually end politely. It ends because the pod was
+// deleted, the rule was removed, or the agent is shutting down -- and all
+// three cancel the stream's context before the deferred close runs. The
+// final save then went out on a context that was already Done and failed,
+// so the LAST position of every stream torn down that way was never written.
+// The next start resumed from an older point and re-read what it had
+// already sent, which is the defect this whole file exists to stop.
+//
+// Measured on apexcrawl 2026-11-11, fifteen minutes after the de-duplication
+// fix was deployed: agent_log_collector_checkpoint_errors_total{op="save"}
+// went to 1 at exactly the minute a Job pod's stream ended. The counter was
+// always there; nothing had ever had a reason to look at it.
+//
+// flushJoiner already detaches for precisely this reason. The cursor did
+// not, in the same teardown path, two lines away.
+func TestCursorPersistsEvenWhenTheStreamContextIsAlreadyDone(t *testing.T) {
+	t.Parallel()
+
+	key := checkpoint.Key{PodUID: "uid-torn-down", Container: "app"}
+	store := &mockCheckpointStore{data: make(map[checkpoint.Key]checkpoint.Position)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cur := newStreamCursor(ctx, store, key, checkpoint.Metadata{}, nil)
+	rec := deliveredLine(time.Date(2026, 11, 11, 14, 13, 0, 0, time.UTC), "the last line before the pod went away")
+	cur.markDelivered(rec)
+
+	cancel() // the pod was deleted; everything hanging off this context is Done
+	cur.close()
+
+	store.mu.Lock()
+	got, ok := store.data[key]
+	sawDone := store.sawDoneCtx
+	store.mu.Unlock()
+
+	if sawDone {
+		t.Error("the final save was handed a context that was already Done; a position write must not be cancelled by the teardown that makes it necessary")
+	}
+	if !ok || !got.LastRead.Equal(rec.ReadTime) {
+		t.Fatalf("stored LastRead = %v ok=%v, want %v", got.LastRead, ok, rec.ReadTime)
 	}
 }

@@ -12,6 +12,12 @@ import (
 
 const checkpointSaveDebounce = 1500 * time.Millisecond
 
+// checkpointSaveTimeout bounds a position write that has been detached from
+// the stream's context. It matches the store's own busy_timeout, so a save
+// waiting on a locked database gives up at the same moment the database
+// would have given up on it.
+const checkpointSaveTimeout = 5 * time.Second
+
 const (
 	// recentRetention is how far back the de-duplication set remembers a
 	// record it delivered. It must cover everything a resume can replay.
@@ -277,10 +283,24 @@ func (cur *streamCursor) flush() {
 		return
 	}
 
-	ctx := cur.ctx
-	if ctx == nil {
-		ctx = context.Background()
+	// Detached from the stream's context on purpose, and bounded instead.
+	//
+	// A stream rarely ends politely: pod deletion, rule removal and agent
+	// shutdown all cancel its context before the deferred close runs, so a
+	// save on that context fails exactly when it is most needed, and the
+	// stream's last position is never written. The next start then resumes
+	// from an older point and re-reads what it already sent -- the defect
+	// this whole file exists to stop. flushJoiner detaches for the same
+	// reason, in the same teardown path.
+	//
+	// Measured on apexcrawl 2026-11-11: checkpoint_errors{op="save"} went to
+	// 1 at the minute a Job pod's stream ended.
+	parent := cur.ctx
+	if parent == nil {
+		parent = context.Background()
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), checkpointSaveTimeout)
+	defer cancel()
 	if err := cur.store.Save(ctx, cur.key, pos, cur.meta); err != nil {
 		if cur.metrics != nil {
 			cur.metrics.incCheckpointError("save")
