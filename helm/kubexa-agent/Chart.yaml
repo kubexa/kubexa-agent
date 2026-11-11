@@ -506,9 +506,21 @@ type: application
 # outlives the agent that wrote it, so an older file opens, keeps the position
 # already in it, and resumes on the record clock until a read time is recorded.
 #
+# 0.11.7 caps what the de-duplication set writes to disk, and supersedes
+# 0.11.6 -- which is correct, but rewrites a checkpoint row holding up to 256
+# digests every debounce interval, per stream, onto a PVC. The in-memory set
+# still covers every record a RECONNECT can replay; only the persisted copy,
+# which exists for a RESTART, is capped at 32. The asymmetry is deliberate: a
+# quiet stream holds a line or two in the window and its duplicate is the
+# expensive one -- by the time the copy is sent the stream-s head has often
+# moved past Loki-s unordered-write window and the whole batch is refused. A
+# busy stream can hold hundreds, and its duplicate is the cheap one, stored
+# without complaint. Paying continuous disk writes to spare the cheap case
+# would be the worst trade available. Install 0.11.7 rather than 0.11.6.
+#
 # No install order constraint; the gateway is unaffected.
-version: 0.11.6
-appVersion: "0.11.6"
+version: 0.11.7
+appVersion: "0.11.7"
 keywords:
   - kubexa
   - observability
