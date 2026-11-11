@@ -238,3 +238,48 @@ func TestCursorRestoresItsDeduplicationSetFromTheStore(t *testing.T) {
 		t.Fatalf("restored since = %v ok=%v, want %v", since, ok, rec.ReadTime.Add(-reconnectSinceOverlap))
 	}
 }
+
+// TestCursorPersistsFarLessThanItRemembers keeps a checkpoint write small.
+//
+// The two sets answer different questions. In memory, the set must cover
+// every record a RECONNECT can replay, and a reconnect happens on any stream
+// at any time. On disk it only has to cover a RESTART -- and the asymmetry
+// that matters is which streams suffer from a missed duplicate. A quiet
+// stream's window holds a line or two and its duplicate is the expensive one:
+// by the time the copy is sent, the stream's head has often moved more than
+// Loki's unordered-write window past it, and the whole batch is refused. A
+// busy stream's window can hold hundreds, and its duplicate is the cheap one:
+// the head is seconds away, so Loki stores it. Writing hundreds of digests to
+// a PVC every debounce interval, per stream, to spare the cheap case would be
+// the worst trade available.
+func TestCursorPersistsFarLessThanItRemembers(t *testing.T) {
+	t.Parallel()
+
+	key := checkpoint.Key{PodUID: "uid-busy", Container: "app"}
+	store := &mockCheckpointStore{data: make(map[checkpoint.Key]checkpoint.Position)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cur := newStreamCursor(ctx, store, key, checkpoint.Metadata{}, nil)
+	base := time.Date(2026, 11, 11, 8, 0, 0, 0, time.UTC)
+	for i := 0; i < maxRecentDelivered; i++ {
+		cur.markDelivered(deliveredLine(base.Add(time.Duration(i)*time.Millisecond), fmt.Sprintf("line %d", i)))
+	}
+	cur.close()
+
+	store.mu.Lock()
+	got := store.data[key]
+	store.mu.Unlock()
+
+	if len(got.Recent) > maxPersistedDelivered {
+		t.Fatalf("persisted %d digests, want at most %d", len(got.Recent), maxPersistedDelivered)
+	}
+	if len(got.Recent) != maxPersistedDelivered {
+		t.Fatalf("persisted %d digests, want exactly %d: the newest are the ones a resume replays", len(got.Recent), maxPersistedDelivered)
+	}
+	// The NEWEST must be the ones kept: a resume replays from the end.
+	last := got.Recent[len(got.Recent)-1]
+	if !last.ReadTime.Equal(base.Add(time.Duration(maxRecentDelivered-1) * time.Millisecond)) {
+		t.Fatalf("newest persisted digest is %v, want the last record delivered", last.ReadTime)
+	}
+}

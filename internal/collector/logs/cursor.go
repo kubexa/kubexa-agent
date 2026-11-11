@@ -32,6 +32,25 @@ const (
 	// binds. It exists so a burst cannot make this set unbounded, and its
 	// failure mode is today's behaviour for the oldest records in the burst.
 	maxRecentDelivered = 256
+
+	// maxPersistedDelivered caps what reaches the checkpoint database, far
+	// below what the set remembers in memory.
+	//
+	// The two answer different questions. In memory the set must cover every
+	// record a RECONNECT can replay, on any stream at any time. On disk it
+	// only has to cover a RESTART -- and a checkpoint row is rewritten every
+	// debounce interval, per stream, onto a PVC, so what goes in it is paid
+	// for continuously.
+	//
+	// The asymmetry that decides the number is which streams suffer from a
+	// missed duplicate. A quiet stream holds a line or two inside the window
+	// and its duplicate is the expensive one: by the time the copy is sent,
+	// the stream's head has often moved more than Loki's unordered-write
+	// window past it and the whole batch is refused. A busy stream can hold
+	// hundreds, and its duplicate is the cheap one -- the head is seconds
+	// away, so Loki simply stores it. Writing hundreds of digests per stream
+	// per interval to spare the cheap case would be the worst trade here.
+	maxPersistedDelivered = 32
 )
 
 // streamCursor tracks where a stream resumes and what it has already sent.
@@ -241,10 +260,16 @@ func (cur *streamCursor) flush() {
 		cur.mu.Unlock()
 		return
 	}
+	// The newest entries are the ones a resume replays, so a truncated set
+	// keeps the tail.
+	recent := cur.recent
+	if len(recent) > maxPersistedDelivered {
+		recent = recent[len(recent)-maxPersistedDelivered:]
+	}
 	pos := checkpoint.Position{
 		LastProcessed: cur.lastProcessed,
 		LastRead:      cur.lastRead,
-		Recent:        append([]checkpoint.Delivered(nil), cur.recent...),
+		Recent:        append([]checkpoint.Delivered(nil), recent...),
 	}
 	cur.mu.Unlock()
 
