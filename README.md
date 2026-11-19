@@ -571,6 +571,11 @@ reproduce: managed distributions, arm64 pools, restrictive RBAC, CRD-heavy
 installs. `make test && make lint && make helm-lint` is what CI runs; see
 [Development](#development) for the full target list.
 
+A pull request also carries two terms — that the work is yours to submit, and a
+licence grant that keeps this repository's copyright undivided.
+[CONTRIBUTING.md](CONTRIBUTING.md) states them and explains why the second one
+is there.
+
 A few conventions this tree holds to, worth knowing before a first patch:
 
 - **Comments explain *why*, at the place where the decision lives.** Several of
@@ -597,3 +602,23 @@ crosses a boundary [Trust boundaries](#trust-boundaries) documents as closed.
 ## License
 
 GNU General Public License v3.0 — see [LICENSE](LICENSE).
+
+Two consequences, because both come up in a security review of the image:
+
+**For you, that grant is the whole of it.** Run the agent, read it, change it,
+build your own image and run that instead. If you distribute a modified agent,
+GPL-3.0 asks you to pass the same freedoms on. Nothing here asks for more than
+the licence does.
+
+**For Kubexa's own server components, that grant is not what applies.** GPL-3.0
+is a licence *to recipients*; it does not constrain the copyright holder, who
+needs no licence from itself. Two parts of this repository — the wire contract
+under [`proto/`](proto/) and the agent configuration schema — are consequently
+also compiled into the proprietary Kubexa server images, and their presence
+there creates no GPL-3.0 obligation for those images. Those images carry their
+own terms: [EULA](https://github.com/kubexa/helm-charts/blob/main/EULA.md).
+
+That rests on the copyright in this repository being undivided, which is why
+[CONTRIBUTING.md](CONTRIBUTING.md) asks a contributor for a licence grant
+before a patch is merged. The reasoning is written out there rather than
+assumed.
