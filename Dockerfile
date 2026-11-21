@@ -41,6 +41,10 @@ COPY proto/gen/go/ proto/gen/go/
 COPY cmd/ cmd/
 COPY internal/ internal/
 COPY pkg/ pkg/
+# Not agent code: tools/licensenotices generates the third-party notices below,
+# and tools/schemagen comes along with the directory. Both import only the
+# standard library or this module, so neither adds anything to the binary.
+COPY tools/ tools/
 
 # GOOS/GOARCH came from the hardcoded `linux`/`amd64` until 2026-10-13. That
 # is why this image published a single amd64 manifest: the agent runs in the
@@ -53,6 +57,17 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
       -X github.com/kubexa/kubexa-agent/pkg/buildinfo.BuildTime=${BUILD_TIME}" \
     -o /kubexa-agent \
     ./cmd/agent
+
+# This image is GPL-3.0, which says nothing about the MIT, BSD and Apache-2.0
+# libraries linked into it -- each of those requires its copyright notice to
+# accompany a binary redistribution, and until this step existed the image
+# carried one binary and no notices at all. ./cmd/agent and not ./...: the file
+# describes what is linked into the binary above. `go run` executes on
+# BUILDPLATFORM, so no GOOS/GOARCH here.
+#
+# It exits non-zero when a module ships no licence file, so a dependency that
+# cannot be attributed breaks the build rather than shortening the file.
+RUN go run ./tools/licensenotices -o /THIRD-PARTY-NOTICES.md ./cmd/agent
 
 # The built binary's architecture must match the architecture this image's
 # manifest will claim. No runtime check can see a mismatch: `docker image
@@ -83,6 +98,7 @@ RUN set -eu; \
 FROM gcr.io/distroless/static:nonroot
 
 COPY --from=builder /kubexa-agent /kubexa-agent
+COPY --from=builder /THIRD-PARTY-NOTICES.md /THIRD-PARTY-NOTICES.md
 
 USER nonroot:nonroot
 

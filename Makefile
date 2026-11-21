@@ -145,3 +145,6 @@ clean: ## clean build artifacts
 help: ## show help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+.PHONY: notices
+notices: ## regenerate THIRD-PARTY-NOTICES.md locally (the image generates its own)
+	go run ./tools/licensenotices -o THIRD-PARTY-NOTICES.md ./cmd/agent
