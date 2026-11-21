@@ -535,7 +535,28 @@ type: application
 # after those versions were deployed. The counter was always there.
 #
 # No install order constraint; the gateway is unaffected.
-version: 0.11.8
+# 0.11.9 corrects a comment and changes nothing else: version only, appVersion
+# stays 0.11.8, so the image this chart deploys does not move and no rendered
+# object differs.
+#
+# The clusterrole's readAll block ended with "Read-only; the agent never
+# writes". That has been false since rbac.write landed -- the same file grants
+# patch, update, delete and create 160 lines further down -- and it sat exactly
+# where someone auditing the grant would read it as the chart's position on
+# mutation. It now says what readAll itself does and points at the block that
+# does the writing.
+#
+# The version number exists because any push under helm/ publishes this chart:
+# the alternative is republishing 0.11.8 with different contents.
+#
+# One consequence worth knowing before upgrading: the agent pods DO restart.
+# The config ConfigMap carries the chart label, so its checksum/config
+# annotation moves with the version -- measured by diffing the two renders,
+# where that annotation and the labels are the only changes besides the
+# comment. Nothing is lost by the restart; a torn-down stream writes its
+# final checkpoint since 0.11.8, which is the release this one does not move
+# the image off.
+version: 0.11.9
 appVersion: "0.11.8"
 keywords:
   - kubexa
