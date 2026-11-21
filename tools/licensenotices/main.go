@@ -120,7 +120,9 @@ func document(c collected) string {
 	b.WriteString("into this image's binaries, and it reproduces each one's licence in\n")
 	b.WriteString("full. It is not a summary: MIT and BSD both require the copyright line\n")
 	b.WriteString("itself to travel with the binary.\n\n")
-	b.WriteString(fmt.Sprintf("%d third-party modules are listed.\n\n", len(c.thirdParty)))
+	// Fprintf, not WriteString(Sprintf(...)): staticcheck QF1012 is an error
+	// in the agent repo's golangci-lint config and failed that build.
+	fmt.Fprintf(&b, "%d third-party modules are listed.\n\n", len(c.thirdParty))
 
 	if len(c.own) > 0 {
 		b.WriteString("## Kubexa's own modules\n\n")
