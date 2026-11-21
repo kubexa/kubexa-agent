@@ -601,7 +601,10 @@ crosses a boundary [Trust boundaries](#trust-boundaries) documents as closed.
 
 ## License
 
-GNU General Public License v3.0 — see [LICENSE](LICENSE).
+Copyright (C) 2026 Eyüp Saral. GNU General Public License v3.0 — see
+[LICENSE](LICENSE). "Kubexa" names the project, not a separate legal entity:
+the copyright is held by the person named here, and the entrypoints carry the
+same notice.
 
 Two consequences, because both come up in a security review of the image:
 
@@ -618,7 +621,8 @@ also compiled into the proprietary Kubexa server images, and their presence
 there creates no GPL-3.0 obligation for those images. Those images carry their
 own terms: [EULA](https://github.com/kubexa/helm-charts/blob/main/EULA.md).
 
-That rests on the copyright in this repository being undivided, which is why
+That rests on the copyright in this repository being undivided and held by the
+one person named above, which is why
 [CONTRIBUTING.md](CONTRIBUTING.md) asks a contributor for a licence grant
 before a patch is merged. The reasoning is written out there rather than
 assumed.
