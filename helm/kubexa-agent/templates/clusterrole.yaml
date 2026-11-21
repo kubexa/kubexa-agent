@@ -10,7 +10,14 @@ rules:
   # Companion to a query rule with `resources: ["*"]`: the agent's own policy
   # may permit every resource, but the API server still refuses each type the
   # enumerated rules below do not name -- RBAC_DENIED with nothing in the
-  # agent's config to explain it. Read-only; the agent never writes.
+  # agent's config to explain it.
+  #
+  # The three verbs here are read-only, and that is the whole of what readAll
+  # widens -- it says nothing about whether the agent writes. It does, when
+  # rbac.write is on: that block below grants patch/update/delete/create,
+  # enumerated resource by resource and never as a wildcard (the read side is
+  # the only one that gets one, and TestClusterRoleWriteNeverWildcards exists
+  # to keep it that way).
   - apiGroups: ["*"]
     resources: ["*"]
     verbs: ["get", "list", "watch"]
